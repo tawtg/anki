@@ -6,7 +6,7 @@ import aqt
 from anki.consts import *
 from anki.lang import _
 from aqt.qt import *
-from aqt.utils import showInfo, showWarning
+from aqt.utils import TR, showInfo, showWarning, tr
 
 RADIO_NEW = 1
 RADIO_REV = 2
@@ -22,26 +22,27 @@ TYPE_ALL = 3
 
 
 class CustomStudy(QDialog):
-    def __init__(self, mw):
+    def __init__(self, mw) -> None:
         QDialog.__init__(self, mw)
         self.mw = mw
         self.deck = self.mw.col.decks.current()
-        self.conf = self.mw.col.decks.getConf(self.deck["conf"])
+        self.conf = self.mw.col.decks.get_config(self.deck["conf"])
         self.form = f = aqt.forms.customstudy.Ui_Dialog()
+        self.created_custom_study = False
         f.setupUi(self)
         self.setWindowModality(Qt.WindowModal)
         self.setupSignals()
-        f.radio1.click()
+        f.radioNew.click()
         self.exec_()
 
     def setupSignals(self):
         f = self.form
-        f.radio1.clicked.connect(lambda: self.onRadioChange(1))
-        f.radio2.clicked.connect(lambda: self.onRadioChange(2))
-        f.radio3.clicked.connect(lambda: self.onRadioChange(3))
-        f.radio4.clicked.connect(lambda: self.onRadioChange(4))
-        f.radio5.clicked.connect(lambda: self.onRadioChange(5))
-        f.radio6.clicked.connect(lambda: self.onRadioChange(6))
+        qconnect(f.radioNew.clicked, lambda: self.onRadioChange(RADIO_NEW))
+        qconnect(f.radioRev.clicked, lambda: self.onRadioChange(RADIO_REV))
+        qconnect(f.radioForgot.clicked, lambda: self.onRadioChange(RADIO_FORGOT))
+        qconnect(f.radioAhead.clicked, lambda: self.onRadioChange(RADIO_AHEAD))
+        qconnect(f.radioPreview.clicked, lambda: self.onRadioChange(RADIO_PREVIEW))
+        qconnect(f.radioCram.clicked, lambda: self.onRadioChange(RADIO_CRAM))
 
     def onRadioChange(self, idx):
         f = self.form
@@ -108,6 +109,10 @@ class CustomStudy(QDialog):
         f.title.setVisible(not not tit)
         f.spin.setMinimum(smin)
         f.spin.setMaximum(smax)
+        if smax > 0:
+            f.spin.setEnabled(True)
+        else:
+            f.spin.setEnabled(False)
         f.spin.setValue(sval)
         f.preSpin.setText(pre)
         f.postSpin.setText(post)
@@ -136,16 +141,16 @@ class CustomStudy(QDialog):
         cur = self.mw.col.decks.byName(_("Custom Study Session"))
         if cur:
             if not cur["dyn"]:
-                showInfo("Please rename the existing Custom Study deck first.")
+                showInfo(tr(TR.CUSTOM_STUDY_MUST_RENAME_DECK))
                 return QDialog.accept(self)
             else:
                 # safe to empty
-                self.mw.col.sched.emptyDyn(cur["id"])
+                self.mw.col.sched.empty_filtered_deck(cur["id"])
                 # reuse; don't delete as it may have children
                 dyn = cur
                 self.mw.col.decks.select(cur["id"])
         else:
-            did = self.mw.col.decks.newDyn(_("Custom Study Session"))
+            did = self.mw.col.decks.new_filtered(_("Custom Study Session"))
             dyn = self.mw.col.decks.get(did)
         # and then set various options
         if i == RADIO_FORGOT:
@@ -178,14 +183,22 @@ class CustomStudy(QDialog):
             dyn["terms"][0] = [(terms + tags).strip(), spin, ord]
         # add deck limit
         dyn["terms"][0][0] = 'deck:"%s" %s ' % (self.deck["name"], dyn["terms"][0][0])
+        self.mw.col.decks.save(dyn)
         # generate cards
-        if not self.mw.col.sched.rebuildDyn():
+        self.created_custom_study = True
+        if not self.mw.col.sched.rebuild_filtered_deck(dyn["id"]):
             return showWarning(_("No cards matched the criteria you provided."))
         self.mw.moveToState("overview")
         QDialog.accept(self)
 
+    def reject(self) -> None:
+        if self.created_custom_study:
+            # set the original deck back to current
+            self.mw.col.decks.select(self.deck["id"])
+            # fixme: clean up the empty custom study deck
+        QDialog.reject(self)
+
     def _getTags(self):
         from aqt.taglimit import TagLimit
 
-        t = TagLimit(self.mw, self)
-        return t.tags
+        return TagLimit(self.mw, self).tags

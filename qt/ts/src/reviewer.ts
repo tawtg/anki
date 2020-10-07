@@ -21,7 +21,7 @@ function _updateQA(html, fadeTime, onupdate, onshown) {
     // if a request to update q/a comes in before the previous content
     // has been loaded, wait a while and try again
     if (_updatingQA) {
-        setTimeout(function() {
+        setTimeout(function () {
             _updateQA(html, fadeTime, onupdate, onshown);
         }, 50);
         return;
@@ -34,24 +34,26 @@ function _updateQA(html, fadeTime, onupdate, onshown) {
 
     // fade out current text
     var qa = $("#qa");
-    qa.fadeTo(fadeTime, 0, function() {
+    qa.fadeTo(fadeTime, 0, function () {
         // update text
         try {
             qa.html(html);
         } catch (err) {
-            qa.text("Invalid HTML on card: " + err);
+            qa.html(
+                (
+                    `Invalid HTML on card: ${String(err).substring(0, 2000)}\n` +
+                    String(err.stack).substring(0, 2000)
+                ).replace(/\n/g, "<br />")
+            );
         }
         _runHook(onUpdateHook);
-
-        // don't allow drags of images, which cause them to be deleted
-        $("img").attr("draggable", "false");
 
         // render mathjax
         MathJax.Hub.Queue(["Typeset", MathJax.Hub]);
 
         // and reveal when processing is done
-        MathJax.Hub.Queue(function() {
-            qa.fadeTo(fadeTime, 1, function() {
+        MathJax.Hub.Queue(function () {
+            qa.fadeTo(fadeTime, 1, function () {
                 _runHook(onShownHook);
                 _updatingQA = false;
             });
@@ -63,13 +65,13 @@ function _showQuestion(q, bodyclass) {
     _updateQA(
         q,
         qFade,
-        function() {
+        function () {
             // return to top of window
             window.scrollTo(0, 0);
 
             document.body.className = bodyclass;
         },
-        function() {
+        function () {
             // focus typing area if visible
             typeans = document.getElementById("typeans");
             if (typeans) {
@@ -83,7 +85,7 @@ function _showAnswer(a, bodyclass) {
     _updateQA(
         a,
         aFade,
-        function() {
+        function () {
             if (bodyclass) {
                 //  when previewing
                 document.body.className = bodyclass;
@@ -95,7 +97,7 @@ function _showAnswer(a, bodyclass) {
                 e[0].scrollIntoView();
             }
         },
-        function() {}
+        function () {}
     );
 }
 
@@ -128,5 +130,14 @@ function _drawMark(mark) {
 function _typeAnsPress() {
     if ((window.event as KeyboardEvent).keyCode === 13) {
         pycmd("ans");
+    }
+}
+
+function _emulateMobile(enabled: boolean) {
+    const list = document.documentElement.classList;
+    if (enabled) {
+        list.add("mobile");
+    } else {
+        list.remove("mobile");
     }
 }

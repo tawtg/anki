@@ -1,16 +1,23 @@
-SHELL := bash
-.SHELLFLAGS := -eu -o pipefail -c
-.DELETE_ON_ERROR:
+SHELL := /bin/bash
+
+ifndef SHELLFLAGS
+	SHELLFLAGS :=
+endif
+
+.SHELLFLAGS := -eu -o pipefail ${SHELLFLAGS} -c
 MAKEFLAGS += --warn-undefined-variables
 MAKEFLAGS += --no-builtin-rules
 
+FIND := $(if $(wildcard /bin/find),/bin/find,/usr/bin/find)
+.DELETE_ON_ERROR:
+
 $(shell mkdir -p .build)
 
-.PHONY: all check fix clean
+.PHONY: all check fix clean develop
 
 all: check
 
-check: .build/check
+check: .build/vernum .build/check
 
 fix:
 	cargo fmt
@@ -18,9 +25,12 @@ fix:
 clean:
 	rm -rf .build target
 
-PROTO_SOURCE := $(wildcard ../proto/*.proto)
-RS_SOURCE := $(wildcard src/*)
-ALL_SOURCE := $(RS_SOURCE) $(PROTO_SOURCE)
+develop: .build/vernum ftl/repo
+
+ftl/repo:
+	(cd ftl && ./scripts/fetch-latest-translations)
+
+ALL_SOURCE := $(shell "${FIND}" src -type f | egrep -v "i18n/autogen|i18n/ftl|_proto.rs") $(wildcard ftl/*.ftl)
 
 # nightly currently required for ignoring files in rustfmt.toml
 RUST_TOOLCHAIN := $(shell cat rust-toolchain)
@@ -31,8 +41,14 @@ RUST_TOOLCHAIN := $(shell cat rust-toolchain)
 	rustup component add clippy-preview --toolchain $(RUST_TOOLCHAIN)
 	@touch $@
 
-.build/check: .build/rs-tools $(ALL_SOURCE)
+.build/check: ftl/repo .build/rs-tools $(ALL_SOURCE)
 	cargo test --lib -- --nocapture
 	cargo fmt -- --check
 	cargo clippy -- -D warnings
+	@touch $@
+
+VER := $(shell cat ../meta/version)
+.build/vernum: ../meta/version
+	sed -i.bak 's/.*automatically updated.*/version = "$(VER)"  # automatically updated/' Cargo.toml
+	rm Cargo.toml.bak
 	@touch $@

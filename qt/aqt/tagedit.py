@@ -1,12 +1,16 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
 import re
 
+from aqt import gui_hooks
 from aqt.qt import *
 
 
 class TagEdit(QLineEdit):
+    completer: Union[QCompleter, TagCompleter]
 
     lostFocus = pyqtSignal()
 
@@ -28,9 +32,9 @@ class TagEdit(QLineEdit):
         "Set the current col, updating list of available tags."
         self.col = col
         if self.type == 0:
-            l = sorted(self.col.tags.all())
+            l = self.col.tags.all()
         else:
-            l = sorted(self.col.decks.allNames())
+            l = (d.name for d in self.col.decks.all_names_and_ids())
         self.model.setStringList(l)
 
     def focusInEvent(self, evt):
@@ -76,14 +80,15 @@ class TagEdit(QLineEdit):
             Qt.Key_Delete,
         ):
             self.showCompleter()
+        gui_hooks.tag_editor_did_process_key(self, evt)
 
     def showCompleter(self):
         self.completer.setCompletionPrefix(self.text())
         self.completer.complete()
 
-    def focusOutEvent(self, evt):
+    def focusOutEvent(self, evt) -> None:
         QLineEdit.focusOutEvent(self, evt)
-        self.lostFocus.emit()
+        self.lostFocus.emit()  # type: ignore
         self.completer.popup().hide()
 
     def hideCompleter(self):

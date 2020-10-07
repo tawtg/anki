@@ -25,6 +25,8 @@
 #
 # ------------------------------------------------------------------------------
 
+# pylint: disable=raise-missing-from
+
 import inspect
 import json
 import os
@@ -66,12 +68,15 @@ class MPVTimeoutError(MPVError):
 
 if isWin:
     # pylint: disable=import-error
-    import win32file, win32pipe, pywintypes, winerror  # pytype: disable=import-error
+    import pywintypes
+    import win32file  # pytype: disable=import-error
+    import win32pipe
+    import winerror
 
 
 class MPVBase:
     """Base class for communication with the mpv media player via unix socket
-       based JSON IPC.
+    based JSON IPC.
     """
 
     executable = find_executable("mpv")
@@ -84,6 +89,8 @@ class MPVBase:
         "--ontop",
         "--audio-display=no",
         "--keep-open=no",
+        "--reset-on-next-file=pause",
+        "--autoload-files=no",
     ]
 
     def __init__(self, window_id=None, debug=False):
@@ -109,22 +116,19 @@ class MPVBase:
     # Process
     #
     def _prepare_process(self):
-        """Prepare the argument list for the mpv process.
-        """
+        """Prepare the argument list for the mpv process."""
         self.argv = [self.executable]
         self.argv += self.default_argv
-        self.argv += ["--input-ipc-server", self._sock_filename]
+        self.argv += ["--input-ipc-server=" + self._sock_filename]
         if self.window_id is not None:
-            self.argv += ["--wid", str(self.window_id)]
+            self.argv += ["--wid=" + str(self.window_id)]
 
     def _start_process(self):
-        """Start the mpv process.
-        """
+        """Start the mpv process."""
         self._proc = subprocess.Popen(self.argv, env=self.popenEnv)
 
     def _stop_process(self):
-        """Stop the mpv process.
-        """
+        """Stop the mpv process."""
         if hasattr(self, "_proc"):
             try:
                 self._proc.terminate()
@@ -137,7 +141,7 @@ class MPVBase:
     #
     def _prepare_socket(self):
         """Create a random socket filename which we pass to mpv with the
-           --input-unix-socket option.
+        --input-unix-socket option.
         """
         if isWin:
             self._sock_filename = "ankimpv"
@@ -148,7 +152,7 @@ class MPVBase:
 
     def _start_socket(self):
         """Wait for the mpv process to create the unix socket and finish
-           startup.
+        startup.
         """
         start = time.time()
         while self.is_running() and time.time() < start + 10:
@@ -190,8 +194,7 @@ class MPVBase:
             raise MPVProcessError("unable to start process")
 
     def _stop_socket(self):
-        """Clean up the socket.
-        """
+        """Clean up the socket."""
         if hasattr(self, "_sock"):
             self._sock.close()
         if hasattr(self, "_sock_filename"):
@@ -201,23 +204,20 @@ class MPVBase:
                 pass
 
     def _prepare_thread(self):
-        """Set up the queues for the communication threads.
-        """
+        """Set up the queues for the communication threads."""
         self._request_queue = Queue(1)
         self._response_queues = {}
         self._event_queue = Queue()
         self._stop_event = threading.Event()
 
     def _start_thread(self):
-        """Start up the communication threads.
-        """
+        """Start up the communication threads."""
         self._thread = threading.Thread(target=self._reader)
         self._thread.daemon = True
         self._thread.start()
 
     def _stop_thread(self):
-        """Stop the communication threads.
-        """
+        """Stop the communication threads."""
         if hasattr(self, "_stop_event"):
             self._stop_event.set()
         if hasattr(self, "_thread"):
@@ -225,7 +225,7 @@ class MPVBase:
 
     def _reader(self):
         """Read the incoming json messages from the unix socket that is
-           connected to the mpv process. Pass them on to the message handler.
+        connected to the mpv process. Pass them on to the message handler.
         """
         buf = b""
         while not self._stop_event.is_set():
@@ -244,10 +244,13 @@ class MPVBase:
             else:
                 r, w, e = select.select([self._sock], [], [], 1)
                 if r:
-                    b = self._sock.recv(1024)
-                    if not b:
-                        break
-                    buf += b
+                    try:
+                        b = self._sock.recv(1024)
+                        if not b:
+                            break
+                        buf += b
+                    except ConnectionResetError:
+                        return
 
             newline = buf.find(b"\n")
             while newline >= 0:
@@ -266,22 +269,20 @@ class MPVBase:
     # Message handling
     #
     def _compose_message(self, message):
-        """Return a json representation from a message dictionary.
-        """
+        """Return a json representation from a message dictionary."""
         # XXX may be strict is too strict ;-)
         data = json.dumps(message)
         return data.encode("utf8", "strict") + b"\n"
 
     def _parse_message(self, data):
-        """Return a message dictionary from a json representation.
-        """
+        """Return a message dictionary from a json representation."""
         # XXX may be strict is too strict ;-)
         data = data.decode("utf8", "strict")
         return json.loads(data)
 
     def _handle_message(self, message):
         """Handle different types of incoming messages, i.e. responses to
-           commands or asynchronous events.
+        commands or asynchronous events.
         """
         if "error" in message:
             # This message is a reply to a request.
@@ -301,8 +302,8 @@ class MPVBase:
 
     def _send_message(self, message, timeout=None):
         """Send a message/command to the mpv process, message must be a
-           dictionary of the form {"command": ["arg1", "arg2", ...]}. Responses
-           from the mpv process must be collected using _get_response().
+        dictionary of the form {"command": ["arg1", "arg2", ...]}. Responses
+        from the mpv process must be collected using _get_response().
         """
         data = self._compose_message(message)
 
@@ -338,8 +339,8 @@ class MPVBase:
 
     def _get_response(self, timeout=None):
         """Collect the response message to a previous request. If there was an
-           error a MPVCommandError exception is raised, otherwise the command
-           specific data is returned.
+        error a MPVCommandError exception is raised, otherwise the command
+        specific data is returned.
         """
         try:
             message = self._response_queues[self._thread_id()].get(
@@ -355,8 +356,8 @@ class MPVBase:
 
     def _get_event(self, timeout=None):
         """Collect a single event message that has been received out-of-band
-           from the mpv process. If a timeout is specified and there have not
-           been any events during that period, None is returned.
+        from the mpv process. If a timeout is specified and there have not
+        been any events during that period, None is returned.
         """
         try:
             return self._event_queue.get(block=timeout is not None, timeout=timeout)
@@ -364,15 +365,14 @@ class MPVBase:
             return None
 
     def _send_request(self, message, timeout=None, _retry=1):
-        """Send a command to the mpv process and collect the result.
-        """
+        """Send a command to the mpv process and collect the result."""
         self.ensure_running()
         try:
             self._send_message(message, timeout)
             return self._get_response(timeout)
         except MPVCommandError as e:
             raise MPVCommandError("%r: %s" % (message["command"], e))
-        except MPVTimeoutError as e:
+        except Exception as e:
             if _retry:
                 print("mpv timed out, restarting")
                 self._stop_process()
@@ -380,12 +380,16 @@ class MPVBase:
             else:
                 raise
 
+    def _register_callbacks(self):
+        """Will be called after mpv restart to reinitialize callbacks
+        defined in MPV subclass
+        """
+
     #
     # Public API
     #
     def is_running(self):
-        """Return True if the mpv process is still active.
-        """
+        """Return True if the mpv process is still active."""
         return self._proc.poll() is None
 
     def ensure_running(self):
@@ -399,10 +403,10 @@ class MPVBase:
             self._start_socket()
             self._prepare_thread()
             self._start_thread()
+            self._register_callbacks()
 
     def close(self):
-        """Shutdown the mpv process and our communication setup.
-        """
+        """Shutdown the mpv process and our communication setup."""
         if self.is_running():
             self._send_request({"command": ["quit"]}, timeout=1)
             self._stop_process()
@@ -413,27 +417,33 @@ class MPVBase:
 
 class MPV(MPVBase):
     """Class for communication with the mpv media player via unix socket
-       based JSON IPC. It adds a few usable methods and a callback API.
+    based JSON IPC. It adds a few usable methods and a callback API.
 
-       To automatically register methods as event callbacks, subclass this
-       class and define specially named methods as follows:
+    To automatically register methods as event callbacks, subclass this
+    class and define specially named methods as follows:
 
-           def on_file_loaded(self):
-               # This is called for every 'file-loaded' event.
-               ...
+        def on_file_loaded(self):
+            # This is called for every 'file-loaded' event.
+            ...
 
-           def on_property_time_pos(self, position):
-               # This is called whenever the 'time-pos' property is updated.
-               ...
+        def on_property_time_pos(self, position):
+            # This is called whenever the 'time-pos' property is updated.
+            ...
 
-       Please note that callbacks are executed inside a separate thread. The
-       MPV class itself is completely thread-safe. Requests from different
-       threads to the same MPV instance are synchronized.
+    Please note that callbacks are executed inside a separate thread. The
+    MPV class itself is completely thread-safe. Requests from different
+    threads to the same MPV instance are synchronized.
     """
 
     def __init__(self, *args, **kwargs):
+        self._callbacks_queue = Queue()
+        self._callbacks_initialized = False
+
         super().__init__(*args, **kwargs)
 
+        self._register_callbacks()
+
+    def _register_callbacks(self):
         self._callbacks = {}
         self._property_serials = {}
         self._new_serial = iter(range(sys.maxsize))
@@ -442,6 +452,10 @@ class MPV(MPVBase):
         # events and property-changes.
         for method_name, method in inspect.getmembers(self):
             if not inspect.ismethod(method):
+                continue
+
+            # Bypass MPVError: no such event 'init'
+            if method_name == "on_init":
                 continue
 
             if method_name.startswith("on_property_"):
@@ -454,6 +468,14 @@ class MPV(MPVBase):
                 name = name.replace("_", "-")
                 self.register_callback(name, method)
 
+        self._callbacks_initialized = True
+        while True:
+            try:
+                message = self._callbacks_queue.get_nowait()
+            except Empty:
+                break
+            self._handle_event(message)
+
         # Simulate an init event when the process and all callbacks have been
         # completely set up.
         if hasattr(self, "on_init"):
@@ -464,27 +486,19 @@ class MPV(MPVBase):
     # Socket communication
     #
     def _start_thread(self):
-        """Start up the communication threads.
-        """
+        """Start up the communication threads."""
         super()._start_thread()
-        self._event_thread = threading.Thread(target=self._event_reader)
-        self._event_thread.daemon = True
-        self._event_thread.start()
-
-    def _stop_thread(self):
-        """Stop the communication threads.
-        """
-        super()._stop_thread()
-        if hasattr(self, "_event_thread"):
-            self._event_thread.join()
+        if not hasattr(self, "_event_thread"):
+            self._event_thread = threading.Thread(target=self._event_reader)
+            self._event_thread.daemon = True
+            self._event_thread.start()
 
     #
     # Event/callback API
     #
     def _event_reader(self):
-        """Collect incoming event messages and call the event handler.
-        """
-        while not self._stop_event.is_set():
+        """Collect incoming event messages and call the event handler."""
+        while True:
             message = self._get_event(timeout=1)
             if message is None:
                 continue
@@ -492,8 +506,11 @@ class MPV(MPVBase):
             self._handle_event(message)
 
     def _handle_event(self, message):
-        """Lookup and call the callbacks for a particular event message.
-        """
+        """Lookup and call the callbacks for a particular event message."""
+        if not self._callbacks_initialized:
+            self._callbacks_queue.put(message)
+            return
+
         if message["event"] == "property-change":
             name = "property-" + message["name"]
         else:
@@ -506,8 +523,7 @@ class MPV(MPVBase):
                 callback()
 
     def register_callback(self, name, callback):
-        """Register a function `callback` for the event `name`.
-        """
+        """Register a function `callback` for the event `name`."""
         try:
             self.command("enable_event", name)
         except MPVCommandError:
@@ -517,7 +533,7 @@ class MPV(MPVBase):
 
     def unregister_callback(self, name, callback):
         """Unregister a previously registered function `callback` for the event
-           `name`.
+        `name`.
         """
         try:
             callbacks = self._callbacks[name]
@@ -531,7 +547,7 @@ class MPV(MPVBase):
 
     def register_property_callback(self, name, callback):
         """Register a function `callback` for the property-change event on
-           property `name`.
+        property `name`.
         """
         # Property changes are normally not sent over the connection unless they
         # are requested using the 'observe_property' command.
@@ -553,7 +569,7 @@ class MPV(MPVBase):
 
     def unregister_property_callback(self, name, callback):
         """Unregister a previously registered function `callback` for the
-           property-change event on property `name`.
+        property-change event on property `name`.
         """
         try:
             callbacks = self._callbacks["property-" + name]
@@ -574,18 +590,15 @@ class MPV(MPVBase):
     # Public API
     #
     def command(self, *args, timeout=1):
-        """Execute a single command on the mpv process and return the result.
-        """
+        """Execute a single command on the mpv process and return the result."""
         return self._send_request({"command": list(args)}, timeout=timeout)
 
     def get_property(self, name):
-        """Return the value of property `name`.
-        """
+        """Return the value of property `name`."""
         return self.command("get_property", name)
 
     def set_property(self, name, value):
-        """Set the value of property `name`.
-        """
+        """Set the value of property `name`."""
         return self.command("set_property", name, value)
 
 

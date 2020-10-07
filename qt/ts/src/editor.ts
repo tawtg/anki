@@ -1,11 +1,8 @@
 /* Copyright: Ankitects Pty Ltd and contributors
  * License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html */
 
-import DragOverEvent = JQuery.DragOverEvent;
-
 let currentField = null;
 let changeTimer = null;
-let dropTarget = null;
 let currentNoteId = null;
 
 declare interface String {
@@ -13,9 +10,9 @@ declare interface String {
 }
 
 /* kept for compatibility with add-ons */
-String.prototype.format = function() {
+String.prototype.format = function () {
     const args = arguments;
-    return this.replace(/\{\d+\}/g, function(m) {
+    return this.replace(/\{\d+\}/g, function (m) {
         return args[m.match(/\d+/)];
     });
 };
@@ -41,10 +38,14 @@ function saveNow(keepFocus) {
 
 function triggerKeyTimer() {
     clearChangeTimer();
-    changeTimer = setTimeout(function() {
+    changeTimer = setTimeout(function () {
         updateButtonState();
         saveField("key");
     }, 600);
+}
+
+interface Selection {
+    modify(s: string, t: string, u: string): void;
 }
 
 function onKey(evt: KeyboardEvent) {
@@ -59,6 +60,29 @@ function onKey(evt: KeyboardEvent) {
         focusPrevious();
         return;
     }
+
+    // fix Ctrl+right/left handling in RTL fields
+    if (currentField.dir === "rtl") {
+        const selection = window.getSelection();
+        let granularity = "character";
+        let alter = "move";
+        if (evt.ctrlKey) {
+            granularity = "word";
+        }
+        if (evt.shiftKey) {
+            alter = "extend";
+        }
+        if (evt.which === 39) {
+            selection.modify(alter, "right", granularity);
+            evt.preventDefault();
+            return;
+        } else if (evt.which === 37) {
+            selection.modify(alter, "left", granularity);
+            evt.preventDefault();
+            return;
+        }
+    }
+
     triggerKeyTimer();
 }
 
@@ -192,20 +216,19 @@ function focusPrevious() {
     }
 }
 
-function onDragOver(elem) {
-    const e = (window.event as unknown) as DragOverEvent;
-    //e.dataTransfer.dropEffect = "copy";
-    e.preventDefault();
-    // if we focus the target element immediately, the drag&drop turns into a
-    // copy, so note it down for later instead
-    dropTarget = elem;
-}
-
-function makeDropTargetCurrent() {
-    dropTarget.focus();
-    // the focus event may not fire if the window is not active, so make sure
-    // the current field is set
-    currentField = dropTarget;
+function focusIfField(x, y) {
+    const elements = document.elementsFromPoint(x, y);
+    for (let i = 0; i < elements.length; i++) {
+        let elem = elements[i] as HTMLElement;
+        if (elem.classList.contains("field")) {
+            elem.focus();
+            // the focus event may not fire if the window is not active, so make sure
+            // the current field is set
+            currentField = elem;
+            return true;
+        }
+    }
+    return false;
 }
 
 function onPaste(elem) {
@@ -274,31 +297,23 @@ function enableButtons() {
 
 // disable the buttons if a field is not currently focused
 function maybeDisableButtons() {
-    if (
-        !document.activeElement ||
-        document.activeElement.className !== "field"
-    ) {
+    if (!document.activeElement || document.activeElement.className !== "field") {
         disableButtons();
     } else {
         enableButtons();
     }
 }
 
-/* old method, kept around for the benefit of add-ons that were using it */
 function wrap(front, back) {
     wrapInternal(front, back, false);
 }
 
-/* new method */
-function wrap2(front, back) {
+/* currently unused */
+function wrapIntoText(front, back) {
     wrapInternal(front, back, true);
 }
 
 function wrapInternal(front, back, plainText) {
-    if (currentField.dir === "rtl") {
-        front = "&#8235;" + front + "&#8236;";
-        back = "&#8235;" + back + "&#8236;";
-    }
     const s = window.getSelection();
     let r = s.getRangeAt(0);
     const content = r.cloneContents();
@@ -334,26 +349,42 @@ function setFields(fields) {
         if (!f) {
             f = "<br>";
         }
-        txt += `<tr><td class=fname>${n}</td></tr><tr><td width=100%>`;
-        txt += `<div id=f${i} onkeydown='onKey(window.event);' oninput='onInput()' onmouseup='onKey(window.event);'`;
-        txt +=
-            " onfocus='onFocus(this);' onblur='onBlur();' class='field clearfix' ";
-        txt += "ondragover='onDragOver(this);' onpaste='onPaste(this);' ";
-        txt += "oncopy='onCutOrCopy(this);' oncut='onCutOrCopy(this);' ";
-        txt += `contentEditable=true class=field>${f}</div>`;
-        txt += "</td></tr>";
+        txt += `
+        <tr>
+            <td class=fname id="name${i}">${n}</td>
+        </tr>
+        <tr>
+            <td width=100%>
+                <div id=f${i}
+                     onkeydown='onKey(window.event);'
+                     oninput='onInput();'
+                     onmouseup='onKey(window.event);'
+                     onfocus='onFocus(this);'
+                     onblur='onBlur();'
+                     class='field clearfix'
+                     onpaste='onPaste(this);'
+                     oncopy='onCutOrCopy(this);'
+                     oncut='onCutOrCopy(this);'
+                     contentEditable=true
+                     class=field
+                >${f}</div>
+            </td>
+        </tr>`;
     }
-    $("#fields").html(
-        "<table cellpadding=0 width=100% style='table-layout: fixed;'>" +
-            txt +
-            "</table>"
-    );
+    $("#fields").html(`
+    <table cellpadding=0 width=100% style='table-layout: fixed;'>
+${txt}
+    </table>`);
     maybeDisableButtons();
 }
 
 function setBackgrounds(cols) {
     for (let i = 0; i < cols.length; i++) {
-        $("#f" + i).css("background", cols[i]);
+        if (cols[i] == "dupe") {
+            $("#f" + i).addClass("dupe");
+        } else {
+            $("#f" + i).removeClass("dupe");
+        }
     }
 }
 
@@ -377,10 +408,10 @@ function hideDupes() {
     $("#dupes").hide();
 }
 
-let pasteHTML = function(html, internal, extendedMode) {
-    html = filterHTML(html, internal, extendedMode);
+/// If the field has only an empty br, remove it first.
+let insertHtmlRemovingInitialBR = function (html: string) {
     if (html !== "") {
-        // remove trailing <br> in empty field
+        // remove <br> in empty field
         if (currentField && currentField.innerHTML === "<br>") {
             currentField.innerHTML = "";
         }
@@ -388,7 +419,12 @@ let pasteHTML = function(html, internal, extendedMode) {
     }
 };
 
-let filterHTML = function(html, internal, extendedMode) {
+let pasteHTML = function (html, internal, extendedMode) {
+    html = filterHTML(html, internal, extendedMode);
+    insertHtmlRemovingInitialBR(html);
+};
+
+let filterHTML = function (html, internal, extendedMode) {
     // wrap it in <top> as we aren't allowed to change top level elements
     const top = $.parseHTML("<ankitop>" + html + "</ankitop>")[0] as Element;
     if (internal) {
@@ -397,7 +433,7 @@ let filterHTML = function(html, internal, extendedMode) {
         filterNode(top, extendedMode);
     }
     let outHtml = top.innerHTML;
-    if (!extendedMode) {
+    if (!extendedMode && !internal) {
         // collapse whitespace
         outHtml = outHtml.replace(/[\n\t ]+/g, " ");
     }
@@ -416,25 +452,27 @@ for (const tag of TAGS_WITHOUT_ATTRS) {
 }
 
 TAGS_WITHOUT_ATTRS = [
+    "B",
+    "BLOCKQUOTE",
+    "CODE",
+    "DD",
+    "DL",
+    "DT",
+    "EM",
     "H1",
     "H2",
     "H3",
-    "LI",
-    "UL",
-    "OL",
-    "BLOCKQUOTE",
-    "CODE",
-    "PRE",
-    "TABLE",
-    "DD",
-    "DT",
-    "DL",
-    "B",
-    "U",
     "I",
-    "RUBY",
-    "RT",
+    "LI",
+    "OL",
+    "PRE",
     "RP",
+    "RT",
+    "RUBY",
+    "STRONG",
+    "TABLE",
+    "U",
+    "UL",
 ];
 for (const tag of TAGS_WITHOUT_ATTRS) {
     allowedTagsExtended[tag] = { attrs: [] };
@@ -456,7 +494,11 @@ const allowedStyling = {
     "text-decoration-line": true,
 };
 
-let filterExternalSpan = function(node) {
+let isNightMode = function (): boolean {
+    return document.body.classList.contains("nightMode");
+};
+
+let filterExternalSpan = function (node) {
     // filter out attributes
     let toRemove = [];
     for (const attr of node.attributes) {
@@ -478,6 +520,12 @@ let filterExternalSpan = function(node) {
             // google docs adds this unnecessarily
             toRemove.push(name);
         }
+        if (isNightMode()) {
+            // ignore coloured text in night mode for now
+            if (name === "background-color" || name == "color") {
+                toRemove.push(name);
+            }
+        }
     }
     for (let name of toRemove) {
         node.style.removeProperty(name);
@@ -490,7 +538,7 @@ allowedTagsExtended["SPAN"] = filterExternalSpan;
 Object.assign(allowedTagsExtended, allowedTagsBasic);
 
 // filtering from another field
-let filterInternalNode = function(node) {
+let filterInternalNode = function (node) {
     if (node.style) {
         node.style.removeProperty("background-color");
         node.style.removeProperty("font-size");
@@ -503,7 +551,7 @@ let filterInternalNode = function(node) {
 };
 
 // filtering from external sources
-let filterNode = function(node, extendedMode) {
+let filterNode = function (node, extendedMode) {
     // text node?
     if (node.nodeType === 3) {
         return;
@@ -556,7 +604,7 @@ let filterNode = function(node, extendedMode) {
     }
 };
 
-let adjustFieldsTopMargin = function() {
+let adjustFieldsTopMargin = function () {
     const topHeight = $("#topbuts").height();
     const margin = topHeight + 8;
     document.getElementById("fields").style.marginTop = margin + "px";
@@ -564,16 +612,16 @@ let adjustFieldsTopMargin = function() {
 
 let mouseDown = 0;
 
-$(function() {
-    document.body.onmousedown = function() {
+$(function () {
+    document.body.onmousedown = function () {
         mouseDown++;
     };
 
-    document.body.onmouseup = function() {
+    document.body.onmouseup = function () {
         mouseDown--;
     };
 
-    document.onclick = function(evt: MouseEvent) {
+    document.onclick = function (evt: MouseEvent) {
         const src = evt.target as Element;
         if (src.tagName === "IMG") {
             // image clicked; find contenteditable parent
@@ -588,11 +636,11 @@ $(function() {
     };
 
     // prevent editor buttons from taking focus
-    $("button.linkb").on("mousedown", function(e) {
+    $("button.linkb").on("mousedown", function (e) {
         e.preventDefault();
     });
 
-    window.onresize = function() {
+    window.onresize = function () {
         adjustFieldsTopMargin();
     };
 

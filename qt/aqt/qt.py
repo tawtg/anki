@@ -7,12 +7,15 @@
 import os
 import sys
 import traceback
+from typing import Callable, Union
 
 from PyQt5.Qt import *  # type: ignore
 from PyQt5.QtCore import *
 from PyQt5.QtCore import pyqtRemoveInputHook  # pylint: disable=no-name-in-module
 from PyQt5.QtGui import *  # type: ignore
-from PyQt5.QtWebEngineWidgets import *  # type: ignore
+from PyQt5.QtNetwork import QLocalServer, QLocalSocket, QNetworkProxy
+from PyQt5.QtWebChannel import QWebChannel
+from PyQt5.QtWebEngineWidgets import *
 from PyQt5.QtWidgets import *
 
 from anki.utils import isMac, isWin
@@ -52,3 +55,8 @@ qtpoint = QT_VERSION & 0xFF
 
 if qtmajor != 5 or qtminor < 9 or qtminor == 10:
     raise Exception("Anki does not support your Qt version.")
+
+
+def qconnect(signal: Union[Callable, pyqtSignal], func: Callable) -> None:
+    "Helper to work around type checking not working with signal.connect(func)."
+    signal.connect(func)  # type: ignore

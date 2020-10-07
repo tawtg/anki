@@ -5,26 +5,35 @@ import json
 import os
 import re
 import shutil
-import typing
 import unicodedata
 import zipfile
 from io import BufferedWriter
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from zipfile import ZipFile
 
-from anki.collection import _Collection
-from anki.hooks import runHook
+from anki import hooks
+from anki.collection import Collection
 from anki.lang import _
-from anki.storage import Collection
 from anki.utils import ids2str, namedtmp, splitFields, stripHTML
 
 
 class Exporter:
-    includeHTML: typing.Union[bool, None] = None
+    includeHTML: Union[bool, None] = None
+    ext: Optional[str] = None
+    key: Union[str, Callable, None] = None
+    includeTags: Optional[bool] = None
+    includeSched: Optional[bool] = None
+    includeMedia: Optional[bool] = None
 
-    def __init__(self, col: _Collection, did: None = None) -> None:
-        self.col = col
+    def __init__(
+        self,
+        col: Collection,
+        did: Optional[int] = None,
+        cids: Optional[List[int]] = None,
+    ) -> None:
+        self.col = col.weakref()
         self.did = did
+        self.cids = cids
 
     def doExport(self, path) -> None:
         raise Exception("not implemented")
@@ -48,6 +57,7 @@ class Exporter:
         # fixme: we should probably quote fields with newlines
         # instead of converting them to spaces
         text = text.replace("\n", " ")
+        text = text.replace("\r", "")
         text = text.replace("\t", " " * 8)
         text = re.sub("(?i)<style>.*?</style>", "", text)
         text = re.sub(r"\[\[type:[^]]+\]\]", "", text)
@@ -66,7 +76,9 @@ class Exporter:
         return s
 
     def cardIds(self) -> Any:
-        if not self.did:
+        if self.cids is not None:
+            cids = self.cids
+        elif not self.did:
             cids = self.col.db.list("select id from cards")
         else:
             cids = self.col.decks.cids(self.did, children=True)
@@ -80,7 +92,7 @@ class Exporter:
 
 class TextCardExporter(Exporter):
 
-    key = _("Cards in Plain Text")
+    key = lambda self: _("Cards in Plain Text")
     ext = ".txt"
     includeHTML = True
 
@@ -110,12 +122,12 @@ class TextCardExporter(Exporter):
 
 class TextNoteExporter(Exporter):
 
-    key = _("Notes in Plain Text")
+    key = lambda self: _("Notes in Plain Text")
     ext = ".txt"
     includeTags = True
     includeHTML = True
 
-    def __init__(self, col: _Collection) -> None:
+    def __init__(self, col: Collection) -> None:
         Exporter.__init__(self, col)
         self.includeID = False
 
@@ -152,13 +164,21 @@ where cards.id in %s)"""
 
 class AnkiExporter(Exporter):
 
-    key = _("Anki 2.0 Deck")
+    key = lambda self: _("Anki 2.0 Deck")
     ext = ".anki2"
-    includeSched: typing.Union[bool, None] = False
+    includeSched: Union[bool, None] = False
     includeMedia = True
 
-    def __init__(self, col: _Collection) -> None:
+    def __init__(self, col: Collection) -> None:
         Exporter.__init__(self, col)
+
+    def deckIds(self) -> List[int]:
+        if self.cids:
+            return self.col.decks.for_card_ids(self.cids)
+        elif self.did:
+            return self.src.decks.deck_and_child_ids(self.did)
+        else:
+            return []
 
     def exportInto(self, path: str) -> None:
         # sched info+v2 scheduler not compatible w/ older clients
@@ -211,16 +231,13 @@ class AnkiExporter(Exporter):
             # need to reset card state
             self.dst.sched.resetCards(cids)
         # models - start with zero
-        self.dst.models.models = {}
+        self.dst.modSchema(check=False)
+        self.dst.models.remove_all_notetypes()
         for m in self.src.models.all():
             if int(m["id"]) in mids:
                 self.dst.models.update(m)
         # decks
-        dids: List[int]
-        if not self.did:
-            dids = []
-        else:
-            dids = [self.did] + [x[1] for x in self.src.decks.children(self.did)]
+        dids = self.deckIds()
         dconfs = {}
         for d in self.src.decks.all():
             if str(d["id"]) == "1":
@@ -238,7 +255,7 @@ class AnkiExporter(Exporter):
         # copy used deck confs
         for dc in self.src.decks.allConf():
             if dc["id"] in dconfs:
-                self.dst.decks.updateConf(dc)
+                self.dst.decks.update_config(dc)
         # find used media
         media = {}
         self.mediaDir = self.src.media.dir()
@@ -269,7 +286,7 @@ class AnkiExporter(Exporter):
         self.count = self.dst.cardCount()
         self.dst.setMod()
         self.postExport()
-        self.dst.close()
+        self.dst.close(downgrade=True)
 
     def postExport(self) -> None:
         # overwrite to apply customizations to the deck before it's closed,
@@ -296,10 +313,10 @@ class AnkiExporter(Exporter):
 
 class AnkiPackageExporter(AnkiExporter):
 
-    key = _("Anki Deck Package")
+    key = lambda self: _("Anki Deck Package")
     ext = ".apkg"
 
-    def __init__(self, col: _Collection) -> None:
+    def __init__(self, col: Collection) -> None:
         AnkiExporter.__init__(self, col)
 
     def exportInto(self, path: str) -> None:
@@ -347,7 +364,7 @@ class AnkiPackageExporter(AnkiExporter):
                 else:
                     z.write(mpath, cStr, zipfile.ZIP_STORED)
                 media[cStr] = unicodedata.normalize("NFC", file)
-                runHook("exportedMediaFiles", c)
+                hooks.media_files_did_export(c)
 
         return media
 
@@ -365,7 +382,7 @@ class AnkiPackageExporter(AnkiExporter):
         n[_("Front")] = "This file requires a newer version of Anki."
         c.addNote(n)
         c.save()
-        c.close()
+        c.close(downgrade=True)
 
         zip.write(path, "collection.anki2")
         os.unlink(path)
@@ -377,7 +394,7 @@ class AnkiPackageExporter(AnkiExporter):
 
 class AnkiCollectionPackageExporter(AnkiPackageExporter):
 
-    key = _("Anki Collection Package")
+    key = lambda self: _("Anki Collection Package")
     ext = ".colpkg"
     verbatim = True
     includeSched = None
@@ -386,20 +403,20 @@ class AnkiCollectionPackageExporter(AnkiPackageExporter):
         AnkiPackageExporter.__init__(self, col)
 
     def doExport(self, z, path):
-        # close our deck & write it into the zip file, and reopen
+        "Export collection. Caller must re-open afterwards."
+        # close our deck & write it into the zip file
         self.count = self.col.cardCount()
         v2 = self.col.schedVer() != 1
-        self.col.close()
+        mdir = self.col.media.dir()
+        self.col.close(downgrade=True)
         if not v2:
             z.write(self.col.path, "collection.anki2")
         else:
             self._addDummyCollection(z)
             z.write(self.col.path, "collection.anki21")
-        self.col.reopen()
         # copy all media
         if not self.includeMedia:
             return {}
-        mdir = self.col.media.dir()
         return self._exportMedia(z, os.listdir(mdir), mdir)
 
 
@@ -409,7 +426,11 @@ class AnkiCollectionPackageExporter(AnkiPackageExporter):
 
 def exporters() -> List[Tuple[str, Any]]:
     def id(obj):
-        return ("%s (*%s)" % (obj.key, obj.ext), obj)
+        if callable(obj.key):
+            key_str = obj.key(obj)
+        else:
+            key_str = obj.key
+        return ("%s (*%s)" % (key_str, obj.ext), obj)
 
     exps = [
         id(AnkiCollectionPackageExporter),
@@ -417,5 +438,5 @@ def exporters() -> List[Tuple[str, Any]]:
         id(TextNoteExporter),
         id(TextCardExporter),
     ]
-    runHook("exportersList", exps)
+    hooks.exporters_list_created(exps)
     return exps

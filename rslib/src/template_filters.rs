@@ -1,6 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use crate::cloze::{cloze_filter, cloze_only_filter};
 use crate::template::RenderContext;
 use crate::text::strip_html;
 use blake3::Hasher;
@@ -72,11 +73,16 @@ fn apply_filter<'a>(
         "type-cloze" => type_cloze_filter(field_name),
         "hint" => hint_filter(text, field_name),
         "cloze" => cloze_filter(text, context),
+        "cloze-only" => cloze_only_filter(text, context),
         // an empty filter name (caused by using two colons) is ignored
         "" => text.into(),
         _ => {
-            // unrecognized filter
-            return (false, None);
+            if filter_name.starts_with("tts ") {
+                tts_filter(filter_name, text)
+            } else {
+                // unrecognized filter
+                return (false, None);
+            }
         }
     };
 
@@ -87,102 +93,6 @@ fn apply_filter<'a>(
             _ => None,
         },
     )
-}
-
-// Cloze filter
-//----------------------------------------
-
-lazy_static! {
-    static ref CLOZE: Regex = Regex::new(
-        r#"(?xsi)
-            \{\{
-            c(\d+)::    # 1 = cloze number
-            (.*?)       # 2 = clozed text
-            (?:
-              ::(.*?)   # 3 = optional hint
-            )?
-            \}\}
-        "#
-    )
-    .unwrap();
-    static ref MATHJAX: Regex = Regex::new(
-        r#"(?xsi)
-            (\\[(\[])       # 1 = mathjax opening tag
-            (.*?)           # 2 = inner content
-            (\\[])])        # 3 = mathjax closing tag 
-           "#
-    )
-    .unwrap();
-}
-
-mod cloze_caps {
-    // cloze ordinal
-    pub const ORD: usize = 1;
-    // the occluded text
-    pub const TEXT: usize = 2;
-    // optional hint
-    pub const HINT: usize = 3;
-}
-
-mod mathjax_caps {
-    pub const OPENING_TAG: usize = 1;
-    pub const INNER_TEXT: usize = 2;
-    pub const CLOSING_TAG: usize = 3;
-}
-
-fn reveal_cloze_text(text: &str, cloze_ord: u16, question: bool) -> Cow<str> {
-    let output = CLOZE.replace_all(text, |caps: &Captures| {
-        let captured_ord = caps
-            .get(cloze_caps::ORD)
-            .unwrap()
-            .as_str()
-            .parse()
-            .unwrap_or(0);
-
-        if captured_ord != cloze_ord {
-            // other cloze deletions are unchanged
-            return caps.get(cloze_caps::TEXT).unwrap().as_str().to_owned();
-        }
-
-        let replacement;
-        if question {
-            // hint provided?
-            if let Some(hint) = caps.get(cloze_caps::HINT) {
-                replacement = format!("[{}]", hint.as_str());
-            } else {
-                replacement = "[...]".to_string()
-            }
-        } else {
-            replacement = caps.get(cloze_caps::TEXT).unwrap().as_str().to_owned();
-        }
-
-        format!("<span class=cloze>{}</span>", replacement)
-    });
-
-    // if no cloze deletions are found, Anki returns an empty string
-    match output {
-        Cow::Borrowed(_) => "".into(),
-        other => other,
-    }
-}
-
-fn strip_html_inside_mathjax(text: &str) -> Cow<str> {
-    MATHJAX.replace_all(text, |caps: &Captures| -> String {
-        format!(
-            "{}{}{}",
-            caps.get(mathjax_caps::OPENING_TAG).unwrap().as_str(),
-            strip_html(caps.get(mathjax_caps::INNER_TEXT).unwrap().as_str()).as_ref(),
-            caps.get(mathjax_caps::CLOSING_TAG).unwrap().as_str()
-        )
-    })
-}
-
-fn cloze_filter<'a>(text: &'a str, context: &RenderContext) -> Cow<'a, str> {
-    strip_html_inside_mathjax(
-        reveal_cloze_text(text, context.card_ord + 1, context.question_side).as_ref(),
-    )
-    .into_owned()
-    .into()
 }
 
 // Ruby filters
@@ -277,6 +187,11 @@ return false;">
     .into()
 }
 
+fn tts_filter(filter_name: &str, text: &str) -> Cow<'static, str> {
+    let args = filter_name.splitn(2, ' ').nth(1).unwrap_or("");
+
+    format!("[anki:tts][{}]{}[/anki:tts]", args, text).into()
+}
 // Tests
 //----------------------------------------
 
@@ -285,12 +200,12 @@ mod test {
     use crate::template::RenderContext;
     use crate::template_filters::{
         apply_filters, cloze_filter, furigana_filter, hint_filter, kana_filter, kanji_filter,
-        type_cloze_filter, type_filter,
+        tts_filter, type_cloze_filter, type_filter,
     };
     use crate::text::strip_html;
 
     #[test]
-    fn test_furigana() {
+    fn furigana() {
         let text = "test first[second] third[fourth]";
         assert_eq!(kana_filter(text).as_ref(), "testsecondfourth");
         assert_eq!(kanji_filter(text).as_ref(), "testfirstthird");
@@ -301,7 +216,7 @@ mod test {
     }
 
     #[test]
-    fn test_hint() {
+    fn hint() {
         assert_eq!(
             hint_filter("foo", "field"),
             r##"
@@ -316,7 +231,7 @@ field</a>
     }
 
     #[test]
-    fn test_type() {
+    fn typing() {
         assert_eq!(type_filter("Front"), "[[type:Front]]");
         assert_eq!(type_cloze_filter("Front"), "[[type:cloze:Front]]");
         let ctx = RenderContext {
@@ -324,7 +239,6 @@ field</a>
             nonempty_fields: &Default::default(),
             question_side: false,
             card_ord: 0,
-            front_text: None,
         };
         assert_eq!(
             apply_filters("ignored", &["cloze", "type"], "Text", &ctx),
@@ -333,14 +247,13 @@ field</a>
     }
 
     #[test]
-    fn test_cloze() {
+    fn cloze() {
         let text = "{{c1::one}} {{c2::two::hint}}";
         let mut ctx = RenderContext {
             fields: &Default::default(),
             nonempty_fields: &Default::default(),
             question_side: true,
             card_ord: 0,
-            front_text: None,
         };
         assert_eq!(strip_html(&cloze_filter(text, &ctx)).as_ref(), "[...] two");
         assert_eq!(
@@ -353,5 +266,19 @@ field</a>
 
         ctx.question_side = false;
         assert_eq!(strip_html(&cloze_filter(text, &ctx)).as_ref(), "one two");
+
+        // if the provided ordinal did not match any cloze deletions,
+        // Anki treats the string as blank, which add-ons like
+        // cloze overlapper take advantage of.
+        ctx.card_ord = 2;
+        assert_eq!(cloze_filter(text, &ctx).as_ref(), "");
+    }
+
+    #[test]
+    fn tts() {
+        assert_eq!(
+            tts_filter("tts en_US voices=Bob,Jane", "foo"),
+            "[anki:tts][en_US voices=Bob,Jane]foo[/anki:tts]"
+        );
     }
 }

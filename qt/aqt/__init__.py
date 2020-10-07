@@ -10,30 +10,41 @@ import os
 import sys
 import tempfile
 import traceback
-from typing import Any, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 import anki.buildinfo
 import anki.lang
 import aqt.buildinfo
 from anki import version as _version
 from anki.consts import HELP_SITE
+from anki.rsbackend import RustBackend
 from anki.utils import checksum, isLin, isMac
 from aqt.qt import *
 from aqt.utils import locale_dir
 
 assert anki.buildinfo.buildhash == aqt.buildinfo.buildhash
 
+# we want to be able to print unicode debug info to console without
+# fear of a traceback on systems with the console set to ASCII
+try:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore
+except AttributeError:
+    # on Windows without console, NullWriter doesn't support this
+    pass
+
 appVersion = _version
-appWebsite = "http://ankisrs.net/"
-appChanges = "http://ankisrs.net/docs/changes.html"
-appDonate = "http://ankisrs.net/support/"
+appWebsite = "https://apps.ankiweb.net/"
+appChanges = "https://apps.ankiweb.net/docs/changes.html"
+appDonate = "https://apps.ankiweb.net/support/"
 appShared = "https://ankiweb.net/shared/"
 appUpdate = "https://ankiweb.net/update/desktop"
 appHelpSite = HELP_SITE
 
 from aqt.main import AnkiQt  # isort:skip
-from aqt.profiles import ProfileManager  # isort:skip
+from aqt.profiles import ProfileManager, AnkiRestart  # isort:skip
 
+profiler = None
 mw: Optional[AnkiQt] = None  # set on init
 
 moduleDir = os.path.split(os.path.dirname(os.path.abspath(__file__)))[0]
@@ -64,21 +75,23 @@ except ImportError as e:
 
 
 from aqt import addcards, browser, editcurrent  # isort:skip
-from aqt import stats, about, preferences  # isort:skip
+from aqt import stats, about, preferences, mediasync  # isort:skip
 
 
 class DialogManager:
 
-    _dialogs = {
+    _dialogs: Dict[str, list] = {
         "AddCards": [addcards.AddCards, None],
         "Browser": [browser.Browser, None],
         "EditCurrent": [editcurrent.EditCurrent, None],
         "DeckStats": [stats.DeckStats, None],
+        "NewDeckStats": [stats.NewDeckStats, None],
         "About": [about.show, None],
         "Preferences": [preferences.Preferences, None],
+        "sync_log": [mediasync.MediaSyncDialog, None],
     }
 
-    def open(self, name, *args):
+    def open(self, name: str, *args: Any) -> Any:
         (creator, instance) = self._dialogs[name]
         if instance:
             if instance.windowState() & Qt.WindowMinimized:
@@ -93,17 +106,17 @@ class DialogManager:
             self._dialogs[name][1] = instance
             return instance
 
-    def markClosed(self, name):
+    def markClosed(self, name: str):
         self._dialogs[name] = [self._dialogs[name][0], None]
 
     def allClosed(self):
         return not any(x[1] for x in self._dialogs.values())
 
-    def closeAll(self, onsuccess):
+    def closeAll(self, onsuccess: Callable[[], None]) -> Optional[bool]:
         # can we close immediately?
         if self.allClosed():
             onsuccess()
-            return
+            return None
 
         # ask all windows to close and await a reply
         for (name, (creator, instance)) in self._dialogs.items():
@@ -125,6 +138,34 @@ class DialogManager:
 
         return True
 
+    def register_dialog(
+        self, name: str, creator: Union[Callable, type], instance: Optional[Any] = None
+    ):
+        """Allows add-ons to register a custom dialog to be managed by Anki's dialog
+        manager, which ensures that only one copy of the window is open at once,
+        and that the dialog cleans up asynchronously when the collection closes
+
+        Please note that dialogs added in this manner need to define a close behavior
+        by either:
+
+            - setting `dialog.silentlyClose = True` to have it close immediately
+            - define a `dialog.closeWithCallback()` method that is called when closed
+              by the dialog manager
+
+        TODO?: Implement more restrictive type check to ensure these requirements
+        are met
+
+        Arguments:
+            name {str} -- Name/identifier of the dialog in question
+            creator {Union[Callable, type]} -- A class or function to create new
+                                               dialog instances with
+
+        Keyword Arguments:
+            instance {Optional[Any]} -- An optional existing instance of the dialog
+                                        (default: {None})
+        """
+        self._dialogs[name] = [creator, instance]
+
 
 dialogs = DialogManager()
 
@@ -133,22 +174,22 @@ dialogs = DialogManager()
 # Qt requires its translator to be installed before any GUI widgets are
 # loaded, and we need the Qt language to match the gettext language or
 # translated shortcuts will not work.
-#
-# The Qt translator needs to be retained to work.
 
+# A reference to the Qt translator needs to be held to prevent it from
+# being immediately deallocated.
 _qtrans: Optional[QTranslator] = None
 
 
-def setupLang(
+def setupLangAndBackend(
     pm: ProfileManager, app: QApplication, force: Optional[str] = None
-) -> None:
+) -> RustBackend:
     global _qtrans
     try:
         locale.setlocale(locale.LC_ALL, "")
     except:
         pass
-    lang = force or pm.meta["defaultLang"]
 
+    # add _ and ngettext globals used by legacy code
     def fn__(arg):
         print("accessing _ without importing from anki.lang will break in the future")
         print("".join(traceback.format_stack()[-2]))
@@ -167,16 +208,29 @@ def setupLang(
 
     builtins.__dict__["_"] = fn__
     builtins.__dict__["ngettext"] = fn_ngettext
+
+    # get lang and normalize into ja/zh-CN form
+    lang = force or pm.meta["defaultLang"]
+    lang = anki.lang.lang_to_disk_lang(lang)
+
+    # load gettext catalog
     ldir = locale_dir()
-    anki.lang.setLang(lang, ldir, local=False)
-    if lang in ("he", "ar", "fa"):
+    anki.lang.set_lang(lang, ldir)
+
+    # switch direction for RTL languages
+    if anki.lang.is_rtl(lang):
         app.setLayoutDirection(Qt.RightToLeft)
     else:
         app.setLayoutDirection(Qt.LeftToRight)
-    # qt
+
+    # load qt translations
     _qtrans = QTranslator()
-    if _qtrans.load("qt_" + lang, ldir):
+    qt_dir = os.path.join(ldir, "qt")
+    qt_lang = lang.replace("-", "_")
+    if _qtrans.load("qtbase_" + qt_lang, qt_dir):
         app.installTranslator(_qtrans)
+
+    return anki.lang.current_i18n
 
 
 # App initialisation
@@ -212,7 +266,7 @@ class AnkiApp(QApplication):
             # previous instance died
             QLocalServer.removeServer(self.KEY)
             self._srv = QLocalServer(self)
-            self._srv.newConnection.connect(self.onRecv)
+            qconnect(self._srv.newConnection, self.onRecv)
             self._srv.listen(self.KEY)
             return False
 
@@ -241,7 +295,7 @@ class AnkiApp(QApplication):
             sys.stderr.write(sock.errorString())
             return
         path = bytes(sock.readAll()).decode("utf8")
-        self.appMsg.emit(path)
+        self.appMsg.emit(path)  # type: ignore
         sock.disconnectFromServer()
 
     # OS X file/url handler
@@ -249,7 +303,7 @@ class AnkiApp(QApplication):
 
     def event(self, evt):
         if evt.type() == QEvent.FileOpen:
-            self.appMsg.emit(evt.file() or "raise")
+            self.appMsg.emit(evt.file() or "raise")  # type: ignore
             return True
         return QApplication.event(self, evt)
 
@@ -265,6 +319,7 @@ def parseArgs(argv):
     parser.add_argument("-b", "--base", help="path to base folder", default="")
     parser.add_argument("-p", "--profile", help="profile name to load", default="")
     parser.add_argument("-l", "--lang", help="interface language (en, de, etc)")
+    parser.add_argument("-v", "--version", help="print the Anki version and exit")
     return parser.parse_known_args(argv[1:])
 
 
@@ -281,18 +336,42 @@ def setupGL(pm):
         ctypes.CDLL("libGL.so.1", ctypes.RTLD_GLOBAL)
 
     # catch opengl errors
-    def msgHandler(type, ctx, msg):
+    def msgHandler(category, ctx, msg):
+        if category == QtDebugMsg:
+            category = "debug"
+        elif category == QtInfoMsg:
+            category = "info"
+        elif category == QtWarningMsg:
+            category = "warning"
+        elif category == QtCriticalMsg:
+            category = "critical"
+        elif category == QtDebugMsg:
+            category = "debug"
+        elif category == QtFatalMsg:
+            category = "fatal"
+        elif category == QtSystemMsg:
+            category = "system"
+        else:
+            category = "unknown"
+        context = ""
+        if ctx.file:
+            context += f"{ctx.file}:"
+        if ctx.line:
+            context += f"{ctx.line},"
+        if ctx.function:
+            context += f"{ctx.function}"
+        if context:
+            context = f"'{context}'"
         if "Failed to create OpenGL context" in msg:
             QMessageBox.critical(
                 None,
                 "Error",
-                "Error loading '%s' graphics driver. Please start Anki again to try next driver."
-                % mode,
+                f"Error loading '{mode}' graphics driver. Please start Anki again to try next driver. {context}",
             )
             pm.nextGlMode()
             return
         else:
-            print("qt:", msg)
+            print(f"Qt {category}: {msg} {context}")
 
     qInstallMessageHandler(msgHandler)
 
@@ -302,6 +381,18 @@ def setupGL(pm):
         os.environ["QT_XCB_FORCE_SOFTWARE_OPENGL"] = "1"
     else:
         os.environ["QT_OPENGL"] = mode
+
+
+PROFILE_CODE = os.environ.get("ANKI_PROFILE_CODE")
+
+
+def write_profile_results():
+    import cProfile
+
+    profiler: cProfile.Profile
+    profiler.disable()
+    profiler.dump_stats("anki.prof")
+    print("profile stats written to anki.prof")
 
 
 def run():
@@ -327,6 +418,7 @@ def _run(argv=None, exec=True):
     If no 'argv' is supplied then 'sys.argv' will be used.
     """
     global mw
+    global profiler
 
     if argv is None:
         argv = sys.argv
@@ -334,14 +426,29 @@ def _run(argv=None, exec=True):
     # parse args
     opts, args = parseArgs(argv)
 
+    if opts.version:
+        print(f"Anki version '{appVersion}'")
+        return
+
+    if PROFILE_CODE:
+        import cProfile
+
+        profiler = cProfile.Profile()
+        profiler.enable()
+
     # profile manager
     pm = None
     try:
         pm = ProfileManager(opts.base)
         pmLoadResult = pm.setupMeta()
+    except AnkiRestart as error:
+        if error.exitcode:
+            sys.exit(error.exitcode)
+        return
     except:
         # will handle below
-        pass
+        traceback.print_exc()
+        pm = None
 
     if pm:
         # gl workarounds
@@ -358,6 +465,13 @@ def _run(argv=None, exec=True):
     # Opt into software rendering. Useful for buggy systems.
     if os.environ.get("ANKI_SOFTWAREOPENGL"):
         QCoreApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
+
+    if (
+        isWin
+        and (qtminor == 14 or (qtminor == 15 and qtpoint == 0))
+        and "QT_QPA_PLATFORM" not in os.environ
+    ):
+        os.environ["QT_QPA_PLATFORM"] = "windows:altgr"
 
     # create the app
     QCoreApplication.setApplicationName("Anki")
@@ -386,16 +500,25 @@ section of the manual, and ensure that location is not read-only.""",
         QApplication.setAttribute(Qt.AA_DisableWindowContextHelpButton)
 
     # proxy configured?
-    from urllib.request import proxy_bypass, getproxies
+    from urllib.request import getproxies, proxy_bypass
 
-    if "http" in getproxies():
-        # if it's not set up to bypass localhost, we'll
-        # need to disable proxies in the webviews
-        if not proxy_bypass("127.0.0.1"):
-            print("webview proxy use disabled")
-            proxy = QNetworkProxy()
-            proxy.setType(QNetworkProxy.NoProxy)
-            QNetworkProxy.setApplicationProxy(proxy)
+    disable_proxies = False
+    try:
+        if "http" in getproxies():
+            # if it's not set up to bypass localhost, we'll
+            # need to disable proxies in the webviews
+            if not proxy_bypass("127.0.0.1"):
+                disable_proxies = True
+    except UnicodeDecodeError:
+        # proxy_bypass can't handle unicode in hostnames; assume we need
+        # to disable proxies
+        disable_proxies = True
+
+    if disable_proxies:
+        print("webview proxy use disabled")
+        proxy = QNetworkProxy()
+        proxy.setType(QNetworkProxy.NoProxy)
+        QNetworkProxy.setApplicationProxy(proxy)
 
     # we must have a usable temp dir
     try:
@@ -424,8 +547,8 @@ environment points to a valid, writable folder.""",
     if opts.profile:
         pm.openProfile(opts.profile)
 
-    # i18n
-    setupLang(pm, app, opts.lang)
+    # i18n & backend
+    backend = setupLangAndBackend(pm, app, opts.lang)
 
     if isLin and pm.glMode() == "auto":
         from aqt.utils import gfxDriverIsBroken
@@ -442,8 +565,11 @@ environment points to a valid, writable folder.""",
     # load the main window
     import aqt.main
 
-    mw = aqt.main.AnkiQt(app, pm, opts, args)
+    mw = aqt.main.AnkiQt(app, pm, backend, opts, args)
     if exec:
         app.exec()
     else:
         return app
+
+    if PROFILE_CODE:
+        write_profile_results()

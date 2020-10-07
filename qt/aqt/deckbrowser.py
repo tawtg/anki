@@ -1,33 +1,63 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+from __future__ import annotations
+
 from copy import deepcopy
-from typing import Any
+from dataclasses import dataclass
 
 import aqt
 from anki.errors import DeckRenameError
-from anki.hooks import runHook
 from anki.lang import _, ngettext
-from anki.utils import fmtTimeSpan, ids2str
+from anki.rsbackend import TR, DeckTreeNode
+from anki.utils import ids2str
+from aqt import AnkiQt, gui_hooks
 from aqt.qt import *
-from aqt.sound import clearAudioQueue
-from aqt.utils import askUser, getOnlyText, openHelp, openLink, shortcut, showWarning
+from aqt.sound import av_player
+from aqt.toolbar import BottomBar
+from aqt.utils import askUser, getOnlyText, openLink, shortcut, showWarning, tr
+
+
+class DeckBrowserBottomBar:
+    def __init__(self, deck_browser: DeckBrowser):
+        self.deck_browser = deck_browser
+
+
+@dataclass
+class DeckBrowserContent:
+    """Stores sections of HTML content that the deck browser will be
+    populated with.
+
+    Attributes:
+        tree {str} -- HTML of the deck tree section
+        stats {str} -- HTML of the stats section
+    """
+
+    tree: str
+    stats: str
+
+
+@dataclass
+class RenderDeckNodeContext:
+    current_deck_id: int
 
 
 class DeckBrowser:
-    _dueTree: Any
+    _dueTree: DeckTreeNode
 
-    def __init__(self, mw):
+    def __init__(self, mw: AnkiQt) -> None:
         self.mw = mw
         self.web = mw.web
-        self.bottom = aqt.toolbar.BottomBar(mw, mw.bottomWeb)
+        self.bottom = BottomBar(mw, mw.bottomWeb)
         self.scrollPos = QPoint(0, 0)
 
     def show(self):
-        clearAudioQueue()
-        self.web.resetHandlers()
-        self.web.onBridgeCmd = self._linkHandler
+        av_player.stop_and_clear_queue()
+        self.web.set_bridge_command(self._linkHandler, self)
         self._renderPage()
+        # redraw top bar for theme change
+        self.mw.toolbar.redraw()
 
     def refresh(self):
         self._renderPage()
@@ -48,21 +78,17 @@ class DeckBrowser:
             self._onShared()
         elif cmd == "import":
             self.mw.onImport()
-        elif cmd == "lots":
-            openHelp("using-decks-appropriately")
-        elif cmd == "hidelots":
-            self.mw.pm.profile["hideDeckLotsMsg"] = True
-            self.refresh()
         elif cmd == "create":
             deck = getOnlyText(_("Name for deck:"))
             if deck:
                 self.mw.col.decks.id(deck)
+                gui_hooks.sidebar_should_refresh_decks()
                 self.refresh()
         elif cmd == "drag":
             draggedDeckDid, ontoDeckDid = arg.split(",")
             self._dragDeckOnto(draggedDeckDid, ontoDeckDid)
         elif cmd == "collapse":
-            self._collapse(arg)
+            self._collapse(int(arg))
         return False
 
     def _selDeck(self, did):
@@ -80,121 +106,83 @@ class DeckBrowser:
 
 <br>
 %(stats)s
-%(countwarn)s
 </center>
 """
 
     def _renderPage(self, reuse=False):
         if not reuse:
-            self._dueTree = self.mw.col.sched.deckDueTree()
+            self._dueTree = self.mw.col.sched.deck_due_tree()
             self.__renderPage(None)
             return
         self.web.evalWithCallback("window.pageYOffset", self.__renderPage)
 
     def __renderPage(self, offset):
-        tree = self._renderDeckTree(self._dueTree)
-        stats = self._renderStats()
+        content = DeckBrowserContent(
+            tree=self._renderDeckTree(self._dueTree),
+            stats=self._renderStats(),
+        )
+        gui_hooks.deck_browser_will_render_content(self, content)
         self.web.stdHtml(
-            self._body % dict(tree=tree, stats=stats, countwarn=self._countWarn()),
+            self._body % content.__dict__,
             css=["deckbrowser.css"],
             js=["jquery.js", "jquery-ui.js", "deckbrowser.js"],
+            context=self,
         )
         self.web.key = "deckBrowser"
         self._drawButtons()
         if offset is not None:
             self._scrollToOffset(offset)
+        gui_hooks.deck_browser_did_render(self)
 
     def _scrollToOffset(self, offset):
         self.web.eval("$(function() { window.scrollTo(0, %d, 'instant'); });" % offset)
 
     def _renderStats(self):
-        cards, thetime = self.mw.col.db.first(
-            """
-select count(), sum(time)/1000 from revlog
-where id > ?""",
-            (self.mw.col.sched.dayCutoff - 86400) * 1000,
-        )
-        cards = cards or 0
-        thetime = thetime or 0
-        msgp1 = (
-            ngettext("<!--studied-->%d card", "<!--studied-->%d cards", cards) % cards
-        )
-        buf = _("Studied %(a)s %(b)s today.") % dict(
-            a=msgp1, b=fmtTimeSpan(thetime, unit=1, inTime=True)
-        )
-        return buf
+        return self.mw.col.studied_today()
 
-    def _countWarn(self):
-        if self.mw.col.decks.count() < 25 or self.mw.pm.profile.get("hideDeckLotsMsg"):
-            return ""
-        return "<br><div style='width:50%;border: 1px solid #000;padding:5px;'>" + (
-            _("You have a lot of decks. Please see %(a)s. %(b)s")
-            % dict(
-                a=(
-                    "<a href=# onclick=\"return pycmd('lots')\">%s</a>" % _("this page")
-                ),
-                b=(
-                    "<br><small><a href=# onclick='return pycmd(\"hidelots\")'>("
-                    "%s)</a></small>" % (_("hide")) + "</div>"
-                ),
-            )
-        )
-
-    def _renderDeckTree(self, nodes, depth=0):
-        if not nodes:
-            return ""
-        if depth == 0:
-            buf = """
-<tr><th colspan=5 align=left>%s</th><th class=count>%s</th>
+    def _renderDeckTree(self, top: DeckTreeNode) -> str:
+        buf = """
+<tr><th colspan=5 align=start>%s</th><th class=count>%s</th>
 <th class=count>%s</th><th class=optscol></th></tr>""" % (
-                _("Deck"),
-                _("Due"),
-                _("New"),
-            )
-            buf += self._topLevelDragRow()
-        else:
-            buf = ""
-        nameMap = self.mw.col.decks.nameMap()
-        for node in nodes:
-            buf += self._deckRow(node, depth, len(nodes), nameMap)
-        if depth == 0:
-            buf += self._topLevelDragRow()
+            _("Deck"),
+            tr(TR.STATISTICS_DUE_COUNT),
+            _("New"),
+        )
+        buf += self._topLevelDragRow()
+
+        ctx = RenderDeckNodeContext(current_deck_id=self.mw.col.conf["curDeck"])
+
+        for child in top.children:
+            buf += self._render_deck_node(child, ctx)
+
         return buf
 
-    def _deckRow(self, node, depth, cnt, nameMap):
-        name, did, due, lrn, new, children = node
-        deck = self.mw.col.decks.get(did)
-        if did == 1 and cnt > 1 and not children:
-            # if the default deck is empty, hide it
-            if not self.mw.col.db.scalar("select 1 from cards where did = 1"):
-                return ""
-        # parent toggled for collapsing
-        for parent in self.mw.col.decks.parents(did, nameMap):
-            if parent["collapsed"]:
-                buff = ""
-                return buff
-        prefix = "-"
-        if self.mw.col.decks.get(did)["collapsed"]:
+    def _render_deck_node(self, node: DeckTreeNode, ctx: RenderDeckNodeContext) -> str:
+        if node.collapsed:
             prefix = "+"
-        due += lrn
+        else:
+            prefix = "-"
+
+        due = node.review_count + node.learn_count
 
         def indent():
-            return "&nbsp;" * 6 * depth
+            return "&nbsp;" * 6 * (node.level - 1)
 
-        if did == self.mw.col.conf["curDeck"]:
+        if node.deck_id == ctx.current_deck_id:
             klass = "deck current"
         else:
             klass = "deck"
-        buf = "<tr class='%s' id='%d'>" % (klass, did)
+
+        buf = "<tr class='%s' id='%d'>" % (klass, node.deck_id)
         # deck link
-        if children:
+        if node.children:
             collapse = (
                 "<a class=collapse href=# onclick='return pycmd(\"collapse:%d\")'>%s</a>"
-                % (did, prefix)
+                % (node.deck_id, prefix)
             )
         else:
             collapse = "<span class=collapse></span>"
-        if deck["dyn"]:
+        if node.filtered:
             extraclass = "filtered"
         else:
             extraclass = ""
@@ -205,28 +193,28 @@ where id > ?""",
             indent(),
             collapse,
             extraclass,
-            did,
-            name,
+            node.deck_id,
+            node.name,
         )
         # due counts
-        def nonzeroColour(cnt, colour):
+        def nonzeroColour(cnt, klass):
             if not cnt:
-                colour = "#e0e0e0"
-            if cnt >= 1000:
-                cnt = "1000+"
-            return "<font color='%s'>%s</font>" % (colour, cnt)
+                klass = "zero-count"
+            return f'<span class="{klass}">{cnt}</span>'
 
         buf += "<td align=right>%s</td><td align=right>%s</td>" % (
-            nonzeroColour(due, "#007700"),
-            nonzeroColour(new, "#000099"),
+            nonzeroColour(due, "review-count"),
+            nonzeroColour(node.new_count, "new-count"),
         )
         # options
         buf += (
             "<td align=center class=opts><a onclick='return pycmd(\"opts:%d\");'>"
-            "<img src='/_anki/imgs/gears.svg' class=gears></a></td></tr>" % did
+            "<img src='/_anki/imgs/gears.svg' class=gears></a></td></tr>" % node.deck_id
         )
         # children
-        buf += self._renderDeckTree(children, depth + 1)
+        if not node.collapsed:
+            for child in node.children:
+                buf += self._render_deck_node(child, ctx)
         return buf
 
     def _topLevelDragRow(self):
@@ -235,23 +223,23 @@ where id > ?""",
     # Options
     ##########################################################################
 
-    def _showOptions(self, did):
+    def _showOptions(self, did: str) -> None:
         m = QMenu(self.mw)
         a = m.addAction(_("Rename"))
-        a.triggered.connect(lambda b, did=did: self._rename(did))
+        qconnect(a.triggered, lambda b, did=did: self._rename(int(did)))
         a = m.addAction(_("Options"))
-        a.triggered.connect(lambda b, did=did: self._options(did))
+        qconnect(a.triggered, lambda b, did=did: self._options(did))
         a = m.addAction(_("Export"))
-        a.triggered.connect(lambda b, did=did: self._export(did))
+        qconnect(a.triggered, lambda b, did=did: self._export(did))
         a = m.addAction(_("Delete"))
-        a.triggered.connect(lambda b, did=did: self._delete(did))
-        runHook("showDeckOptions", m, did)
+        qconnect(a.triggered, lambda b, did=did: self._delete(int(did)))
+        gui_hooks.deck_browser_will_show_options_menu(m, int(did))
         m.exec_(QCursor.pos())
 
     def _export(self, did):
         self.mw.onExport(did=did)
 
-    def _rename(self, did):
+    def _rename(self, did: int) -> None:
         self.mw.checkpoint(_("Rename Deck"))
         deck = self.mw.col.decks.get(did)
         oldName = deck["name"]
@@ -261,6 +249,7 @@ where id > ?""",
             return
         try:
             self.mw.col.decks.rename(deck, newName)
+            gui_hooks.sidebar_should_refresh_decks()
         except DeckRenameError as e:
             return showWarning(e.description)
         self.show()
@@ -271,21 +260,23 @@ where id > ?""",
         self.mw.col.decks.select(did)
         self.mw.onDeckConf()
 
-    def _collapse(self, did):
+    def _collapse(self, did: int) -> None:
         self.mw.col.decks.collapse(did)
+        node = self.mw.col.decks.find_deck_in_tree(self._dueTree, did)
+        if node:
+            node.collapsed = not node.collapsed
         self._renderPage(reuse=True)
 
     def _dragDeckOnto(self, draggedDeckDid, ontoDeckDid):
         try:
             self.mw.col.decks.renameForDragAndDrop(draggedDeckDid, ontoDeckDid)
+            gui_hooks.sidebar_should_refresh_decks()
         except DeckRenameError as e:
             return showWarning(e.description)
 
         self.show()
 
     def _delete(self, did):
-        if str(did) == "1":
-            return showWarning(_("The default deck can't be deleted."))
         self.mw.checkpoint(_("Delete Deck"))
         deck = self.mw.col.decks.get(did)
         if not deck["dyn"]:
@@ -305,7 +296,7 @@ where id > ?""",
                 (_("Are you sure you wish to delete %s?") % deck["name"]) + extra
             )
         ):
-            self.mw.progress.start(immediate=True)
+            self.mw.progress.start()
             self.mw.col.decks.rem(did, True)
             self.mw.progress.finish()
             self.show()
@@ -316,7 +307,7 @@ where id > ?""",
     drawLinks = [
         ["", "shared", _("Get Shared")],
         ["", "create", _("Create Deck")],
-        ["Ctrl+I", "import", _("Import File")],  # Ctrl+I works from menu
+        ["Ctrl+Shift+I", "import", _("Import File")],
     ]
 
     def _drawButtons(self):
@@ -329,8 +320,11 @@ where id > ?""",
 <button title='%s' onclick='pycmd(\"%s\");'>%s</button>""" % tuple(
                 b
             )
-        self.bottom.draw(buf)
-        self.bottom.web.onBridgeCmd = self._linkHandler
+        self.bottom.draw(
+            buf=buf,
+            link_handler=self._linkHandler,
+            web_context=DeckBrowserBottomBar(self),
+        )
 
     def _onShared(self):
         openLink(aqt.appShared + "decks/")

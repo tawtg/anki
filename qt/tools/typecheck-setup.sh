@@ -6,8 +6,15 @@
 # able to resolve. A solution that doesn't require modifying the python install
 # would be welcome!
 
-TOOLS="$(cd "`dirname "$0"`"; pwd)"
-modDir=$(python -c 'import PyQt5, sys, os; print(os.path.dirname(sys.modules["PyQt5"].__file__))')
-cmd="rsync -a $TOOLS/stubs/PyQt5/* $modDir/"
+set -eu -o pipefail ${SHELLFLAGS}
 
-$cmd > /dev/null 2>&1 || sudo $cmd
+# https://stackoverflow.com/questions/3601515/how-to-check-if-a-variable-is-set-in-bash
+if [[ -z "${OS+x}" ]]; then 
+    OS=unknown; 
+fi
+
+TOOLS="$(cd "`dirname "$0"`"; pwd)"
+modDir="$(python -c 'import PyQt5, sys, os; sys.stdout.write(os.path.dirname(sys.modules["PyQt5"].__file__))')"
+
+# fix broken stubs in pyqt5.15.0 release
+(cd "$modDir" && perl -i'' -pe 's/(\s*None) =/$1_ =/' *.pyi && touch py.typed)

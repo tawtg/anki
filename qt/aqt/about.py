@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 import platform
+import time
 
 import aqt.forms
 from anki.lang import _
 from anki.utils import versionWithBuild
+from aqt.addons import AddonManager, AddonMeta
 from aqt.qt import *
 from aqt.utils import supportText, tooltip
 
@@ -32,15 +34,59 @@ def show(mw):
 
     # Copy debug info
     ######################################################################
+
+    def addon_fmt(addmgr: AddonManager, addon: AddonMeta) -> str:
+        if addon.installed_at:
+            installed = time.strftime(
+                "%Y-%m-%dT%H:%M", time.localtime(addon.installed_at)
+            )
+        else:
+            installed = "0"
+        if addon.provided_name:
+            name = addon.provided_name
+        else:
+            name = "''"
+        user = addmgr.getConfig(addon.dir_name)
+        default = addmgr.addonConfigDefaults(addon.dir_name)
+        if user == default:
+            modified = "''"
+        else:
+            modified = "mod"
+        return f"{name} ['{addon.dir_name}', {installed}, '{addon.human_version}', {modified}]"
+
     def onCopy():
         addmgr = mw.addonManager
-        addons = "\n".join(addmgr.annotatedName(d) for d in addmgr.allAddons())
-        info = "\n".join((supportText(), "Add-ons:\n\n{}".format(addons)))
+        active = []
+        activeids = []
+        inactive = []
+        for addon in addmgr.all_addon_meta():
+            if addon.enabled:
+                active.append(addon_fmt(addmgr, addon))
+                if addon.ankiweb_id():
+                    activeids.append(addon.dir_name)
+            else:
+                inactive.append(addon_fmt(addmgr, addon))
+        newline = "\n"
+        info = f"""
+{supportText()}
+
+===Add-ons (active)===
+(add-on provided name [Add-on folder, installed at, version, is config changed])
+{newline.join(sorted(active))}
+
+===IDs of active AnkiWeb add-ons===
+{" ".join(activeids)}
+
+===Add-ons (inactive)===
+(add-on provided name [Add-on folder, installed at, version, is config changed])
+{newline.join(sorted(inactive))}
+"""
+        info = "    " + "    ".join(info.splitlines(True))
         QApplication.clipboard().setText(info)
         tooltip(_("Copied to clipboard"), parent=dialog)
 
     btn = QPushButton(_("Copy Debug Info"))
-    btn.clicked.connect(onCopy)
+    qconnect(btn.clicked, onCopy)
     abt.buttonBox.addButton(btn, QDialogButtonBox.ActionRole)
     abt.buttonBox.button(QDialogButtonBox.Ok).setFocus()
 
@@ -150,6 +196,16 @@ system. It's free and open source."
             "Arthur Milchior",
             "Rai (Michael Pokorny)",
             "AMBOSS MD Inc.",
+            "Erez Volk",
+            "Tobias Predel",
+            "Thomas Kahn",
+            "zjosua",
+            "Ijgnd",
+            "Evandro Coan",
+            "Alan Du",
+            "ANH",
+            "Junseo Park",
+            "Gustavo Costa",
         )
     )
 
@@ -172,5 +228,5 @@ suggestions, bug reports and donations."
     abt.label.setMinimumWidth(800)
     abt.label.setMinimumHeight(600)
     dialog.show()
-    abt.label.stdHtml(abouttext, js=" ")
+    abt.label.stdHtml(abouttext, js=[])
     return dialog

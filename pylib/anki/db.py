@@ -1,11 +1,20 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+"""
+A convenience wrapper over pysqlite.
+
+Anki's Collection class now uses dbproxy.py instead of this class,
+but this class is still used by aqt's profile manager, and a number
+of add-ons rely on it.
+"""
+
 import os
+import pprint
 import time
 from sqlite3 import Cursor
 from sqlite3 import dbapi2 as sqlite
-from typing import Any, List
+from typing import Any, List, Type
 
 DBError = sqlite.Error
 
@@ -17,6 +26,11 @@ class DB:
         self._path = path
         self.echo = os.environ.get("DBECHO")
         self.mod = False
+
+    def __repr__(self) -> str:
+        d = dict(self.__dict__)
+        del d["_db"]
+        return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
 
     def execute(self, sql: str, *a, **ka) -> Cursor:
         s = sql.strip().lower()
@@ -110,5 +124,5 @@ class DB:
     def _textFactory(self, data: bytes) -> str:
         return str(data, errors="ignore")
 
-    def cursor(self, factory=Cursor) -> Cursor:
+    def cursor(self, factory: Type[Cursor] = Cursor) -> Cursor:
         return self._db.cursor(factory)

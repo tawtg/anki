@@ -1,6 +1,7 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+from typing import List, Optional
 
 import aqt
 from anki.lang import _
@@ -23,7 +24,7 @@ class DeckConf(QDialog):
         self.ok = self.form.buttonBox.addButton(label, QDialogButtonBox.AcceptRole)
         self.mw.checkpoint(_("Options"))
         self.setWindowModality(Qt.WindowModal)
-        self.form.buttonBox.helpRequested.connect(lambda: openHelp("filtered"))
+        qconnect(self.form.buttonBox.helpRequested, lambda: openHelp("filtered"))
         self.setWindowTitle(_("Options for %s") % self.deck["name"])
         restoreGeom(self, "dyndeckconf")
         self.initialSetup()
@@ -46,7 +47,7 @@ class DeckConf(QDialog):
         self.form.order.addItems(list(cs.dynOrderLabels().values()))
         self.form.order_2.addItems(list(cs.dynOrderLabels().values()))
 
-        self.form.resched.stateChanged.connect(self._onReschedToggled)
+        qconnect(self.form.resched.stateChanged, self._onReschedToggled)
 
     def _onReschedToggled(self, _state):
         self.form.previewDelayWidget.setVisible(
@@ -121,7 +122,7 @@ class DeckConf(QDialog):
     def accept(self):
         if not self.saveConf():
             return
-        if not self.mw.col.sched.rebuildDyn():
+        if not self.mw.col.sched.rebuild_filtered_deck(self.deck["id"]):
             if askUser(
                 _(
                     """\
@@ -139,14 +140,14 @@ it?"""
     def listToUser(self, l):
         return " ".join([str(x) for x in l])
 
-    def userToList(self, w, minSize=1):
+    def userToList(self, w, minSize=1) -> Optional[List[Union[float, int]]]:
         items = str(w.text()).split(" ")
         ret = []
-        for i in items:
-            if not i:
+        for item in items:
+            if not item:
                 continue
             try:
-                i = float(i)
+                i = float(item)
                 assert i > 0
                 if i == int(i):
                     i = int(i)
@@ -154,8 +155,8 @@ it?"""
             except:
                 # invalid, don't update
                 showWarning(_("Steps must be numbers."))
-                return
+                return None
         if len(ret) < minSize:
             showWarning(_("At least one step is required."))
-            return
+            return None
         return ret

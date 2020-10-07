@@ -1,117 +1,100 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
 import copy
-import datetime
-import json
 import os
 import pprint
-import random
 import re
-import stat
 import time
 import traceback
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+import weakref
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple, Union
 
 import anki.find
 import anki.latex  # sets up hook
 import anki.template
+from anki import hooks
 from anki.cards import Card
+from anki.config import ConfigManager
 from anki.consts import *
-from anki.db import DB
+from anki.dbproxy import DBProxy
 from anki.decks import DeckManager
 from anki.errors import AnkiError
-from anki.hooks import runFilter, runHook
-from anki.lang import _, ngettext
-from anki.media import MediaManager
+from anki.lang import _
+from anki.media import MediaManager, media_paths_from_col_path
 from anki.models import ModelManager
 from anki.notes import Note
-from anki.rsbackend import RustBackend
+from anki.rsbackend import TR, DBError, FormatTimeSpanContext, Progress, RustBackend, pb
 from anki.sched import Scheduler as V1Scheduler
 from anki.schedv2 import Scheduler as V2Scheduler
 from anki.tags import TagManager
-from anki.template import render_card
-from anki.types import NoteType, QAData, Template
-from anki.utils import (
-    devMode,
-    fieldChecksum,
-    ids2str,
-    intTime,
-    joinFields,
-    maxID,
-    splitFields,
-    stripHTMLMedia,
-)
+from anki.utils import devMode, ids2str, intTime
 
-defaultConf = {
-    # review options
-    "activeDecks": [1],
-    "curDeck": 1,
-    "newSpread": NEW_CARDS_DISTRIBUTE,
-    "collapseTime": 1200,
-    "timeLim": 0,
-    "estTimes": True,
-    "dueCounts": True,
-    # other config
-    "curModel": None,
-    "nextPos": 1,
-    "sortType": "noteFld",
-    "sortBackwards": False,
-    "addToCur": True,  # add new to currently selected deck?
-    "dayLearnFirst": False,
-    "schedVer": 1,
-}
+if TYPE_CHECKING:
+    from anki.rsbackend import FormatTimeSpanContextValue, TRValue
 
 
-# this is initialized by storage.Collection
-class _Collection:
-    db: Optional[DB]
+class Collection:
     sched: Union[V1Scheduler, V2Scheduler]
-    crt: int
-    mod: int
-    scm: int
-    dty: bool  # no longer used
-    _usn: int
-    ls: int
-    conf: Dict[str, Any]
     _undo: List[Any]
-    backend: RustBackend
 
     def __init__(
         self,
-        db: DB,
-        backend: RustBackend,
-        server: Optional["anki.storage.ServerData"] = None,
+        path: str,
+        backend: Optional[RustBackend] = None,
+        server: bool = False,
         log: bool = False,
     ) -> None:
-        self.backend = backend
-        self._debugLog = log
-        self.db = db
-        self.path = db._path
-        self._openLog()
-        self.log(self.path, anki.version)
+        self.backend = backend or RustBackend(server=server)
+        self.db: Optional[DBProxy] = None
+        self._should_log = log
         self.server = server
+        self.path = os.path.abspath(path)
+        self.reopen()
+
+        self.log(self.path, anki.version)
         self._lastSave = time.time()
         self.clearUndo()
-        self.media = MediaManager(self, server is not None)
+        self.media = MediaManager(self, server)
         self.models = ModelManager(self)
         self.decks = DeckManager(self)
         self.tags = TagManager(self)
-        self.load()
-        if not self.crt:
-            d = datetime.datetime.today()
-            d -= datetime.timedelta(hours=4)
-            d = datetime.datetime(d.year, d.month, d.day)
-            d += datetime.timedelta(hours=4)
-            self.crt = int(time.mktime(d.timetuple()))
+        self.conf = ConfigManager(self)
         self._loadScheduler()
-        if not self.conf.get("newBury", False):
-            self.conf["newBury"] = True
-            self.setMod()
+
+    def __repr__(self) -> str:
+        d = dict(self.__dict__)
+        del d["models"]
+        del d["backend"]
+        return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
 
     def name(self) -> Any:
-        n = os.path.splitext(os.path.basename(self.path))[0]
-        return n
+        return os.path.splitext(os.path.basename(self.path))[0]
+
+    def weakref(self) -> Collection:
+        "Shortcut to create a weak reference that doesn't break code completion."
+        return weakref.proxy(self)
+
+    # I18n/messages
+    ##########################################################################
+
+    def tr(self, key: TRValue, **kwargs: Union[str, int, float]) -> str:
+        return self.backend.translate(key, **kwargs)
+
+    def format_timespan(
+        self,
+        seconds: float,
+        context: FormatTimeSpanContextValue = FormatTimeSpanContext.INTERVALS,
+    ) -> str:
+        return self.backend.format_timespan(seconds=seconds, context=context)
+
+    # Progress
+    ##########################################################################
+
+    def latest_progress(self) -> Progress:
+        return Progress.from_proto(self.backend.latest_progress())
 
     # Scheduler
     ##########################################################################
@@ -131,10 +114,6 @@ class _Collection:
             self.sched = V1Scheduler(self)
         elif ver == 2:
             self.sched = V2Scheduler(self)
-            if not self.server:
-                self.conf["localOffset"] = self.sched.currentTimezoneOffset()
-            elif self.server.minutes_west is not None:
-                self.conf["localOffset"] = self.server.minutes_west
 
     def changeSchedulerVer(self, ver: int) -> None:
         if ver == self.schedVer():
@@ -157,73 +136,85 @@ class _Collection:
 
         self._loadScheduler()
 
+    # the sync code uses this to send the local timezone to AnkiWeb
     def localOffset(self) -> Optional[int]:
         "Minutes west of UTC. Only applies to V2 scheduler."
         if isinstance(self.sched, V1Scheduler):
             return None
         else:
-            return self.sched.currentTimezoneOffset()
+            return self.backend.local_minutes_west(intTime())
 
     # DB-related
     ##########################################################################
 
-    def load(self) -> None:
-        (
-            self.crt,
-            self.mod,
-            self.scm,
-            self.dty,  # no longer used
-            self._usn,
-            self.ls,
-            conf,
-            models,
-            decks,
-            dconf,
-            tags,
-        ) = self.db.first(
-            """
-select crt, mod, scm, dty, usn, ls,
-conf, models, decks, dconf, tags from col"""
-        )
-        self.conf = json.loads(conf)  # type: ignore
-        self.models.load(models)
-        self.decks.load(decks, dconf)
-        self.tags.load(tags)
+    # legacy properties; these will likely go away in the future
 
-    def setMod(self) -> None:
-        """Mark DB modified.
+    def _get_crt(self) -> int:
+        return self.db.scalar("select crt from col")
 
-DB operations and the deck/tag/model managers do this automatically, so this
-is only necessary if you modify properties of this object or the conf dict."""
-        self.db.mod = True
+    def _set_crt(self, val: int) -> None:
+        self.db.execute("update col set crt=?", val)
 
-    def flush(self, mod: Optional[int] = None) -> None:
-        "Flush state to DB, updating mod time."
-        self.mod = intTime(1000) if mod is None else mod
-        self.db.execute(
-            """update col set
-crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
-            self.crt,
-            self.mod,
-            self.scm,
-            self.dty,
-            self._usn,
-            self.ls,
-            json.dumps(self.conf),
-        )
+    def _get_scm(self) -> int:
+        return self.db.scalar("select scm from col")
 
-    def save(self, name: Optional[str] = None, mod: Optional[int] = None) -> None:
-        "Flush, commit DB, and take out another write lock."
-        # let the managers conditionally flush
-        self.models.flush()
-        self.decks.flush()
-        self.tags.flush()
-        # and flush deck + bump mod if db has been changed
-        if self.db.mod:
-            self.flush(mod=mod)
+    def _set_scm(self, val: int) -> None:
+        self.db.execute("update col set scm=?", val)
+
+    def _get_usn(self) -> int:
+        return self.db.scalar("select usn from col")
+
+    def _set_usn(self, val: int) -> None:
+        self.db.execute("update col set usn=?", val)
+
+    def _get_mod(self) -> int:
+        return self.db.scalar("select mod from col")
+
+    def _set_mod(self, val: int) -> None:
+        self.db.execute("update col set mod=?", val)
+
+    def _get_ls(self) -> int:
+        return self.db.scalar("select ls from col")
+
+    def _set_ls(self, val: int) -> None:
+        self.db.execute("update col set ls=?", val)
+
+    crt = property(_get_crt, _set_crt)
+    mod = property(_get_mod, _set_mod)
+    _usn = property(_get_usn, _set_usn)
+    scm = property(_get_scm, _set_scm)
+    ls = property(_get_ls, _set_ls)
+
+    # legacy
+    def setMod(self, mod: Optional[int] = None) -> None:
+        # this is now a no-op, as modifications to things like the config
+        # will mark the collection modified automatically
+        pass
+
+    flush = setMod
+
+    def modified_after_begin(self) -> bool:
+        # Until we can move away from long-running transactions, the Python
+        # code needs to know if transaction should be committed, so we need
+        # to check if the backend updated the modification time.
+        return self.db.last_begin_at <= self.mod
+
+    def save(
+        self, name: Optional[str] = None, mod: Optional[int] = None, trx: bool = True
+    ) -> None:
+        "Flush, commit DB, and take out another write lock if trx=True."
+        # commit needed?
+        if self.db.mod or self.modified_after_begin():
+            self.mod = intTime(1000) if mod is None else mod
             self.db.commit()
-            self.lock()
             self.db.mod = False
+            if trx:
+                self.db.begin()
+        elif not trx:
+            # if no changes were pending but calling code expects to be
+            # outside of a transaction, we need to roll back
+            self.db.rollback()
+
         self._markOp(name)
         self._lastSave = time.time()
 
@@ -234,47 +225,66 @@ crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
             return True
         return None
 
-    def lock(self) -> None:
-        # make sure we don't accidentally bump mod time
-        mod = self.db.mod
-        self.db.execute("update col set mod=mod")
-        self.db.mod = mod
-
-    def close(self, save: bool = True) -> None:
+    def close(self, save: bool = True, downgrade: bool = False) -> None:
         "Disconnect from DB."
         if self.db:
             if save:
-                self.save()
+                self.save(trx=False)
             else:
                 self.db.rollback()
-            if not self.server:
-                self.db.setAutocommit(True)
-                self.db.execute("pragma journal_mode = delete")
-                self.db.setAutocommit(False)
-            self.db.close()
+            self.models._clear_cache()
+            self.backend.close_collection(downgrade_to_schema11=downgrade)
             self.db = None
             self.media.close()
             self._closeLog()
 
-    def reopen(self) -> None:
-        "Reconnect to DB (after changing threads, etc)."
-        if not self.db:
-            self.db = DB(self.path)
-            self.media.connect()
-            self._openLog()
+    def close_for_full_sync(self) -> None:
+        # save and cleanup, but backend will take care of collection close
+        if self.db:
+            self.save(trx=False)
+            self.models._clear_cache()
+            self.db = None
+            self.media.close()
+            self._closeLog()
 
     def rollback(self) -> None:
         self.db.rollback()
-        self.load()
-        self.lock()
+        self.db.begin()
+
+    def reopen(self, after_full_sync=False) -> None:
+        assert not self.db
+        assert self.path.endswith(".anki2")
+
+        (media_dir, media_db) = media_paths_from_col_path(self.path)
+
+        log_path = ""
+        should_log = not self.server and self._should_log
+        if should_log:
+            log_path = self.path.replace(".anki2", "2.log")
+
+        # connect
+        if not after_full_sync:
+            self.backend.open_collection(
+                collection_path=self.path,
+                media_folder_path=media_dir,
+                media_db_path=media_db,
+                log_path=log_path,
+            )
+        else:
+            self.media.connect()
+        self.db = DBProxy(weakref.proxy(self.backend))
+        self.db.begin()
+
+        self._openLog()
 
     def modSchema(self, check: bool) -> None:
         "Mark schema modified. Call this first so user can abort if necessary."
         if not self.schemaChanged():
-            if check and not runFilter("modSchema", True):
+            if check and not hooks.schema_will_change(proceed=True):
                 raise AnkiError("abortSchemaMod")
         self.scm = intTime(1000)
         self.setMod()
+        self.save()
 
     def schemaChanged(self) -> Any:
         "True if schema changed since last sync."
@@ -285,22 +295,9 @@ crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
 
     def beforeUpload(self) -> None:
         "Called before a full upload."
-        tbls = "notes", "cards", "revlog"
-        for t in tbls:
-            self.db.execute("update %s set usn=0 where usn=-1" % t)
-        # we can save space by removing the log of deletions
-        self.db.execute("delete from graves")
-        self._usn += 1
-        self.models.beforeUpload()
-        self.tags.beforeUpload()
-        self.decks.beforeUpload()
-        self.modSchema(check=False)
-        self.ls = self.scm
-        # ensure db is compacted before upload
-        self.db.setAutocommit(True)
-        self.db.execute("vacuum")
-        self.db.execute("analyze")
-        self.close()
+        self.save(trx=False)
+        self.backend.before_upload()
+        self.close(save=False, downgrade=True)
 
     # Object creation helpers
     ##########################################################################
@@ -344,199 +341,35 @@ crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
         "Return a new note with the current model."
         return Note(self, self.models.current(forDeck))
 
-    def addNote(self, note: Note) -> int:
-        """Add a note to the collection. Return number of new cards."""
-        # check we have card models available, then save
-        cms = self.findTemplates(note)
-        if not cms:
-            return 0
-        note.flush()
-        # deck conf governs which of these are used
-        due = self.nextID("pos")
-        # add cards
-        ncards = 0
-        for template in cms:
-            self._newCard(note, template, due)
-            ncards += 1
-        return ncards
+    def add_note(self, note: Note, deck_id: int) -> None:
+        note.id = self.backend.add_note(note=note.to_backend_note(), deck_id=deck_id)
 
-    def remNotes(self, ids: Iterable[int]) -> None:
-        """Deletes notes with the given IDs."""
-        self.remCards(self.db.list("select id from cards where nid in " + ids2str(ids)))
+    def remove_notes(self, note_ids: Sequence[int]) -> None:
+        hooks.notes_will_be_deleted(self, note_ids)
+        self.backend.remove_notes(note_ids=note_ids, card_ids=[])
+
+    def remove_notes_by_card(self, card_ids: List[int]) -> None:
+        if hooks.notes_will_be_deleted.count():
+            nids = self.db.list(
+                "select nid from cards where id in " + ids2str(card_ids)
+            )
+            hooks.notes_will_be_deleted(self, nids)
+        self.backend.remove_notes(note_ids=[], card_ids=card_ids)
+
+    def card_ids_of_note(self, note_id: int) -> Sequence[int]:
+        return self.backend.cards_of_note(note_id)
+
+    # legacy
+
+    def addNote(self, note: Note) -> int:
+        self.add_note(note, note.model()["did"])
+        return len(note.cards())
+
+    def remNotes(self, ids: Sequence[int]) -> None:
+        self.remove_notes(ids)
 
     def _remNotes(self, ids: List[int]) -> None:
-        """Bulk delete notes by ID. Don't call this directly."""
-        if not ids:
-            return
-        strids = ids2str(ids)
-        # we need to log these independently of cards, as one side may have
-        # more card templates
-        runHook("remNotes", self, ids)
-        self._logRem(ids, REM_NOTE)
-        self.db.execute("delete from notes where id in %s" % strids)
-
-    # Card creation
-    ##########################################################################
-
-    def findTemplates(self, note: Note) -> List:
-        "Return (active), non-empty templates."
-        model = note.model()
-        avail = self.models.availOrds(model, joinFields(note.fields))
-        return self._tmplsFromOrds(model, avail)
-
-    def _tmplsFromOrds(self, model: NoteType, avail: List[int]) -> List:
-        ok = []
-        if model["type"] == MODEL_STD:
-            for t in model["tmpls"]:
-                if t["ord"] in avail:
-                    ok.append(t)
-        else:
-            # cloze - generate temporary templates from first
-            for ord in avail:
-                t = copy.copy(model["tmpls"][0])
-                t["ord"] = ord
-                ok.append(t)
-        return ok
-
-    def genCards(self, nids: List[int]) -> List[int]:
-        "Generate cards for non-empty templates, return ids to remove."
-        # build map of (nid,ord) so we don't create dupes
-        snids = ids2str(nids)
-        have: Dict[int, Dict[int, int]] = {}
-        dids: Dict[int, Optional[int]] = {}
-        dues: Dict[int, int] = {}
-        for id, nid, ord, did, due, odue, odid, type in self.db.execute(
-            "select id, nid, ord, did, due, odue, odid, type from cards where nid in "
-            + snids
-        ):
-            # existing cards
-            if nid not in have:
-                have[nid] = {}
-            have[nid][ord] = id
-            # if in a filtered deck, add new cards to original deck
-            if odid != 0:
-                did = odid
-            # and their dids
-            if nid in dids:
-                if dids[nid] and dids[nid] != did:
-                    # cards are in two or more different decks; revert to
-                    # model default
-                    dids[nid] = None
-            else:
-                # first card or multiple cards in same deck
-                dids[nid] = did
-            # save due
-            if odid != 0:
-                due = odue
-            if nid not in dues and type == 0:
-                # Add due to new card only if it's the due of a new sibling
-                dues[nid] = due
-        # build cards for each note
-        data = []
-        ts = maxID(self.db)
-        now = intTime()
-        rem = []
-        usn = self.usn()
-        for nid, mid, flds in self.db.execute(
-            "select id, mid, flds from notes where id in " + snids
-        ):
-            model = self.models.get(mid)
-            assert model
-            avail = self.models.availOrds(model, flds)
-            did = dids.get(nid) or model["did"]
-            due = dues.get(nid)
-            # add any missing cards
-            for t in self._tmplsFromOrds(model, avail):
-                doHave = nid in have and t["ord"] in have[nid]
-                if not doHave:
-                    # check deck is not a cram deck
-                    did = t["did"] or did
-                    if self.decks.isDyn(did):
-                        did = 1
-                    # if the deck doesn't exist, use default instead
-                    did = self.decks.get(did)["id"]
-                    # use sibling due# if there is one, else use a new id
-                    if due is None:
-                        due = self.nextID("pos")
-                    data.append((ts, nid, did, t["ord"], now, usn, due))
-                    ts += 1
-            # note any cards that need removing
-            if nid in have:
-                for ord, id in list(have[nid].items()):
-                    if ord not in avail:
-                        rem.append(id)
-        # bulk update
-        self.db.executemany(
-            """
-insert into cards values (?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,"")""",
-            data,
-        )
-        return rem
-
-    # type 0 - when previewing in add dialog, only non-empty
-    # type 1 - when previewing edit, only existing
-    # type 2 - when previewing in models dialog, all templates
-    def previewCards(self, note: Note, type: int = 0, did: None = None) -> List:
-        if type == 0:
-            cms = self.findTemplates(note)
-        elif type == 1:
-            cms = [c.template() for c in note.cards()]
-        else:
-            cms = note.model()["tmpls"]
-        if not cms:
-            return []
-        cards = []
-        for template in cms:
-            cards.append(self._newCard(note, template, 1, flush=False, did=did))
-        return cards
-
-    def _newCard(
-        self,
-        note: Note,
-        template: Template,
-        due: int,
-        flush: bool = True,
-        did: None = None,
-    ) -> Card:
-        "Create a new card."
-        card = Card(self)
-        card.nid = note.id
-        card.ord = template["ord"]
-        card.did = self.db.scalar(
-            "select did from cards where nid = ? and ord = ?", card.nid, card.ord
-        )
-        # Use template did (deck override) if valid, otherwise did in argument, otherwise model did
-        if not card.did:
-            if template["did"] and str(template["did"]) in self.decks.decks:
-                card.did = int(template["did"])
-            elif did:
-                card.did = did
-            else:
-                card.did = note.model()["did"]
-        # if invalid did, use default instead
-        deck = self.decks.get(card.did)
-        assert deck
-        if deck["dyn"]:
-            # must not be a filtered deck
-            card.did = 1
-        else:
-            card.did = deck["id"]
-        card.due = self._dueForDid(card.did, due)
-        if flush:
-            card.flush()
-        return card
-
-    def _dueForDid(self, did: int, due: int) -> int:
-        conf = self.decks.confForDid(did)
-        # in order due?
-        if conf["new"]["order"] == NEW_CARDS_DUE:
-            return due
-        else:
-            # random mode; seed with note ts so all cards of this note get the
-            # same random number
-            r = random.Random()
-            r.seed(due)
-            return r.randrange(1, max(due, 1000))
+        pass
 
     # Cards
     ##########################################################################
@@ -547,169 +380,85 @@ insert into cards values (?,?,?,?,?,?,0,0,?,0,0,0,0,0,0,0,0,"")""",
     def cardCount(self) -> Any:
         return self.db.scalar("select count() from cards")
 
+    def remove_cards_and_orphaned_notes(self, card_ids: Sequence[int]):
+        "You probably want .remove_notes_by_card() instead."
+        self.backend.remove_cards(card_ids=card_ids)
+
+    def set_deck(self, card_ids: List[int], deck_id: int) -> None:
+        self.backend.set_deck(card_ids=card_ids, deck_id=deck_id)
+
+    # legacy
+
     def remCards(self, ids: List[int], notes: bool = True) -> None:
-        "Bulk delete cards by ID."
-        if not ids:
-            return
-        sids = ids2str(ids)
-        nids = self.db.list("select nid from cards where id in " + sids)
-        # remove cards
-        self._logRem(ids, REM_CARD)
-        self.db.execute("delete from cards where id in " + sids)
-        # then notes
-        if not notes:
-            return
-        nids = self.db.list(
-            """
-select id from notes where id in %s and id not in (select nid from cards)"""
-            % ids2str(nids)
-        )
-        self._remNotes(nids)
+        self.remove_cards_and_orphaned_notes(ids)
 
     def emptyCids(self) -> List[int]:
-        """Returns IDs of empty cards."""
-        rem: List[int] = []
-        for m in self.models.all():
-            rem += self.genCards(self.models.nids(m))
-        return rem
+        print("emptyCids() will go away")
+        return []
 
-    def emptyCardReport(self, cids) -> str:
-        rep = ""
-        for ords, cnt, flds in self.db.all(
-            """
-select group_concat(ord+1), count(), flds from cards c, notes n
-where c.nid = n.id and c.id in %s group by nid"""
-            % ids2str(cids)
-        ):
-            rep += _("Empty card numbers: %(c)s\nFields: %(f)s\n\n") % dict(
-                c=ords, f=flds.replace("\x1f", " / ")
-            )
-        return rep
-
-    # Field checksums and sorting fields
+    # Card generation & field checksums/sort fields
     ##########################################################################
 
-    def _fieldData(self, snids: str) -> Any:
-        return self.db.execute("select id, mid, flds from notes where id in " + snids)
-
-    def updateFieldCache(self, nids: List[int]) -> None:
-        "Update field checksums and sort cache, after find&replace, etc."
-        snids = ids2str(nids)
-        r = []
-        for (nid, mid, flds) in self._fieldData(snids):
-            fields = splitFields(flds)
-            model = self.models.get(mid)
-            if not model:
-                # note points to invalid model
-                continue
-            r.append(
-                (
-                    stripHTMLMedia(fields[self.models.sortIdx(model)]),
-                    fieldChecksum(fields[0]),
-                    nid,
-                )
-            )
-        # apply, relying on calling code to bump usn+mod
-        self.db.executemany("update notes set sfld=?, csum=? where id=?", r)
-
-    # Q/A generation
-    ##########################################################################
-
-    def renderQA(self, ids=None, type="card") -> List:
-        # gather metadata
-        if type == "card":
-            where = "and c.id in " + ids2str(ids)
-        elif type == "note":
-            where = "and f.id in " + ids2str(ids)
-        elif type == "model":
-            where = "and m.id in " + ids2str(ids)
-        elif type == "all":
-            where = ""
-        else:
-            raise Exception()
-        return [self._renderQA(*row) for row in self._qaData(where)]
-
-    # data is [cid, nid, mid, did, ord, tags, flds, cardFlags]
-    def _renderQA(
-        self, data: QAData, qfmt: Optional[str] = None, afmt: Optional[str] = None
-    ) -> Dict[str, Union[str, int]]:
-        "Returns hash of id, question, answer."
-        # extract info from data
-        split_fields = splitFields(data[6])
-        card_ord = data[4]
-        model = self.models.get(data[2])
-        if model["type"] == MODEL_STD:
-            template = model["tmpls"][data[4]]
-        else:
-            template = model["tmpls"][0]
-        flag = data[7]
-        deck_id = data[3]
-        card_id = data[0]
-        tags = data[5]
-        qfmt = qfmt or template["qfmt"]
-        afmt = afmt or template["afmt"]
-
-        # create map of field names -> field content
-        fields: Dict[str, str] = {}
-        for (name, (idx, conf)) in list(self.models.fieldMap(model).items()):
-            fields[name] = split_fields[idx]
-
-        # add special fields
-        fields["Tags"] = tags.strip()
-        fields["Type"] = model["name"]
-        fields["Deck"] = self.decks.name(deck_id)
-        fields["Subdeck"] = fields["Deck"].split("::")[-1]
-        fields["Card"] = template["name"]
-        fields["CardFlag"] = self._flagNameFromCardFlags(flag)
-        fields["c%d" % (card_ord + 1)] = "1"
-
-        fields = runFilter("mungeFields", fields, model, data, self)
-
-        # render fields
-        qatext = render_card(self, qfmt, afmt, fields, card_ord)
-        ret: Dict[str, Any] = dict(q=qatext[0], a=qatext[1], id=card_id)
-
-        # allow add-ons to modify the generated result
-        for type in "q", "a":
-            ret[type] = runFilter("mungeQA", ret[type], type, fields, model, data, self)
-
-        # empty cloze?
-        if type == "q" and model["type"] == MODEL_CLOZE:
-            if not self.models._availClozeOrds(model, data[6], False):
-                ret["q"] += "<p>" + _(
-                    "Please edit this note and add some cloze deletions. (%s)"
-                ) % ("<a href=%s#cloze>%s</a>" % (HELP_SITE, _("help")))
-
-        return ret
-
-    def _qaData(self, where="") -> Any:
-        "Return [cid, nid, mid, did, ord, tags, flds, cardFlags] db query"
-        # NOTE: order selected from database must match order of QAData fields.
-        return self.db.execute(
-            """
-select c.id, f.id, f.mid, c.did, c.ord, f.tags, f.flds, c.flags
-from cards c, notes f
-where c.nid == f.id
-%s"""
-            % where
+    def after_note_updates(
+        self, nids: List[int], mark_modified: bool, generate_cards: bool = True
+    ) -> None:
+        self.backend.after_note_updates(
+            nids=nids, generate_cards=generate_cards, mark_notes_modified=mark_modified
         )
 
-    def _flagNameFromCardFlags(self, flags: int) -> str:
-        flag = flags & 0b111
-        if not flag:
-            return ""
-        return "flag%d" % flag
+    # legacy
+
+    def updateFieldCache(self, nids: List[int]) -> None:
+        self.after_note_updates(nids, mark_modified=False, generate_cards=False)
+
+    # this also updates field cache
+    def genCards(self, nids: List[int]) -> List[int]:
+        self.after_note_updates(nids, mark_modified=False, generate_cards=True)
+        # previously returned empty cards, no longer does
+        return []
 
     # Finding cards
     ##########################################################################
 
-    def findCards(self, query: str, order: Union[bool, str] = False) -> Any:
-        return anki.find.Finder(self).findCards(query, order)
+    # if order=True, use the sort order stored in the collection config
+    # if order=False, do no ordering
+    #
+    # if order is a string, that text is added after 'order by' in the sql statement.
+    # you must add ' asc' or ' desc' to the order, as Anki will replace asc with
+    # desc and vice versa when reverse is set in the collection config, eg
+    # order="c.ivl asc, c.due desc"
+    #
+    # if order is an int enum, sort using that builtin sort, eg
+    # col.find_cards("", order=BuiltinSortKind.CARD_DUE)
+    # the reverse argument only applies when a BuiltinSortKind is provided;
+    # otherwise the collection config defines whether reverse is set or not
+    def find_cards(
+        self,
+        query: str,
+        order: Union[
+            bool,
+            str,
+            pb.BuiltinSearchOrder.BuiltinSortKindValue,  # pylint: disable=no-member
+        ] = False,
+        reverse: bool = False,
+    ) -> Sequence[int]:
+        if isinstance(order, str):
+            mode = pb.SortOrder(custom=order)
+        elif isinstance(order, bool):
+            if order is True:
+                mode = pb.SortOrder(from_config=pb.Empty())
+            else:
+                mode = pb.SortOrder(none=pb.Empty())
+        else:
+            mode = pb.SortOrder(
+                builtin=pb.BuiltinSearchOrder(kind=order, reverse=reverse)
+            )
+        return self.backend.search_cards(search=query, order=mode)
 
-    def findNotes(self, query: str) -> Any:
-        return anki.find.Finder(self).findNotes(query)
+    def find_notes(self, query: str) -> Sequence[int]:
+        return self.backend.search_notes(query)
 
-    def findReplace(
+    def find_and_replace(
         self,
         nids: List[int],
         src: str,
@@ -723,18 +472,60 @@ where c.nid == f.id
     def findDupes(self, fieldName: str, search: str = "") -> List[Tuple[Any, list]]:
         return anki.find.findDupes(self, fieldName, search)
 
-    # Stats
+    findCards = find_cards
+    findNotes = find_notes
+    findReplace = find_and_replace
+
+    # Config
     ##########################################################################
 
-    def cardStats(self, card: Card) -> str:
-        from anki.stats import CardStats
+    def get_config(self, key: str, default: Any = None) -> Any:
+        try:
+            return self.conf.get_immutable(key)
+        except KeyError:
+            return default
 
-        return CardStats(self, card).report()
+    def set_config(self, key: str, val: Any):
+        self.setMod()
+        self.conf.set(key, val)
+
+    def remove_config(self, key):
+        self.setMod()
+        self.conf.remove(key)
+
+    # Stats
+    ##########################################################################
 
     def stats(self) -> "anki.stats.CollectionStats":
         from anki.stats import CollectionStats
 
         return CollectionStats(self)
+
+    def card_stats(self, card_id: int, include_revlog: bool) -> str:
+        import anki.stats as st
+
+        if include_revlog:
+            revlog_style = "margin-top: 2em;"
+        else:
+            revlog_style = "display: none;"
+
+        style = f"""<style>
+.revlog-learn {{ color: {st.colLearn} }}
+.revlog-review {{ color: {st.colMature} }}
+.revlog-relearn {{ color: {st.colRelearn} }}
+.revlog-ease1 {{ color: {st.colRelearn} }}
+table.review-log {{ {revlog_style} }}
+</style>"""
+
+        return style + self.backend.card_stats(card_id)
+
+    def studied_today(self) -> str:
+        return self.backend.studied_today()
+
+    # legacy
+
+    def cardStats(self, card: Card) -> str:
+        return self.card_stats(card.id, include_revlog=False)
 
     # Timeboxing
     ##########################################################################
@@ -743,6 +534,7 @@ where c.nid == f.id
         self._startTime = time.time()
         self._startReps = self.sched.reps
 
+    # FIXME: Use Literal[False] when on Python 3.8
     def timeboxReached(self) -> Union[bool, Tuple[Any, int]]:
         "Return (elapsedTime, reps) if timebox reached, or False."
         if not self.conf["timeLim"]:
@@ -755,10 +547,12 @@ where c.nid == f.id
 
     # Undo
     ##########################################################################
+    # this data structure is a mess, and will be updated soon
+    # in the review case, [1, "Review", [firstReviewedCard, secondReviewedCard, ...], wasLeech]
+    # in the checkpoint case, [2, "action name"]
+    # wasLeech should have been recorded for each card, not globally
 
     def clearUndo(self) -> None:
-        # [type, undoName, data]
-        # type 1 = review; type 2 = checkpoint
         self._undo = None
 
     def undoName(self) -> Any:
@@ -794,11 +588,14 @@ where c.nid == f.id
             c.note().flush()
         # write old data
         c.flush()
-        # and delete revlog entry
-        last = self.db.scalar(
-            "select id from revlog where cid = ? " "order by id desc limit 1", c.id
-        )
-        self.db.execute("delete from revlog where id = ?", last)
+        # and delete revlog entry if not previewing
+        conf = self.sched._cardConf(c)
+        previewing = conf["dyn"] and not conf["resched"]
+        if not previewing:
+            last = self.db.scalar(
+                "select id from revlog where cid = ? " "order by id desc limit 1", c.id
+            )
+            self.db.execute("delete from revlog where id = ?", last)
         # restore any siblings
         self.db.execute(
             "update cards set queue=type,mod=?,usn=? where queue=-2 and nid=?",
@@ -807,7 +604,9 @@ where c.nid == f.id
             c.nid,
         )
         # and finally, update daily counts
-        n = 1 if c.queue == 3 else c.queue
+        n = c.queue
+        if c.queue in (QUEUE_TYPE_DAY_LEARN_RELEARN, QUEUE_TYPE_PREVIEW):
+            n = QUEUE_TYPE_LRN
         type = ("new", "lrn", "rev")[n]
         self.sched._updateStats(c, type, -1)
         self.sched.reps -= 1
@@ -866,217 +665,33 @@ select id from notes where mid = ?) limit 1"""
         Returns tuple of (error: str, ok: bool). 'ok' will be true if no
         problems were found.
         """
-        problems = []
-        curs = self.db.cursor()
-        self.save()
-        oldSize = os.stat(self.path)[stat.ST_SIZE]
-        if self.db.scalar("pragma integrity_check") != "ok":
-            return (_("Collection is corrupt. Please see the manual."), False)
-        # note types with a missing model
-        ids = self.db.list(
-            """
-select id from notes where mid not in """
-            + ids2str(self.models.ids())
-        )
-        if ids:
-            problems.append(
-                ngettext(
-                    "Deleted %d note with missing note type.",
-                    "Deleted %d notes with missing note type.",
-                    len(ids),
-                )
-                % len(ids)
-            )
-            self.remNotes(ids)
-        # for each model
-        for m in self.models.all():
-            for t in m["tmpls"]:
-                if t["did"] == "None":
-                    t["did"] = None
-                    problems.append(_("Fixed AnkiDroid deck override bug."))
-                    self.models.save(m, updateReqs=False)
-            if m["type"] == MODEL_STD:
-                # model with missing req specification
-                if "req" not in m:
-                    self.models._updateRequired(m)
-                    problems.append(_("Fixed note type: %s") % m["name"])
-                # cards with invalid ordinal
-                ids = self.db.list(
-                    """
-select id from cards where ord not in %s and nid in (
-select id from notes where mid = ?)"""
-                    % ids2str([t["ord"] for t in m["tmpls"]]),
-                    m["id"],
-                )
-                if ids:
-                    problems.append(
-                        ngettext(
-                            "Deleted %d card with missing template.",
-                            "Deleted %d cards with missing template.",
-                            len(ids),
-                        )
-                        % len(ids)
-                    )
-                    self.remCards(ids)
-            # notes with invalid field count
-            ids = []
-            for id, flds in self.db.execute(
-                "select id, flds from notes where mid = ?", m["id"]
-            ):
-                if (flds.count("\x1f") + 1) != len(m["flds"]):
-                    ids.append(id)
-            if ids:
-                problems.append(
-                    ngettext(
-                        "Deleted %d note with wrong field count.",
-                        "Deleted %d notes with wrong field count.",
-                        len(ids),
-                    )
-                    % len(ids)
-                )
-                self.remNotes(ids)
-        # delete any notes with missing cards
-        ids = self.db.list(
-            """
-select id from notes where id not in (select distinct nid from cards)"""
-        )
-        if ids:
-            cnt = len(ids)
-            problems.append(
-                ngettext(
-                    "Deleted %d note with no cards.",
-                    "Deleted %d notes with no cards.",
-                    cnt,
-                )
-                % cnt
-            )
-            self._remNotes(ids)
-        # cards with missing notes
-        ids = self.db.list(
-            """
-select id from cards where nid not in (select id from notes)"""
-        )
-        if ids:
-            cnt = len(ids)
-            problems.append(
-                ngettext(
-                    "Deleted %d card with missing note.",
-                    "Deleted %d cards with missing note.",
-                    cnt,
-                )
-                % cnt
-            )
-            self.remCards(ids)
-        # cards with odue set when it shouldn't be
-        ids = self.db.list(
-            """
-select id from cards where odue > 0 and (type=1 or queue=2) and not odid"""
-        )
-        if ids:
-            cnt = len(ids)
-            problems.append(
-                ngettext(
-                    "Fixed %d card with invalid properties.",
-                    "Fixed %d cards with invalid properties.",
-                    cnt,
-                )
-                % cnt
-            )
-            self.db.execute("update cards set odue=0 where id in " + ids2str(ids))
-        # cards with odid set when not in a dyn deck
-        dids = [id for id in self.decks.allIds() if not self.decks.isDyn(id)]
-        ids = self.db.list(
-            """
-select id from cards where odid > 0 and did in %s"""
-            % ids2str(dids)
-        )
-        if ids:
-            cnt = len(ids)
-            problems.append(
-                ngettext(
-                    "Fixed %d card with invalid properties.",
-                    "Fixed %d cards with invalid properties.",
-                    cnt,
-                )
-                % cnt
-            )
-            self.db.execute(
-                "update cards set odid=0, odue=0 where id in " + ids2str(ids)
-            )
-        # tags
-        self.tags.registerNotes()
-        # field cache
-        for m in self.models.all():
-            self.updateFieldCache(self.models.nids(m))
-        # new cards can't have a due position > 32 bits, so wrap items over
-        # 2 million back to 1 million
-        curs.execute(
-            """
-update cards set due=1000000+due%1000000,mod=?,usn=? where due>=1000000
-and type=0""",
-            [intTime(), self.usn()],
-        )
-        if curs.rowcount:
-            problems.append(
-                "Found %d new cards with a due number >= 1,000,000 - consider repositioning them in the Browse screen."
-                % curs.rowcount
-            )
-        # new card position
-        self.conf["nextPos"] = (
-            self.db.scalar("select max(due)+1 from cards where type = 0") or 0
-        )
-        # reviews should have a reasonable due #
-        ids = self.db.list("select id from cards where queue = 2 and due > 100000")
-        if ids:
-            problems.append("Reviews had incorrect due date.")
-            self.db.execute(
-                "update cards set due = ?, ivl = 1, mod = ?, usn = ? where id in %s"
-                % ids2str(ids),
-                self.sched.today,
-                intTime(),
-                self.usn(),
-            )
-        # v2 sched had a bug that could create decimal intervals
-        curs.execute(
-            "update cards set ivl=round(ivl),due=round(due) where ivl!=round(ivl) or due!=round(due)"
-        )
-        if curs.rowcount:
-            problems.append("Fixed %d cards with v2 scheduler bug." % curs.rowcount)
-
-        curs.execute(
-            "update revlog set ivl=round(ivl),lastIvl=round(lastIvl) where ivl!=round(ivl) or lastIvl!=round(lastIvl)"
-        )
-        if curs.rowcount:
-            problems.append(
-                "Fixed %d review history entries with v2 scheduler bug." % curs.rowcount
-            )
-        # models
-        if self.models.ensureNotEmpty():
-            problems.append("Added missing note type.")
-        # and finally, optimize
-        self.optimize()
-        newSize = os.stat(self.path)[stat.ST_SIZE]
-        txt = _("Database rebuilt and optimized.")
-        ok = not problems
-        problems.append(txt)
-        # if any problems were found, force a full sync
-        if not ok:
-            self.modSchema(check=False)
-        self.save()
+        self.save(trx=False)
+        try:
+            problems = list(self.backend.check_database())
+            ok = not problems
+            problems.append(self.tr(TR.DATABASE_CHECK_REBUILT))
+        except DBError as e:
+            problems = [str(e.args[0])]
+            ok = False
+        finally:
+            try:
+                self.db.begin()
+            except:
+                # may fail if the DB is very corrupt
+                pass
         return ("\n".join(problems), ok)
 
     def optimize(self) -> None:
-        self.db.setAutocommit(True)
+        self.save(trx=False)
         self.db.execute("vacuum")
         self.db.execute("analyze")
-        self.db.setAutocommit(False)
-        self.lock()
+        self.db.begin()
 
     # Logging
     ##########################################################################
 
     def log(self, *args, **kwargs) -> None:
-        if not self._debugLog:
+        if not self._should_log:
             return
 
         def customRepr(x):
@@ -1096,7 +711,7 @@ and type=0""",
             print(buf)
 
     def _openLog(self) -> None:
-        if not self._debugLog:
+        if not self._should_log:
             return
         lpath = re.sub(r"\.anki2$", ".log", self.path)
         if os.path.exists(lpath) and os.path.getsize(lpath) > 10 * 1024 * 1024:
@@ -1107,7 +722,7 @@ and type=0""",
         self._logHnd = open(lpath, "a", encoding="utf8")
 
     def _closeLog(self) -> None:
-        if not self._debugLog:
+        if not self._should_log:
             return
         self._logHnd.close()
         self._logHnd = None
@@ -1125,3 +740,7 @@ and type=0""",
             self.usn(),
             intTime(),
         )
+
+
+# legacy name
+_Collection = Collection

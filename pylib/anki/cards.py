@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import pprint
 import time
-from typing import Any, Dict, Optional, Union
+from typing import List, Optional
 
 import anki  # pylint: disable=unused-import
+from anki import hooks
 from anki.consts import *
-from anki.hooks import runHook
+from anki.models import NoteType, Template
 from anki.notes import Note
-from anki.utils import intTime, joinFields, timestampID
+from anki.rsbackend import BackendCard
+from anki.sound import AVTag
 
 # Cards
 ##########################################################################
@@ -26,164 +28,132 @@ from anki.utils import intTime, joinFields, timestampID
 
 
 class Card:
-    _qa: Optional[Dict[str, Union[str, int]]]
     _note: Optional[Note]
     timerStarted: Optional[float]
-    lastIvl: Optional[int]
+    lastIvl: int
+    ord: int
 
     def __init__(
-        self, col: anki.collection._Collection, id: Optional[int] = None
+        self, col: anki.collection.Collection, id: Optional[int] = None
     ) -> None:
-        self.col = col
+        self.col = col.weakref()
         self.timerStarted = None
-        self._qa = None
-        self._note = None
+        self._render_output: Optional[anki.template.TemplateRenderOutput] = None
         if id:
+            # existing card
             self.id = id
             self.load()
         else:
-            # to flush, set nid, ord, and due
-            self.id = timestampID(col.db, "cards")
-            self.did = 1
-            self.crt = intTime()
-            self.type = 0
-            self.queue = 0
-            self.ivl = 0
-            self.factor = 0
-            self.reps = 0
-            self.lapses = 0
-            self.left = 0
-            self.odue = 0
-            self.odid = 0
-            self.flags = 0
-            self.data = ""
+            # new card with defaults
+            self._load_from_backend_card(BackendCard())
 
     def load(self) -> None:
-        (
-            self.id,
-            self.nid,
-            self.did,
-            self.ord,
-            self.mod,
-            self.usn,
-            self.type,
-            self.queue,
-            self.due,
-            self.ivl,
-            self.factor,
-            self.reps,
-            self.lapses,
-            self.left,
-            self.odue,
-            self.odid,
-            self.flags,
-            self.data,
-        ) = self.col.db.first("select * from cards where id = ?", self.id)
-        self._qa = None
+        c = self.col.backend.get_card(self.id)
+        assert c
+        self._load_from_backend_card(c)
+
+    def _load_from_backend_card(self, c: BackendCard) -> None:
+        self._render_output = None
         self._note = None
+        self.id = c.id
+        self.nid = c.note_id
+        self.did = c.deck_id
+        self.ord = c.template_idx
+        self.mod = c.mtime_secs
+        self.usn = c.usn
+        self.type = c.ctype
+        self.queue = c.queue
+        self.due = c.due
+        self.ivl = c.interval
+        self.factor = c.ease_factor
+        self.reps = c.reps
+        self.lapses = c.lapses
+        self.left = c.remaining_steps
+        self.odue = c.original_due
+        self.odid = c.original_deck_id
+        self.flags = c.flags
+        self.data = c.data
+
+    def _bugcheck(self) -> None:
+        if (
+            self.queue == QUEUE_TYPE_REV
+            and self.odue
+            and not self.col.decks.isDyn(self.did)
+        ):
+            hooks.card_odue_was_invalid()
 
     def flush(self) -> None:
-        self.mod = intTime()
-        self.usn = self.col.usn()
-        # bug check
-        if self.queue == 2 and self.odue and not self.col.decks.isDyn(self.did):
-            runHook("odueInvalid")
-        assert self.due < 4294967296
-        self.col.db.execute(
-            """
-insert or replace into cards values
-(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            self.id,
-            self.nid,
-            self.did,
-            self.ord,
-            self.mod,
-            self.usn,
-            self.type,
-            self.queue,
-            self.due,
-            self.ivl,
-            self.factor,
-            self.reps,
-            self.lapses,
-            self.left,
-            self.odue,
-            self.odid,
-            self.flags,
-            self.data,
+        self._bugcheck()
+        hooks.card_will_flush(self)
+        # mtime & usn are set by backend
+        card = BackendCard(
+            id=self.id,
+            note_id=self.nid,
+            deck_id=self.did,
+            template_idx=self.ord,
+            ctype=self.type,
+            queue=self.queue,
+            due=self.due,
+            interval=self.ivl,
+            ease_factor=self.factor,
+            reps=self.reps,
+            lapses=self.lapses,
+            remaining_steps=self.left,
+            original_due=self.odue,
+            original_deck_id=self.odid,
+            flags=self.flags,
+            data=self.data,
         )
-        self.col.log(self)
+        if self.id != 0:
+            self.col.backend.update_card(card)
+        else:
+            self.id = self.col.backend.add_card(card)
 
-    def flushSched(self) -> None:
-        self.mod = intTime()
-        self.usn = self.col.usn()
-        # bug checks
-        if self.queue == 2 and self.odue and not self.col.decks.isDyn(self.did):
-            runHook("odueInvalid")
-        assert self.due < 4294967296
-        self.col.db.execute(
-            """update cards set
-mod=?, usn=?, type=?, queue=?, due=?, ivl=?, factor=?, reps=?,
-lapses=?, left=?, odue=?, odid=?, did=? where id = ?""",
-            self.mod,
-            self.usn,
-            self.type,
-            self.queue,
-            self.due,
-            self.ivl,
-            self.factor,
-            self.reps,
-            self.lapses,
-            self.left,
-            self.odue,
-            self.odid,
-            self.did,
-            self.id,
-        )
-        self.col.log(self)
+    def question(self, reload: bool = False, browser: bool = False) -> str:
+        return self.render_output(reload, browser).question_and_style()
 
-    def q(self, reload: bool = False, browser: bool = False) -> str:
-        return self.css() + self._getQA(reload, browser)["q"]
+    def answer(self) -> str:
+        return self.render_output().answer_and_style()
 
-    def a(self) -> str:
-        return self.css() + self._getQA()["a"]
+    def question_av_tags(self) -> List[AVTag]:
+        return self.render_output().question_av_tags
 
+    def answer_av_tags(self) -> List[AVTag]:
+        return self.render_output().answer_av_tags
+
+    # legacy
     def css(self) -> str:
-        return "<style>%s</style>" % self.model()["css"]
+        return "<style>%s</style>" % self.render_output().css
 
-    def _getQA(self, reload: bool = False, browser: bool = False) -> Any:
-        if not self._qa or reload:
-            f = self.note(reload)
-            m = self.model()
-            t = self.template()
-            if browser:
-                args = [t.get("bqfmt"), t.get("bafmt")]
-            else:
-                args = []
-            self._qa = self.col._renderQA(
-                (
-                    self.id,
-                    f.id,
-                    m["id"],
-                    self.odid or self.did,
-                    self.ord,
-                    f.stringTags(),
-                    f.joinedFields(),
-                    self.flags,
-                ),
-                *args,
-            )  # type: ignore
-        return self._qa
+    def render_output(
+        self, reload: bool = False, browser: bool = False
+    ) -> anki.template.TemplateRenderOutput:
+        if not self._render_output or reload:
+            self._render_output = (
+                anki.template.TemplateRenderContext.from_existing_card(
+                    self, browser
+                ).render()
+            )
+        return self._render_output
 
-    def note(self, reload: bool = False) -> Any:
+    def set_render_output(self, output: anki.template.TemplateRenderOutput) -> None:
+        self._render_output = output
+
+    def note(self, reload: bool = False) -> Note:
         if not self._note or reload:
             self._note = self.col.getNote(self.nid)
         return self._note
 
-    def model(self) -> Any:
+    def note_type(self) -> NoteType:
         return self.col.models.get(self.note().mid)
 
-    def template(self) -> Any:
+    # legacy aliases
+    flushSched = flush
+    q = question
+    a = answer
+    model = note_type
+
+    def template(self) -> Template:
         m = self.model()
         if m["type"] == MODEL_STD:
             return self.model()["tmpls"][self.ord]
@@ -193,36 +163,41 @@ lapses=?, left=?, odue=?, odid=?, did=? where id = ?""",
     def startTimer(self) -> None:
         self.timerStarted = time.time()
 
-    def timeLimit(self) -> Any:
+    def timeLimit(self) -> int:
         "Time limit for answering in milliseconds."
         conf = self.col.decks.confForDid(self.odid or self.did)
         return conf["maxTaken"] * 1000
 
-    def shouldShowTimer(self) -> Any:
+    def shouldShowTimer(self) -> bool:
         conf = self.col.decks.confForDid(self.odid or self.did)
         return conf["timer"]
 
-    def timeTaken(self) -> Any:
+    def replay_question_audio_on_answer_side(self) -> bool:
+        conf = self.col.decks.confForDid(self.odid or self.did)
+        return conf.get("replayq", True)
+
+    def autoplay(self) -> bool:
+        return self.col.decks.confForDid(self.odid or self.did)["autoplay"]
+
+    def timeTaken(self) -> int:
         "Time taken to answer card, in integer MS."
         total = int((time.time() - self.timerStarted) * 1000)
         return min(total, self.timeLimit())
 
-    def isEmpty(self) -> Optional[bool]:
-        ords = self.col.models.availOrds(self.model(), joinFields(self.note().fields))
-        if self.ord not in ords:
-            return True
+    # legacy
+    def isEmpty(self) -> bool:
         return False
 
     def __repr__(self) -> str:
         d = dict(self.__dict__)
         # remove non-useful elements
         del d["_note"]
-        del d["_qa"]
+        del d["_render_output"]
         del d["col"]
         del d["timerStarted"]
-        return pprint.pformat(d, width=300)
+        return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
 
-    def userFlag(self) -> Any:
+    def userFlag(self) -> int:
         return self.flags & 0b111
 
     def setUserFlag(self, flag: int) -> None:

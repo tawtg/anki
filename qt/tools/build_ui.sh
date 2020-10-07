@@ -4,7 +4,7 @@
 # should be on the path.
 #
 
-set -e
+set -eu -o pipefail ${SHELLFLAGS}
 
 if [ ! -d "designer" ]
 then

@@ -9,16 +9,18 @@ import shutil
 import traceback
 import unicodedata
 import zipfile
+from concurrent.futures import Future
+from typing import Optional
 
 import anki.importing as importing
 import aqt.deckchooser
 import aqt.forms
 import aqt.modelchooser
-from anki.hooks import addHook, remHook
 from anki.lang import _, ngettext
-from aqt import AnkiQt
+from aqt import AnkiQt, gui_hooks
 from aqt.qt import *
 from aqt.utils import (
+    TR,
     askUser,
     getFile,
     getOnlyText,
@@ -27,6 +29,7 @@ from aqt.utils import (
     showText,
     showWarning,
     tooltip,
+    tr,
 )
 
 
@@ -53,7 +56,7 @@ class ChangeMap(QDialog):
                 self.frm.fields.setCurrentRow(n)
             else:
                 self.frm.fields.setCurrentRow(n + 1)
-        self.field = None
+        self.field: Optional[str] = None
 
     def getField(self):
         self.exec_()
@@ -73,26 +76,29 @@ class ChangeMap(QDialog):
         self.accept()
 
 
+# called by importFile() when importing a mappable file like .csv
 class ImportDialog(QDialog):
-    def __init__(self, mw: AnkiQt, importer):
+    def __init__(self, mw: AnkiQt, importer) -> None:
         QDialog.__init__(self, mw, Qt.Window)
         self.mw = mw
         self.importer = importer
         self.frm = aqt.forms.importing.Ui_ImportDialog()
         self.frm.setupUi(self)
-        self.frm.buttonBox.button(QDialogButtonBox.Help).clicked.connect(
-            self.helpRequested
+        qconnect(
+            self.frm.buttonBox.button(QDialogButtonBox.Help).clicked, self.helpRequested
         )
         self.setupMappingFrame()
         self.setupOptions()
         self.modelChanged()
         self.frm.autoDetect.setVisible(self.importer.needDelimiter)
-        addHook("currentModelChanged", self.modelChanged)
-        self.frm.autoDetect.clicked.connect(self.onDelimiter)
+        gui_hooks.current_note_type_did_change.append(self.modelChanged)
+        qconnect(self.frm.autoDetect.clicked, self.onDelimiter)
         self.updateDelimiterButtonText()
         self.frm.allowHTML.setChecked(self.mw.pm.profile.get("allowHTML", True))
-        self.frm.importMode.currentIndexChanged.connect(self.importModeChanged)
+        qconnect(self.frm.importMode.currentIndexChanged, self.importModeChanged)
         self.frm.importMode.setCurrentIndex(self.mw.pm.profile.get("importMode", 1))
+        self.frm.tagModified.setText(self.mw.pm.profile.get("tagModified", ""))
+        self.frm.tagModified.setCol(self.mw.col)
         # import button
         b = QPushButton(_("Import"))
         self.frm.buttonBox.addButton(b, QDialogButtonBox.AcceptRole)
@@ -105,7 +111,7 @@ class ImportDialog(QDialog):
         )
         self.deck = aqt.deckchooser.DeckChooser(self.mw, self.frm.deckArea, label=False)
 
-    def modelChanged(self):
+    def modelChanged(self, unused=None):
         self.importer.model = self.mw.col.models.current()
         self.importer.initMapping()
         self.showMapping()
@@ -180,40 +186,44 @@ you can enter it here. Use \\t to represent tab."""
         self.mw.pm.profile["importMode"] = self.importer.importMode
         self.importer.allowHTML = self.frm.allowHTML.isChecked()
         self.mw.pm.profile["allowHTML"] = self.importer.allowHTML
-        if self.frm.tagModifiedCheck.isChecked():
-            self.importer.tagModified = self.frm.tagModifiedTag.text()
+        self.importer.tagModified = self.frm.tagModified.text()
         self.mw.pm.profile["tagModified"] = self.importer.tagModified
         did = self.deck.selectedId()
         if did != self.importer.model["did"]:
             self.importer.model["did"] = did
             self.mw.col.models.save(self.importer.model, updateReqs=False)
         self.mw.col.decks.select(did)
-        self.mw.progress.start(immediate=True)
+        self.mw.progress.start()
         self.mw.checkpoint(_("Import"))
-        try:
-            self.importer.run()
-        except UnicodeDecodeError:
-            showUnicodeWarning()
-            return
-        except Exception as e:
-            msg = _("Import failed.\n")
-            err = repr(str(e))
-            if "1-character string" in err:
-                msg += err
-            elif "invalidTempFolder" in err:
-                msg += self.mw.errorHandler.tempFolderMsg()
-            else:
-                msg += traceback.format_exc()
-            showText(msg)
-            return
-        finally:
+
+        def on_done(future: Future):
             self.mw.progress.finish()
-        txt = _("Importing complete.") + "\n"
-        if self.importer.log:
-            txt += "\n".join(self.importer.log)
-        self.close()
-        showText(txt)
-        self.mw.reset()
+
+            try:
+                future.result()
+            except UnicodeDecodeError:
+                showUnicodeWarning()
+                return
+            except Exception as e:
+                msg = tr(TR.IMPORTING_FAILED_DEBUG_INFO) + "\n"
+                err = repr(str(e))
+                if "1-character string" in err:
+                    msg += err
+                elif "invalidTempFolder" in err:
+                    msg += self.mw.errorHandler.tempFolderMsg()
+                else:
+                    msg += traceback.format_exc()
+                showText(msg)
+                return
+            else:
+                txt = _("Importing complete.") + "\n"
+                if self.importer.log:
+                    txt += "\n".join(self.importer.log)
+                self.close()
+                showText(txt)
+                self.mw.reset()
+
+        self.mw.taskman.run_in_background(self.importer.run, on_done)
 
     def setupMappingFrame(self):
         # qt seems to have a bug with adding/removing from a grid, so we add
@@ -257,7 +267,7 @@ you can enter it here. Use \\t to represent tab."""
             self.grid.addWidget(QLabel(text), num, 1)
             button = QPushButton(_("Change"))
             self.grid.addWidget(button, num, 2)
-            button.clicked.connect(lambda _, s=self, n=num: s.changeMappingNum(n))
+            qconnect(button.clicked, lambda _, s=self, n=num: s.changeMappingNum(n))
 
     def changeMappingNum(self, n):
         f = ChangeMap(self.mw, self.importer.model, self.mapping[n]).getField()
@@ -278,10 +288,10 @@ you can enter it here. Use \\t to represent tab."""
         else:
             self.showMapping(keepMapping=True)
 
-    def reject(self):
+    def reject(self) -> None:
         self.modelChooser.cleanup()
         self.deck.cleanup()
-        remHook("currentModelChanged", self.modelChanged)
+        gui_hooks.current_note_type_did_change.remove(self.modelChanged)
         QDialog.reject(self)
 
     def helpRequested(self):
@@ -289,11 +299,9 @@ you can enter it here. Use \\t to represent tab."""
 
     def importModeChanged(self, newImportMode):
         if newImportMode == 0:
-            allowTagModified = True
+            self.frm.tagModified.setEnabled(True)
         else:
-            allowTagModified = False
-        self.frm.tagModifiedCheck.setEnabled(allowTagModified)
-        self.frm.tagModifiedTag.setEnabled(allowTagModified)
+            self.frm.tagModified.setEnabled(False)
 
 
 def showUnicodeWarning():
@@ -354,21 +362,24 @@ def importFile(mw, file):
         mw.progress.start(immediate=True)
         try:
             importer.open()
+            mw.progress.finish()
+            diag = ImportDialog(mw, importer)
         except UnicodeDecodeError:
+            mw.progress.finish()
             showUnicodeWarning()
             return
         except Exception as e:
+            mw.progress.finish()
             msg = repr(str(e))
             if msg == "'unknownFormat'":
                 showWarning(_("Unknown file format."))
             else:
-                msg = _("Import failed. Debugging info:\n")
+                msg = tr(TR.IMPORTING_FAILED_DEBUG_INFO) + "\n"
                 msg += str(traceback.format_exc())
                 showText(msg)
             return
         finally:
-            mw.progress.finish()
-        diag = ImportDialog(mw, importer)
+            importer.close()
     else:
         # if it's an apkg/zip, first test it's a valid file
         if importer.__class__.__name__ == "AnkiPackageImporter":
@@ -378,45 +389,52 @@ def importFile(mw, file):
             except:
                 showWarning(invalidZipMsg())
                 return
-            # we need to ask whether to import/replace
+            # we need to ask whether to import/replace; if it's
+            # a colpkg file then the rest of the import process
+            # will happen in setupApkgImport()
             if not setupApkgImport(mw, importer):
                 return
+
+        # importing non-colpkg files
         mw.progress.start(immediate=True)
-        try:
+
+        def on_done(future: Future):
+            mw.progress.finish()
             try:
-                importer.run()
-            finally:
-                mw.progress.finish()
-        except zipfile.BadZipfile:
-            showWarning(invalidZipMsg())
-        except Exception as e:
-            err = repr(str(e))
-            if "invalidFile" in err:
-                msg = _(
-                    """\
-Invalid file. Please restore from backup."""
-                )
-                showWarning(msg)
-            elif "invalidTempFolder" in err:
-                showWarning(mw.errorHandler.tempFolderMsg())
-            elif "readonly" in err:
-                showWarning(
-                    _(
+                future.result()
+            except zipfile.BadZipfile:
+                showWarning(invalidZipMsg())
+            except Exception as e:
+                err = repr(str(e))
+                if "invalidFile" in err:
+                    msg = _(
                         """\
-Unable to import from a read-only file."""
+    Invalid file. Please restore from backup."""
                     )
-                )
+                    showWarning(msg)
+                elif "invalidTempFolder" in err:
+                    showWarning(mw.errorHandler.tempFolderMsg())
+                elif "readonly" in err:
+                    showWarning(
+                        _(
+                            """\
+    Unable to import from a read-only file."""
+                        )
+                    )
+                else:
+                    msg = tr(TR.IMPORTING_FAILED_DEBUG_INFO) + "\n"
+                    msg += str(traceback.format_exc())
+                    showText(msg)
             else:
-                msg = _("Import failed.\n")
-                msg += str(traceback.format_exc())
-                showText(msg)
-        else:
-            log = "\n".join(importer.log)
-            if "\n" not in log:
-                tooltip(log)
-            else:
-                showText(log)
-        mw.reset()
+                log = "\n".join(importer.log)
+                if "\n" not in log:
+                    tooltip(log)
+                else:
+                    showText(log)
+
+            mw.reset()
+
+        mw.taskman.run_in_background(importer.run, on_done)
 
 
 def invalidZipMsg():
@@ -457,48 +475,60 @@ def replaceWithApkg(mw, file, backup):
     mw.unloadCollection(lambda: _replaceWithApkg(mw, file, backup))
 
 
-def _replaceWithApkg(mw, file, backup):
+def _replaceWithApkg(mw, filename, backup):
     mw.progress.start(immediate=True)
 
-    z = zipfile.ZipFile(file)
+    def do_import():
+        z = zipfile.ZipFile(filename)
 
-    # v2 scheduler?
-    colname = "collection.anki21"
-    try:
-        z.getinfo(colname)
-    except KeyError:
-        colname = "collection.anki2"
+        # v2 scheduler?
+        colname = "collection.anki21"
+        try:
+            z.getinfo(colname)
+        except KeyError:
+            colname = "collection.anki2"
 
-    try:
         with z.open(colname) as source, open(mw.pm.collectionPath(), "wb") as target:
-            shutil.copyfileobj(source, target)
-    except:
+            # ignore appears related to https://github.com/python/typeshed/issues/4349
+            # see if can turn off once issue fix is merged in
+            shutil.copyfileobj(source, target)  # type: ignore
+
+        d = os.path.join(mw.pm.profileFolder(), "collection.media")
+        for n, (cStr, file) in enumerate(
+            json.loads(z.read("media").decode("utf8")).items()
+        ):
+            mw.taskman.run_on_main(
+                lambda n=n: mw.progress.update(
+                    ngettext("Processed %d media file", "Processed %d media files", n)
+                    % n
+                )
+            )
+            size = z.getinfo(cStr).file_size
+            dest = os.path.join(d, unicodedata.normalize("NFC", file))
+            # if we have a matching file size
+            if os.path.exists(dest) and size == os.stat(dest).st_size:
+                continue
+            data = z.read(cStr)
+            with open(dest, "wb") as file:
+                file.write(data)
+
+        z.close()
+
+    def on_done(future: Future):
         mw.progress.finish()
-        showWarning(_("The provided file is not a valid .apkg file."))
-        return
-    # because users don't have a backup of media, it's safer to import new
-    # data and rely on them running a media db check to get rid of any
-    # unwanted media. in the future we might also want to deduplicate this
-    # step
-    d = os.path.join(mw.pm.profileFolder(), "collection.media")
-    for n, (cStr, file) in enumerate(
-        json.loads(z.read("media").decode("utf8")).items()
-    ):
-        mw.progress.update(
-            ngettext("Processed %d media file", "Processed %d media files", n) % n
-        )
-        size = z.getinfo(cStr).file_size
-        dest = os.path.join(d, unicodedata.normalize("NFC", file))
-        # if we have a matching file size
-        if os.path.exists(dest) and size == os.stat(dest).st_size:
-            continue
-        data = z.read(cStr)
-        open(dest, "wb").write(data)
-    z.close()
-    # reload
-    if not mw.loadCollection():
-        mw.progress.finish()
-        return
-    if backup:
-        mw.col.modSchema(check=False)
-    mw.progress.finish()
+
+        try:
+            future.result()
+        except Exception as e:
+            print(e)
+            showWarning(_("The provided file is not a valid .apkg file."))
+            return
+
+        if not mw.loadCollection():
+            return
+        if backup:
+            mw.col.modSchema(check=False)
+
+        tooltip(_("Importing complete."))
+
+    mw.taskman.run_in_background(do_import, on_done)

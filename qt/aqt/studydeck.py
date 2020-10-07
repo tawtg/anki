@@ -3,8 +3,8 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import aqt
-from anki.hooks import addHook, remHook
 from anki.lang import _
+from aqt import gui_hooks
 from aqt.qt import *
 from aqt.utils import getOnlyText, openHelp, restoreGeom, saveGeom, shortcut, showInfo
 
@@ -23,7 +23,7 @@ class StudyDeck(QDialog):
         dyn=False,
         buttons=None,
         geomKey="default",
-    ):
+    ) -> None:
         QDialog.__init__(self, parent or mw)
         if buttons is None:
             buttons = []
@@ -32,7 +32,7 @@ class StudyDeck(QDialog):
         self.form.setupUi(self)
         self.form.filter.installEventFilter(self)
         self.cancel = cancel
-        addHook("reset", self.onReset)
+        gui_hooks.state_did_reset.append(self.onReset)
         self.geomKey = "studyDeck-" + geomKey
         restoreGeom(self, self.geomKey)
         if not cancel:
@@ -47,11 +47,16 @@ class StudyDeck(QDialog):
             b.setShortcut(QKeySequence("Ctrl+N"))
             b.setToolTip(shortcut(_("Add New Deck (Ctrl+N)")))
             self.form.buttonBox.addButton(b, QDialogButtonBox.ActionRole)
-            b.clicked.connect(self.onAddDeck)
+            qconnect(b.clicked, self.onAddDeck)
         if title:
             self.setWindowTitle(title)
         if not names:
-            names = sorted(self.mw.col.decks.allNames(dyn=dyn, forceDefault=False))
+            names = [
+                d.name
+                for d in self.mw.col.decks.all_names_and_ids(
+                    include_filtered=dyn, skip_empty_default=True
+                )
+            ]
             self.nameFunc = None
             self.origNames = names
         else:
@@ -62,29 +67,33 @@ class StudyDeck(QDialog):
             accept or _("Study"), QDialogButtonBox.AcceptRole
         )
         self.setWindowModality(Qt.WindowModal)
-        self.form.buttonBox.helpRequested.connect(lambda: openHelp(help))
-        self.form.filter.textEdited.connect(self.redraw)
-        self.form.list.itemDoubleClicked.connect(self.accept)
+        qconnect(self.form.buttonBox.helpRequested, lambda: openHelp(help))
+        qconnect(self.form.filter.textEdited, self.redraw)
+        qconnect(self.form.list.itemDoubleClicked, self.accept)
         self.show()
         # redraw after show so position at center correct
         self.redraw("", current)
         self.exec_()
 
-    def eventFilter(self, obj, evt):
+    def eventFilter(self, obj: QObject, evt: QEvent) -> bool:
         if evt.type() == QEvent.KeyPress:
-            if evt.key() == Qt.Key_Up:
-                c = self.form.list.count()
-                row = self.form.list.currentRow() - 1
-                if row < 0:
-                    row = c - 1
-                self.form.list.setCurrentRow(row)
-                return True
-            elif evt.key() == Qt.Key_Down:
-                c = self.form.list.count()
-                row = self.form.list.currentRow() + 1
-                if row == c:
-                    row = 0
-                self.form.list.setCurrentRow(row)
+            new_row = current_row = self.form.list.currentRow()
+            rows_count = self.form.list.count()
+            key = evt.key()
+
+            if key == Qt.Key_Up:
+                new_row = current_row - 1
+            elif key == Qt.Key_Down:
+                new_row = current_row + 1
+            elif evt.modifiers() & Qt.ControlModifier and Qt.Key_1 <= key <= Qt.Key_9:
+                row_index = key - Qt.Key_1
+                if row_index < rows_count:
+                    new_row = row_index
+
+            if rows_count:
+                new_row %= rows_count  # don't let row index overflow/underflow
+            if new_row != current_row:
+                self.form.list.setCurrentRow(new_row)
                 return True
         return False
 
@@ -118,9 +127,9 @@ class StudyDeck(QDialog):
             self.origNames = self.nameFunc()
         self.redraw(self.filt, self.focus)
 
-    def accept(self):
+    def accept(self) -> None:
         saveGeom(self, self.geomKey)
-        remHook("reset", self.onReset)
+        gui_hooks.state_did_reset.remove(self.onReset)
         row = self.form.list.currentRow()
         if row < 0:
             showInfo(_("Please select something."))
@@ -128,21 +137,26 @@ class StudyDeck(QDialog):
         self.name = self.names[self.form.list.currentRow()]
         QDialog.accept(self)
 
-    def reject(self):
+    def reject(self) -> None:
         saveGeom(self, self.geomKey)
-        remHook("reset", self.onReset)
+        gui_hooks.state_did_reset.remove(self.onReset)
         QDialog.reject(self)
 
-    def onAddDeck(self):
+    def onAddDeck(self) -> None:
         row = self.form.list.currentRow()
         if row < 0:
             default = self.form.filter.text()
         else:
             default = self.names[self.form.list.currentRow()]
         n = getOnlyText(_("New deck name:"), default=default)
+        n = n.strip()
         if n:
-            self.mw.col.decks.id(n)
-            self.name = n
+            did = self.mw.col.decks.id(n)
+            # deck name may not be the same as user input. ex: ", ::
+            self.name = self.mw.col.decks.name(did)
             # make sure we clean up reset hook when manually exiting
-            remHook("reset", self.onReset)
+            gui_hooks.state_did_reset.remove(self.onReset)
+            if self.mw.state == "deckBrowser":
+                self.mw.deckBrowser.refresh()
+            gui_hooks.sidebar_should_refresh_decks()
             QDialog.accept(self)

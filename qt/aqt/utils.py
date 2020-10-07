@@ -1,17 +1,25 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+from __future__ import annotations
+
 import os
 import re
 import subprocess
 import sys
-from typing import Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Union
 
+import anki
 import aqt
 from anki.lang import _
-from anki.sound import stripSounds
+from anki.rsbackend import TR  # pylint: disable=unused-import
 from anki.utils import invalidFilename, isMac, isWin, noBundledLibs, versionWithBuild
 from aqt.qt import *
+from aqt.theme import theme_manager
+
+if TYPE_CHECKING:
+    from anki.rsbackend import TRValue
 
 
 def aqt_data_folder() -> str:
@@ -25,6 +33,11 @@ def aqt_data_folder() -> str:
 
 def locale_dir() -> str:
     return os.path.join(aqt_data_folder(), "locale")
+
+
+def tr(key: TRValue, **kwargs: Union[str, int, float]) -> str:
+    "Shortcut to access Fluent translations."
+    return anki.lang.current_i18n.translate(key, **kwargs)
 
 
 def openHelp(section):
@@ -90,7 +103,7 @@ def showInfo(
         b.setDefault(True)
     if help:
         b = mb.addButton(QMessageBox.Help)
-        b.clicked.connect(lambda: openHelp(help))
+        qconnect(b.clicked, lambda: openHelp(help))
         b.setAutoDefault(False)
     return mb.exec_()
 
@@ -127,7 +140,7 @@ def showText(
             QApplication.clipboard().setText(text.toPlainText())
 
         btn = QPushButton(_("Copy to Clipboard"))
-        btn.clicked.connect(onCopy)
+        qconnect(btn.clicked, onCopy)
         box.addButton(btn, QDialogButtonBox.ActionRole)
 
     def onReject():
@@ -135,13 +148,13 @@ def showText(
             saveGeom(diag, geomKey)
         QDialog.reject(diag)
 
-    box.rejected.connect(onReject)
+    qconnect(box.rejected, onReject)
 
     def onFinish():
         if geomKey:
             saveGeom(diag, geomKey)
 
-    box.accepted.connect(onFinish)
+    qconnect(box.accepted, onFinish)
     diag.setMinimumHeight(minHeight)
     diag.setMinimumWidth(minWidth)
     if geomKey:
@@ -178,7 +191,7 @@ def askUser(text, parent=None, help="", defaultno=False, msgfunc=None, title="An
 class ButtonedDialog(QMessageBox):
     def __init__(self, text, buttons, parent=None, help="", title="Anki"):
         QMessageBox.__init__(self, parent)
-        self.buttons = []
+        self._buttons = []
         self.setWindowTitle(title)
         self.help = help
         self.setIcon(QMessageBox.Warning)
@@ -188,7 +201,7 @@ class ButtonedDialog(QMessageBox):
         # box = QDialogButtonBox()
         # v.addWidget(box)
         for b in buttons:
-            self.buttons.append(self.addButton(b, QMessageBox.AcceptRole))
+            self._buttons.append(self.addButton(b, QMessageBox.AcceptRole))
         if help:
             self.addButton(_("Help"), QMessageBox.HelpRole)
             buttons.append(_("Help"))
@@ -205,7 +218,7 @@ class ButtonedDialog(QMessageBox):
         return txt.replace("&", "")
 
     def setDefault(self, idx):
-        self.setDefaultButton(self.buttons[idx])
+        self.setDefaultButton(self._buttons[idx])
 
 
 def askUserDialog(text, buttons, parent=None, help="", title="Anki"):
@@ -244,13 +257,13 @@ class GetTextDialog(QDialog):
         buts = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         if help:
             buts |= QDialogButtonBox.Help
-        b = QDialogButtonBox(buts)
+        b = QDialogButtonBox(buts)  # type: ignore
         v.addWidget(b)
         self.setLayout(v)
-        b.button(QDialogButtonBox.Ok).clicked.connect(self.accept)
-        b.button(QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        qconnect(b.button(QDialogButtonBox.Ok).clicked, self.accept)
+        qconnect(b.button(QDialogButtonBox.Cancel).clicked, self.reject)
         if help:
-            b.button(QDialogButtonBox.Help).clicked.connect(self.helpRequested)
+            qconnect(b.button(QDialogButtonBox.Help).clicked, self.helpRequested)
 
     def accept(self):
         return QDialog.accept(self)
@@ -309,7 +322,7 @@ def chooseList(prompt, choices, startrow=0, parent=None):
     c.setCurrentRow(startrow)
     l.addWidget(c)
     bb = QDialogButtonBox(QDialogButtonBox.Ok)
-    bb.accepted.connect(d.accept)
+    qconnect(bb.accepted, d.accept)
     l.addWidget(bb)
     d.exec_()
     return c.currentRow()
@@ -356,7 +369,7 @@ def getFile(parent, title, cb, filter="*.*", dir=None, key=None, multi=False):
             cb(result)
         ret.append(result)
 
-    d.accepted.connect(accept)
+    qconnect(d.accepted, accept)
     if key:
         restoreState(d, key)
     d.exec_()
@@ -396,7 +409,7 @@ def getSaveFile(parent, title, dir_description, key, ext, fname=None):
     return file
 
 
-def saveGeom(widget, key):
+def saveGeom(widget, key: str):
     key += "Geom"
     if isMac and widget.windowState() & Qt.WindowFullScreen:
         geom = None
@@ -405,7 +418,7 @@ def saveGeom(widget, key):
     aqt.mw.pm.profile[key] = geom
 
 
-def restoreGeom(widget, key, offset=None, adjustSize=False):
+def restoreGeom(widget, key: str, offset=None, adjustSize=False):
     key += "Geom"
     if aqt.mw.pm.profile.get(key):
         widget.restoreGeometry(aqt.mw.pm.profile[key])
@@ -446,12 +459,12 @@ def ensureWidgetInScreenBoundaries(widget):
         widget.move(x, y)
 
 
-def saveState(widget, key):
+def saveState(widget, key: str):
     key += "State"
     aqt.mw.pm.profile[key] = widget.saveState()
 
 
-def restoreState(widget, key):
+def restoreState(widget, key: str):
     key += "State"
     if aqt.mw.pm.profile.get(key):
         widget.restoreState(aqt.mw.pm.profile[key])
@@ -479,9 +492,63 @@ def restoreHeader(widget, key):
         widget.restoreState(aqt.mw.pm.profile[key])
 
 
+def save_is_checked(widget, key: str):
+    key += "IsChecked"
+    aqt.mw.pm.profile[key] = widget.isChecked()
+
+
+def restore_is_checked(widget, key: str):
+    key += "IsChecked"
+    if aqt.mw.pm.profile.get(key) is not None:
+        widget.setChecked(aqt.mw.pm.profile[key])
+
+
+def save_combo_index_for_session(widget: QComboBox, key: str):
+    textKey = key + "ComboActiveText"
+    indexKey = key + "ComboActiveIndex"
+    aqt.mw.pm.session[textKey] = widget.currentText()
+    aqt.mw.pm.session[indexKey] = widget.currentIndex()
+
+
+def restore_combo_index_for_session(widget: QComboBox, history: List[str], key: str):
+    textKey = key + "ComboActiveText"
+    indexKey = key + "ComboActiveIndex"
+    text = aqt.mw.pm.session.get(textKey)
+    index = aqt.mw.pm.session.get(indexKey)
+    if text is not None and index is not None:
+        if index < len(history) and history[index] == text:
+            widget.setCurrentIndex(index)
+
+
+def save_combo_history(comboBox: QComboBox, history: List[str], name: str):
+    name += "BoxHistory"
+    text_input = comboBox.lineEdit().text()
+    if text_input in history:
+        history.remove(text_input)
+    history.insert(0, text_input)
+    history = history[:50]
+    comboBox.clear()
+    comboBox.addItems(history)
+    aqt.mw.pm.session[name] = text_input
+    aqt.mw.pm.profile[name] = history
+    return text_input
+
+
+def restore_combo_history(comboBox: QComboBox, name: str):
+    name += "BoxHistory"
+    history = aqt.mw.pm.profile.get(name, [])
+    comboBox.addItems([""] + history)
+    if history:
+        session_input = aqt.mw.pm.session.get(name)
+        if session_input and session_input == history[0]:
+            comboBox.lineEdit().setText(session_input)
+            comboBox.lineEdit().selectAll()
+    return history
+
+
 def mungeQA(col, txt):
+    print("mungeQA() deprecated; use mw.prepare_card_text_for_display()")
     txt = col.media.escapeImages(txt)
-    txt = stripSounds(txt)
     return txt
 
 
@@ -510,7 +577,7 @@ def addCloseShortcut(widg):
     if not isMac:
         return
     widg._closeShortcut = QShortcut(QKeySequence("Ctrl+W"), widg)
-    widg._closeShortcut.activated.connect(widg.reject)
+    qconnect(widg._closeShortcut.activated, widg.reject)
 
 
 def downArrow():
@@ -527,7 +594,7 @@ _tooltipTimer: Optional[QTimer] = None
 _tooltipLabel: Optional[QLabel] = None
 
 
-def tooltip(msg, period=3000, parent=None):
+def tooltip(msg, period=3000, parent=None, x_offset=0, y_offset=100):
     global _tooltipTimer, _tooltipLabel
 
     class CustomLabel(QLabel):
@@ -552,11 +619,12 @@ def tooltip(msg, period=3000, parent=None):
     lab.setFrameStyle(QFrame.Panel)
     lab.setLineWidth(2)
     lab.setWindowFlags(Qt.ToolTip)
-    p = QPalette()
-    p.setColor(QPalette.Window, QColor("#feffc4"))
-    p.setColor(QPalette.WindowText, QColor("#000000"))
-    lab.setPalette(p)
-    lab.move(aw.mapToGlobal(QPoint(0, -100 + aw.height())))
+    if not theme_manager.night_mode:
+        p = QPalette()
+        p.setColor(QPalette.Window, QColor("#feffc4"))
+        p.setColor(QPalette.WindowText, QColor("#000000"))
+        lab.setPalette(p)
+    lab.move(aw.mapToGlobal(QPoint(0 + x_offset, aw.height() - y_offset)))
     lab.show()
     _tooltipTimer = aqt.mw.progress.timer(
         period, closeTooltip, False, requiresCollection=False
@@ -669,7 +737,7 @@ class MenuItem:
 
     def renderTo(self, qmenu):
         a = qmenu.addAction(self.title)
-        a.triggered.connect(self.func)
+        qconnect(a.triggered, self.func)
 
 
 def qtMenuShortcutWorkaround(qmenu):
@@ -684,6 +752,8 @@ def qtMenuShortcutWorkaround(qmenu):
 
 def supportText():
     import platform
+    import time
+
     from aqt import mw
 
     if isWin:
@@ -699,10 +769,14 @@ def supportText():
         except:
             return "?"
 
+    lc = mw.pm.last_addon_update_check()
+    lcfmt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lc))
+
     return """\
 Anki {} Python {} Qt {} PyQt {}
 Platform: {}
 Flags: frz={} ao={} sv={}
+Add-ons, last update check: {}
 """.format(
         versionWithBuild(),
         platform.python_version(),
@@ -712,6 +786,7 @@ Flags: frz={} ao={} sv={}
         getattr(sys, "frozen", False),
         mw.addonManager.dirty,
         schedVer(),
+        lcfmt,
     )
 
 
@@ -760,3 +835,15 @@ def opengl_vendor():
 def gfxDriverIsBroken():
     driver = opengl_vendor()
     return driver == "nouveau"
+
+
+######################################################################
+
+
+def startup_info() -> Any:
+    "Use subprocess.Popen(startupinfo=...) to avoid opening a console window."
+    if not sys.platform == "win32":
+        return None
+    si = subprocess.STARTUPINFO()  # pytype: disable=module-attr
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # pytype: disable=module-attr
+    return si

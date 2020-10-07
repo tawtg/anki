@@ -2,46 +2,54 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
 import html
-import json
 import re
-import sre_constants
 import time
-import unicodedata
+from dataclasses import dataclass
+from enum import Enum
 from operator import itemgetter
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence, Tuple, Union, cast
 
 import anki
+import aqt
 import aqt.forms
-from anki.collection import _Collection
+from anki.cards import Card
+from anki.collection import Collection
 from anki.consts import *
-from anki.hooks import addHook, remHook, runFilter, runHook
 from anki.lang import _, ngettext
-from anki.utils import (
-    bodyClass,
-    fmtTimeSpan,
-    htmlToTextLine,
-    ids2str,
-    intTime,
-    isMac,
-    isWin,
-)
-from aqt import AnkiQt
+from anki.models import NoteType
+from anki.notes import Note
+from anki.rsbackend import TR, DeckTreeNode, InvalidInput
+from anki.stats import CardStats
+from anki.utils import htmlToTextLine, ids2str, isMac, isWin
+from aqt import AnkiQt, gui_hooks
+from aqt.editor import Editor
+from aqt.exporting import ExportDialog
+from aqt.main import ResetReason
+from aqt.previewer import BrowserPreviewer as PreviewDialog
+from aqt.previewer import Previewer
 from aqt.qt import *
-from aqt.sound import allSounds, clearAudioQueue, play
+from aqt.theme import theme_manager
 from aqt.utils import (
     MenuList,
     SubMenu,
     askUser,
     getOnlyText,
     getTag,
-    mungeQA,
     openHelp,
     qtMenuShortcutWorkaround,
+    restore_combo_history,
+    restore_combo_index_for_session,
+    restore_is_checked,
     restoreGeom,
     restoreHeader,
     restoreSplitter,
     restoreState,
+    save_combo_history,
+    save_combo_index_for_session,
+    save_is_checked,
     saveGeom,
     saveHeader,
     saveSplitter,
@@ -50,26 +58,43 @@ from aqt.utils import (
     showInfo,
     showWarning,
     tooltip,
+    tr,
 )
 from aqt.webview import AnkiWebView
+
+
+@dataclass
+class FindDupesDialog:
+    dialog: QDialog
+    browser: Browser
+
+
+@dataclass
+class SearchContext:
+    search: str
+    browser: Browser
+    order: Union[bool, str] = True
+    # if set, provided card ids will be used instead of the regular search
+    card_ids: Optional[Sequence[int]] = None
+
 
 # Data model
 ##########################################################################
 
 
 class DataModel(QAbstractTableModel):
-    def __init__(self, browser):
+    def __init__(self, browser: Browser):
         QAbstractTableModel.__init__(self)
         self.browser = browser
         self.col = browser.col
         self.sortKey = None
-        self.activeCols = self.col.conf.get(
+        self.activeCols = self.col.get_config(
             "activeCols", ["noteFld", "template", "cardDue", "deck"]
         )
-        self.cards = []
-        self.cardObjs = {}
+        self.cards: Sequence[int] = []
+        self.cardObjs: Dict[int, Card] = {}
 
-    def getCard(self, index):
+    def getCard(self, index: QModelIndex) -> Card:
         id = self.cards[index.row()]
         if not id in self.cardObjs:
             self.cardObjs[id] = self.col.getCard(id)
@@ -82,7 +107,7 @@ class DataModel(QAbstractTableModel):
                 del self.cardObjs[c.id]
                 refresh = True
         if refresh:
-            self.layoutChanged.emit()
+            self.layoutChanged.emit()  # type: ignore
 
     # Model interface
     ######################################################################
@@ -109,12 +134,12 @@ class DataModel(QAbstractTableModel):
             if not t.get("bfont"):
                 return
             f = QFont()
-            f.setFamily(t.get("bfont", "arial"))
-            f.setPixelSize(t.get("bsize", 12))
+            f.setFamily(cast(str, t.get("bfont", "arial")))
+            f.setPixelSize(cast(int, t.get("bsize", 12)))
             return f
 
         elif role == Qt.TextAlignmentRole:
-            align = Qt.AlignVCenter
+            align: Union[Qt.AlignmentFlag, int] = Qt.AlignVCenter
             if self.activeCols[index.column()] not in (
                 "question",
                 "answer",
@@ -122,6 +147,7 @@ class DataModel(QAbstractTableModel):
                 "deck",
                 "noteFld",
                 "note",
+                "noteTags",
             ):
                 align |= Qt.AlignHCenter
             return align
@@ -153,26 +179,24 @@ class DataModel(QAbstractTableModel):
     # Filtering
     ######################################################################
 
-    def search(self, txt):
+    def search(self, txt: str) -> None:
         self.beginReset()
-        t = time.time()
-        # the db progress handler may cause a refresh, so we need to zero out
-        # old data first
         self.cards = []
-        invalid = False
+        error_message: Optional[str] = None
         try:
-            self.cards = self.col.findCards(txt, order=True)
+            ctx = SearchContext(search=txt, browser=self.browser)
+            gui_hooks.browser_will_search(ctx)
+            if ctx.card_ids is None:
+                ctx.card_ids = self.col.find_cards(ctx.search, order=ctx.order)
+            gui_hooks.browser_did_search(ctx)
+            self.cards = ctx.card_ids
         except Exception as e:
-            if str(e) == "invalidSearch":
-                self.cards = []
-                invalid = True
-            else:
-                raise
-        # print "fetch cards in %dms" % ((time.time() - t)*1000)
-        self.endReset()
+            error_message = str(e)
+        finally:
+            self.endReset()
 
-        if invalid:
-            showWarning(_("Invalid search - please check for typing mistakes."))
+        if error_message:
+            showWarning(error_message)
 
     def reset(self):
         self.beginReset()
@@ -187,7 +211,6 @@ class DataModel(QAbstractTableModel):
         self.cardObjs = {}
 
     def endReset(self):
-        t = time.time()
         self.endResetModel()
         self.restoreSelection()
         self.browser.mw.progress.finish()
@@ -197,7 +220,7 @@ class DataModel(QAbstractTableModel):
 
     def _reverse(self):
         self.beginReset()
-        self.cards.reverse()
+        self.cards = list(reversed(self.cards))
         self.endReset()
 
     def saveSelection(self):
@@ -237,11 +260,14 @@ class DataModel(QAbstractTableModel):
         idx = focusedIdx or firstIdx
         tv = self.browser.form.tableView
         if idx:
-            tv.selectRow(idx.row())
-            # scroll if the selection count has changed
-            if count != len(self.selectedCards):
-                # we save and then restore the horizontal scroll position because
-                # scrollTo() also scrolls horizontally which is confusing
+            row = idx.row()
+            pos = tv.rowViewportPosition(row)
+            visible = pos >= 0 and pos < tv.viewport().height()
+            tv.selectRow(row)
+
+            # we save and then restore the horizontal scroll position because
+            # scrollTo() also scrolls horizontally which is confusing
+            if not visible:
                 h = tv.horizontalScrollBar().value()
                 tv.scrollTo(idx, tv.PositionAtCenter)
                 tv.horizontalScrollBar().setValue(h)
@@ -259,6 +285,9 @@ class DataModel(QAbstractTableModel):
     def columnType(self, column):
         return self.activeCols[column]
 
+    def time_format(self):
+        return "%Y-%m-%d"
+
     def columnData(self, index):
         row = index.row()
         col = index.column()
@@ -274,7 +303,7 @@ class DataModel(QAbstractTableModel):
         elif type == "template":
             t = c.template()["name"]
             if c.model()["type"] == MODEL_CLOZE:
-                t += " %d" % (c.ord + 1)
+                t = f"{t} {c.ord + 1}"
             return t
         elif type == "cardDue":
             # catch invalid dates
@@ -283,14 +312,14 @@ class DataModel(QAbstractTableModel):
             except:
                 t = ""
             if c.queue < 0:
-                t = "(" + t + ")"
+                t = f"({t})"
             return t
         elif type == "noteCrt":
-            return time.strftime("%Y-%m-%d", time.localtime(c.note().id / 1000))
+            return time.strftime(self.time_format(), time.localtime(c.note().id / 1000))
         elif type == "noteMod":
-            return time.strftime("%Y-%m-%d", time.localtime(c.note().mod))
+            return time.strftime(self.time_format(), time.localtime(c.note().mod))
         elif type == "cardMod":
-            return time.strftime("%Y-%m-%d", time.localtime(c.mod))
+            return time.strftime(self.time_format(), time.localtime(c.mod))
         elif type == "cardReps":
             return str(c.reps)
         elif type == "cardLapses":
@@ -300,13 +329,13 @@ class DataModel(QAbstractTableModel):
         elif type == "note":
             return c.model()["name"]
         elif type == "cardIvl":
-            if c.type == 0:
+            if c.type == CARD_TYPE_NEW:
                 return _("(new)")
-            elif c.type == 1:
+            elif c.type == CARD_TYPE_LRN:
                 return _("(learning)")
-            return fmtTimeSpan(c.ivl * 86400)
+            return self.col.format_timespan(c.ivl * 86400)
         elif type == "cardEase":
-            if c.type == 0:
+            if c.type == CARD_TYPE_NEW:
                 return _("(new)")
             return "%d%%" % (c.factor / 10)
         elif type == "deck":
@@ -337,15 +366,17 @@ class DataModel(QAbstractTableModel):
     def nextDue(self, c, index):
         if c.odid:
             return _("(filtered)")
-        elif c.queue == 1:
+        elif c.queue == QUEUE_TYPE_LRN:
             date = c.due
-        elif c.queue == 0 or c.type == 0:
-            return str(c.due)
-        elif c.queue in (2, 3) or (c.type == 2 and c.queue < 0):
+        elif c.queue == QUEUE_TYPE_NEW or c.type == CARD_TYPE_NEW:
+            return tr(TR.STATISTICS_DUE_FOR_NEW_CARD, number=c.due)
+        elif c.queue in (QUEUE_TYPE_REV, QUEUE_TYPE_DAY_LEARN_RELEARN) or (
+            c.type == CARD_TYPE_REV and c.queue < 0
+        ):
             date = time.time() + ((c.due - self.col.sched.today) * 86400)
         else:
             return ""
-        return time.strftime("%Y-%m-%d", time.localtime(date))
+        return time.strftime(self.time_format(), time.localtime(date))
 
     def isRTL(self, index):
         col = index.column()
@@ -362,16 +393,6 @@ class DataModel(QAbstractTableModel):
 # Line painter
 ######################################################################
 
-COLOUR_SUSPENDED = "#FFFFB2"
-COLOUR_MARKED = "#ccc"
-
-flagColours = {
-    1: "#ffaaaa",
-    2: "#ffb347",
-    3: "#82E0AA",
-    4: "#85C1E9",
-}
-
 
 class StatusDelegate(QItemDelegate):
     def __init__(self, browser, model):
@@ -380,28 +401,25 @@ class StatusDelegate(QItemDelegate):
         self.model = model
 
     def paint(self, painter, option, index):
-        self.browser.mw.progress.blockUpdates = True
         try:
             c = self.model.getCard(index)
         except:
             # in the the middle of a reset; return nothing so this row is not
             # rendered until we have a chance to reset the model
             return
-        finally:
-            self.browser.mw.progress.blockUpdates = True
 
         if self.model.isRTL(index):
             option.direction = Qt.RightToLeft
 
         col = None
         if c.userFlag() > 0:
-            col = flagColours[c.userFlag()]
+            col = theme_manager.qcolor(f"flag{c.userFlag()}-bg")
         elif c.note().hasTag("Marked"):
-            col = COLOUR_MARKED
-        elif c.queue == -1:
-            col = COLOUR_SUSPENDED
+            col = theme_manager.qcolor("marked-bg")
+        elif c.queue == QUEUE_TYPE_SUSPENDED:
+            col = theme_manager.qcolor("suspended-bg")
         if col:
-            brush = QBrush(QColor(col))
+            brush = QBrush(col)
             painter.save()
             painter.fillRect(option.rect, brush)
             painter.restore()
@@ -411,6 +429,15 @@ class StatusDelegate(QItemDelegate):
 
 # Sidebar
 ######################################################################
+
+
+class SidebarStage(Enum):
+    ROOT = 0
+    STANDARD = 1
+    FAVORITES = 2
+    DECKS = 3
+    MODELS = 4
+    TAGS = 5
 
 
 class SidebarItem:
@@ -446,7 +473,6 @@ class SidebarModel(QAbstractItemModel):
     def __init__(self, root: SidebarItem) -> None:
         super().__init__()
         self.root = root
-        self.iconCache: Dict[str, QIcon] = {}
 
     # Qt API
     ######################################################################
@@ -506,17 +532,14 @@ class SidebarModel(QAbstractItemModel):
         elif role == Qt.ToolTipRole:
             return QVariant(item.tooltip)
         else:
-            return QVariant(self.iconFromRef(item.icon))
+            return QVariant(theme_manager.icon_from_resources(item.icon))
 
     # Helpers
     ######################################################################
 
     def iconFromRef(self, iconRef: str) -> QIcon:
-        icon = self.iconCache.get(iconRef)
-        if icon is None:
-            icon = QIcon(iconRef)
-            self.iconCache[iconRef] = icon
-        return icon
+        print("iconFromRef() deprecated")
+        return theme_manager.icon_from_resources(iconRef)
 
     def expandWhereNeccessary(self, tree: QTreeView) -> None:
         for row, child in enumerate(self.root.children):
@@ -555,15 +578,16 @@ class SidebarModel(QAbstractItemModel):
 class Browser(QMainWindow):
     model: DataModel
     mw: AnkiQt
-    col: _Collection
+    col: Collection
+    editor: Optional[Editor]
 
-    def __init__(self, mw: AnkiQt):
+    def __init__(self, mw: AnkiQt) -> None:
         QMainWindow.__init__(self, None, Qt.Window)
         self.mw = mw
         self.col = self.mw.col
         self.lastFilter = ""
-        self.focusTo = None
-        self._previewWindow = None
+        self.focusTo: Optional[int] = None
+        self._previewer: Optional[Previewer] = None
         self._closeEventHasCleanedUp = False
         self.form = aqt.forms.browser.Ui_Dialog()
         self.form.setupUi(self)
@@ -572,7 +596,7 @@ class Browser(QMainWindow):
         restoreState(self, "editor")
         restoreSplitter(self.form.splitter, "editor3")
         self.form.splitter.setChildrenCollapsible(False)
-        self.card = None
+        self.card: Optional[Card] = None
         self.setupColumns()
         self.setupTable()
         self.setupMenus()
@@ -582,79 +606,81 @@ class Browser(QMainWindow):
         self.updateFont()
         self.onUndoState(self.mw.form.actionUndo.isEnabled())
         self.setupSearch()
+        gui_hooks.browser_will_show(self)
         self.show()
 
-    def setupMenus(self):
+    def setupMenus(self) -> None:
         # pylint: disable=unnecessary-lambda
         # actions
         f = self.form
-        f.previewButton.clicked.connect(self.onTogglePreview)
+        qconnect(f.previewButton.clicked, self.onTogglePreview)
         f.previewButton.setToolTip(
-            _("Preview Selected Card (%s)") % shortcut(_("Ctrl+Shift+P"))
+            _("Preview Selected Card (%s)") % shortcut("Ctrl+Shift+P")
         )
+        f.previewButton.setShortcut("Ctrl+Shift+P")
 
-        f.filter.clicked.connect(self.onFilterButton)
+        qconnect(f.filter.clicked, self.onFilterButton)
         # edit
-        f.actionUndo.triggered.connect(self.mw.onUndo)
-        f.actionInvertSelection.triggered.connect(self.invertSelection)
-        f.actionSelectNotes.triggered.connect(self.selectNotes)
+        qconnect(f.actionUndo.triggered, self.mw.onUndo)
+        qconnect(f.actionInvertSelection.triggered, self.invertSelection)
+        qconnect(f.actionSelectNotes.triggered, self.selectNotes)
         if not isMac:
             f.actionClose.setVisible(False)
         # notes
-        f.actionAdd.triggered.connect(self.mw.onAddCard)
-        f.actionAdd_Tags.triggered.connect(lambda: self.addTags())
-        f.actionRemove_Tags.triggered.connect(lambda: self.deleteTags())
-        f.actionClear_Unused_Tags.triggered.connect(self.clearUnusedTags)
-        f.actionToggle_Mark.triggered.connect(lambda: self.onMark())
-        f.actionChangeModel.triggered.connect(self.onChangeModel)
-        f.actionFindDuplicates.triggered.connect(self.onFindDupes)
-        f.actionFindReplace.triggered.connect(self.onFindReplace)
-        f.actionManage_Note_Types.triggered.connect(self.mw.onNoteTypes)
-        f.actionDelete.triggered.connect(self.deleteNotes)
+        qconnect(f.actionAdd.triggered, self.mw.onAddCard)
+        qconnect(f.actionAdd_Tags.triggered, lambda: self.addTags())
+        qconnect(f.actionRemove_Tags.triggered, lambda: self.deleteTags())
+        qconnect(f.actionClear_Unused_Tags.triggered, self.clearUnusedTags)
+        qconnect(f.actionToggle_Mark.triggered, lambda: self.onMark())
+        qconnect(f.actionChangeModel.triggered, self.onChangeModel)
+        qconnect(f.actionFindDuplicates.triggered, self.onFindDupes)
+        qconnect(f.actionFindReplace.triggered, self.onFindReplace)
+        qconnect(f.actionManage_Note_Types.triggered, self.mw.onNoteTypes)
+        qconnect(f.actionDelete.triggered, self.deleteNotes)
         # cards
-        f.actionChange_Deck.triggered.connect(self.setDeck)
-        f.action_Info.triggered.connect(self.showCardInfo)
-        f.actionReposition.triggered.connect(self.reposition)
-        f.actionReschedule.triggered.connect(self.reschedule)
-        f.actionToggle_Suspend.triggered.connect(self.onSuspend)
-        f.actionRed_Flag.triggered.connect(lambda: self.onSetFlag(1))
-        f.actionOrange_Flag.triggered.connect(lambda: self.onSetFlag(2))
-        f.actionGreen_Flag.triggered.connect(lambda: self.onSetFlag(3))
-        f.actionBlue_Flag.triggered.connect(lambda: self.onSetFlag(4))
+        qconnect(f.actionChange_Deck.triggered, self.setDeck)
+        qconnect(f.action_Info.triggered, self.showCardInfo)
+        qconnect(f.actionReposition.triggered, self.reposition)
+        qconnect(f.actionReschedule.triggered, self.reschedule)
+        qconnect(f.actionToggle_Suspend.triggered, self.onSuspend)
+        qconnect(f.actionRed_Flag.triggered, lambda: self.onSetFlag(1))
+        qconnect(f.actionOrange_Flag.triggered, lambda: self.onSetFlag(2))
+        qconnect(f.actionGreen_Flag.triggered, lambda: self.onSetFlag(3))
+        qconnect(f.actionBlue_Flag.triggered, lambda: self.onSetFlag(4))
+        qconnect(f.actionExport.triggered, lambda: self._on_export_notes())
         # jumps
-        f.actionPreviousCard.triggered.connect(self.onPreviousCard)
-        f.actionNextCard.triggered.connect(self.onNextCard)
-        f.actionFirstCard.triggered.connect(self.onFirstCard)
-        f.actionLastCard.triggered.connect(self.onLastCard)
-        f.actionFind.triggered.connect(self.onFind)
-        f.actionNote.triggered.connect(self.onNote)
-        f.actionTags.triggered.connect(self.onFilterButton)
-        f.actionSidebar.triggered.connect(self.focusSidebar)
-        f.actionCardList.triggered.connect(self.onCardList)
+        qconnect(f.actionPreviousCard.triggered, self.onPreviousCard)
+        qconnect(f.actionNextCard.triggered, self.onNextCard)
+        qconnect(f.actionFirstCard.triggered, self.onFirstCard)
+        qconnect(f.actionLastCard.triggered, self.onLastCard)
+        qconnect(f.actionFind.triggered, self.onFind)
+        qconnect(f.actionNote.triggered, self.onNote)
+        qconnect(f.actionTags.triggered, self.onFilterButton)
+        qconnect(f.actionSidebar.triggered, self.focusSidebar)
+        qconnect(f.actionCardList.triggered, self.onCardList)
         # help
-        f.actionGuide.triggered.connect(self.onHelp)
+        qconnect(f.actionGuide.triggered, self.onHelp)
         # keyboard shortcut for shift+home/end
         self.pgUpCut = QShortcut(QKeySequence("Shift+Home"), self)
-        self.pgUpCut.activated.connect(self.onFirstCard)
+        qconnect(self.pgUpCut.activated, self.onFirstCard)
         self.pgDownCut = QShortcut(QKeySequence("Shift+End"), self)
-        self.pgDownCut.activated.connect(self.onLastCard)
+        qconnect(self.pgDownCut.activated, self.onLastCard)
         # add-on hook
-        runHook("browser.setupMenus", self)
+        gui_hooks.browser_menus_did_init(self)
         self.mw.maybeHideAccelerators(self)
 
         # context menu
         self.form.tableView.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.form.tableView.customContextMenuRequested.connect(self.onContextMenu)
+        qconnect(self.form.tableView.customContextMenuRequested, self.onContextMenu)
 
-    def onContextMenu(self, _point):
+    def onContextMenu(self, _point) -> None:
         m = QMenu()
         for act in self.form.menu_Cards.actions():
             m.addAction(act)
         m.addSeparator()
         for act in self.form.menu_Notes.actions():
             m.addAction(act)
-        runHook("browser.onContextMenu", self, m)
-
+        gui_hooks.browser_will_show_context_menu(self, m)
         qtMenuShortcutWorkaround(m)
         m.exec_(QCursor.pos())
 
@@ -677,14 +703,12 @@ class Browser(QMainWindow):
         evt.ignore()
 
     def _closeWindow(self):
-        self._cancelPreviewTimer()
+        self._cleanup_preview()
         self.editor.cleanup()
         saveSplitter(self.form.splitter, "editor3")
         saveGeom(self, "editor")
         saveState(self, "editor")
         saveHeader(self.form.tableView.horizontalHeader(), "editor")
-        self.col.conf["activeCols"] = self.model.activeCols
-        self.col.setMod()
         self.teardownHooks()
         self.mw.maybeReset()
         aqt.dialogs.markClosed("Browser")
@@ -713,9 +737,9 @@ class Browser(QMainWindow):
             ("deck", _("Deck")),
             ("noteFld", _("Sort Field")),
             ("noteCrt", _("Created")),
-            ("noteMod", _("Edited")),
-            ("cardMod", _("Changed")),
-            ("cardDue", _("Due")),
+            ("noteMod", tr(TR.SEARCH_NOTE_MODIFIED)),
+            ("cardMod", tr(TR.SEARCH_CARD_MODIFIED)),
+            ("cardDue", tr(TR.STATISTICS_DUE_DATE)),
             ("cardIvl", _("Interval")),
             ("cardEase", _("Ease")),
             ("cardReps", _("Reviews")),
@@ -729,8 +753,8 @@ class Browser(QMainWindow):
     ######################################################################
 
     def setupSearch(self):
-        self.form.searchButton.clicked.connect(self.onSearchActivated)
-        self.form.searchEdit.lineEdit().returnPressed.connect(self.onSearchActivated)
+        qconnect(self.form.searchButton.clicked, self.onSearchActivated)
+        qconnect(self.form.searchEdit.lineEdit().returnPressed, self.onSearchActivated)
         self.form.searchEdit.setCompleter(None)
         self._searchPrompt = _("<type here to search; hit enter to show current deck>")
         self.form.searchEdit.addItems(
@@ -754,7 +778,6 @@ class Browser(QMainWindow):
 
         # grab search text and normalize
         txt = self.form.searchEdit.lineEdit().text()
-        txt = unicodedata.normalize("NFC", txt)
 
         # update history
         sh = self.mw.pm.profile["searchHistory"]
@@ -772,13 +795,14 @@ class Browser(QMainWindow):
         self.search()
 
     # search triggered programmatically. caller must have saved note first.
-    def search(self):
+    def search(self) -> None:
         if "is:current" in self._lastSearchTxt:
             # show current card if there is one
-            c = self.mw.reviewer.card
-            self.card = self.mw.reviewer.card
+            c = self.card = self.mw.reviewer.card
             nid = c and c.nid or 0
-            self.model.search("nid:%d" % nid)
+            if nid:
+                self.model.search("nid:%d" % nid)
+                self.focusCid(c.id)
         else:
             self.model.search(self._lastSearchTxt)
 
@@ -803,6 +827,7 @@ class Browser(QMainWindow):
         return selected
 
     def onReset(self):
+        self.maybeRefreshSidebar()
         self.editor.setNote(None)
         self.search()
 
@@ -815,10 +840,22 @@ class Browser(QMainWindow):
         self.form.tableView.setModel(self.model)
         self.form.tableView.selectionModel()
         self.form.tableView.setItemDelegate(StatusDelegate(self, self.model))
-        self.form.tableView.selectionModel().selectionChanged.connect(self.onRowChanged)
-        self.form.tableView.setStyleSheet(
-            "QTableView{ selection-background-color: rgba(127, 127, 127, 50);  }"
+        qconnect(
+            self.form.tableView.selectionModel().selectionChanged, self.onRowChanged
         )
+        self.form.tableView.setWordWrap(False)
+        if not theme_manager.night_mode:
+            self.form.tableView.setStyleSheet(
+                "QTableView{ selection-background-color: rgba(150, 150, 150, 50); "
+                "selection-color: black; }"
+            )
+        elif theme_manager.macos_dark_mode():
+            grid = theme_manager.str_color("frame-bg")
+            self.form.tableView.setStyleSheet(
+                f"""
+QTableView {{ gridline-color: {grid} }}           
+            """
+            )
         self.singleCard = False
 
     def setupEditor(self):
@@ -828,10 +865,12 @@ class Browser(QMainWindow):
         "Update current note and hide/show editor."
         self.editor.saveNow(lambda: self._onRowChanged(current, previous))
 
-    def _onRowChanged(self, current, previous):
+    def _onRowChanged(self, current, previous) -> None:
+        if self._closeEventHasCleanedUp:
+            return
         update = self.updateTitle()
         show = self.model.cards and update == 1
-        self.form.splitter.widget(1).setVisible(not not show)
+        self.form.splitter.widget(1).setVisible(bool(show))
         idx = self.form.tableView.selectionModel().currentIndex()
         if idx.isValid():
             self.card = self.model.getCard(idx)
@@ -839,18 +878,18 @@ class Browser(QMainWindow):
         if not show:
             self.editor.setNote(None)
             self.singleCard = False
+            self._renderPreview()
         else:
             self.editor.setNote(self.card.note(reload=True), focusTo=self.focusTo)
             self.focusTo = None
             self.editor.card = self.card
             self.singleCard = True
         self._updateFlagsMenu()
-        runHook("browser.rowChanged", self)
-        self._renderPreview(True)
+        gui_hooks.browser_did_change_row(self)
 
-    def refreshCurrentCard(self, note):
+    def refreshCurrentCard(self, note: Note) -> None:
         self.model.refreshNote(note)
-        self._renderPreview(False)
+        self._renderPreview()
 
     def onLoadNote(self, editor):
         self.refreshCurrentCard(editor.note)
@@ -878,10 +917,10 @@ class Browser(QMainWindow):
         hh.setSectionsMovable(True)
         self.setColumnSizes()
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
-        hh.customContextMenuRequested.connect(self.onHeaderContext)
+        qconnect(hh.customContextMenuRequested, self.onHeaderContext)
         self.setSortIndicator()
-        hh.sortIndicatorChanged.connect(self.onSortChanged)
-        hh.sectionMoved.connect(self.onColumnMoved)
+        qconnect(hh.sortIndicatorChanged, self.onSortChanged)
+        qconnect(hh.sectionMoved, self.onColumnMoved)
 
     def onSortChanged(self, idx, ord):
         ord = bool(ord)
@@ -889,31 +928,11 @@ class Browser(QMainWindow):
 
     def _onSortChanged(self, idx, ord):
         type = self.model.activeCols[idx]
-        noSort = ("question", "answer", "template", "deck", "note", "noteTags")
+        noSort = ("question", "answer")
         if type in noSort:
-            if type == "template":
-                showInfo(
-                    _(
-                        """\
-This column can't be sorted on, but you can search for individual card types, \
-such as 'card:1'."""
-                    )
-                )
-            elif type == "deck":
-                showInfo(
-                    _(
-                        """\
-This column can't be sorted on, but you can search for specific decks \
-by clicking on one on the left."""
-                    )
-                )
-            else:
-                showInfo(
-                    _(
-                        "Sorting on this column is not supported. Please "
-                        "choose another."
-                    )
-                )
+            showInfo(
+                _("Sorting on this column is not supported. Please " "choose another.")
+            )
             type = self.col.conf["sortType"]
         if self.col.conf["sortType"] != type:
             self.col.conf["sortType"] = type
@@ -921,10 +940,14 @@ by clicking on one on the left."""
             if type == "noteFld":
                 ord = not ord
             self.col.conf["sortBackwards"] = ord
+            self.col.setMod()
+            self.col.save()
             self.search()
         else:
             if self.col.conf["sortBackwards"] != ord:
                 self.col.conf["sortBackwards"] = ord
+                self.col.setMod()
+                self.col.save()
                 self.model.reverse()
         self.setSortIndicator()
 
@@ -951,7 +974,8 @@ by clicking on one on the left."""
             a = m.addAction(name)
             a.setCheckable(True)
             a.setChecked(type in self.model.activeCols)
-            a.toggled.connect(lambda b, t=type: self.toggleField(t))
+            qconnect(a.toggled, lambda b, t=type: self.toggleField(t))
+        gui_hooks.browser_header_will_show_context_menu(self, m)
         m.exec_(gpos)
 
     def toggleField(self, type):
@@ -968,6 +992,7 @@ by clicking on one on the left."""
         else:
             self.model.activeCols.append(type)
             adding = True
+        self.col.conf["activeCols"] = self.model.activeCols
         # sorted field may have been hidden
         self.setSortIndicator()
         self.setColumnSizes()
@@ -996,8 +1021,8 @@ by clicking on one on the left."""
     class SidebarTreeView(QTreeView):
         def __init__(self):
             super().__init__()
-            self.expanded.connect(self.onExpansion)
-            self.collapsed.connect(self.onCollapse)
+            qconnect(self.expanded, self.onExpansion)
+            qconnect(self.collapsed, self.onCollapse)
 
         def onClickCurrent(self) -> None:
             idx = self.currentIndex()
@@ -1039,13 +1064,13 @@ by clicking on one on the left."""
         self.sidebarTree.setUniformRowHeights(True)
         self.sidebarTree.setHeaderHidden(True)
         self.sidebarTree.setIndentation(15)
-        self.sidebarTree.expanded.connect(self.onSidebarItemExpanded)  # type: ignore
+        qconnect(self.sidebarTree.expanded, self.onSidebarItemExpanded)
         dw.setWidget(self.sidebarTree)
         # match window background color
         bgcolor = QPalette().window().color().name()
         self.sidebarTree.setStyleSheet("QTreeView { background: '%s'; }" % bgcolor)
         self.sidebarDockWidget.setFloating(False)
-        self.sidebarDockWidget.visibilityChanged.connect(self.onSidebarVisChanged)  # type: ignore
+        qconnect(self.sidebarDockWidget.visibilityChanged, self.onSidebarVisChanged)
         self.sidebarDockWidget.setTitleBarWidget(QWidget())
         self.addDockWidget(Qt.LeftDockWidgetArea, dw)
 
@@ -1073,11 +1098,27 @@ by clicking on one on the left."""
 
     def buildTree(self) -> SidebarItem:
         root = SidebarItem("", "")
-        self._stdTree(root)
-        self._favTree(root)
-        self._decksTree(root)
-        self._modelTree(root)
-        self._userTagTree(root)
+
+        handled = gui_hooks.browser_will_build_tree(
+            False, root, SidebarStage.ROOT, self
+        )
+        if handled:
+            return root
+
+        for stage, builder in zip(
+            list(SidebarStage)[1:],
+            (
+                self._stdTree,
+                self._favTree,
+                self._decksTree,
+                self._modelTree,
+                self._userTagTree,
+            ),
+        ):
+            handled = gui_hooks.browser_will_build_tree(False, root, stage, self)
+            if not handled and builder:
+                builder(root)
+
         return root
 
     def _stdTree(self, root) -> None:
@@ -1092,7 +1133,7 @@ by clicking on one on the left."""
 
     def _favTree(self, root) -> None:
         assert self.col
-        saved = self.col.conf.get("savedFilters", {})
+        saved = self.col.get_config("savedFilters", {})
         for name, filt in sorted(saved.items()):
             item = SidebarItem(
                 name,
@@ -1103,38 +1144,46 @@ by clicking on one on the left."""
 
     def _userTagTree(self, root) -> None:
         assert self.col
-        for t in sorted(self.col.tags.all(), key=lambda t: t.lower()):
+        for t in self.col.tags.all():
             item = SidebarItem(
                 t, ":/icons/tag.svg", lambda t=t: self.setFilter("tag", t)  # type: ignore
             )
             root.addChild(item)
 
     def _decksTree(self, root) -> None:
-        assert self.col
-        grps = self.col.sched.deckDueTree()
+        tree = self.col.decks.deck_tree()
 
-        def fillGroups(root, grps, head=""):
-            for g in grps:
+        def fillGroups(root, nodes: Sequence[DeckTreeNode], head=""):
+            for node in nodes:
+
+                def set_filter():
+                    full_name = head + node.name  # pylint: disable=cell-var-from-loop
+                    return lambda: self.setFilter("deck", full_name)
+
+                def toggle_expand():
+                    did = node.deck_id  # pylint: disable=cell-var-from-loop
+                    return lambda _: self.mw.col.decks.collapseBrowser(did)
+
                 item = SidebarItem(
-                    g[0],
+                    node.name,
                     ":/icons/deck.svg",
-                    lambda g=g: self.setFilter("deck", head + g[0]),
-                    lambda expanded, g=g: self.mw.col.decks.collapseBrowser(g[1]),
-                    not self.mw.col.decks.get(g[1]).get("browserCollapsed", False),
+                    set_filter(),
+                    toggle_expand(),
+                    not node.collapsed,
                 )
                 root.addChild(item)
-                newhead = head + g[0] + "::"
-                fillGroups(item, g[5], newhead)
+                newhead = head + node.name + "::"
+                fillGroups(item, node.children, newhead)
 
-        fillGroups(root, grps)
+        fillGroups(root, tree.children)
 
     def _modelTree(self, root) -> None:
         assert self.col
-        for m in sorted(self.col.models.all(), key=itemgetter("name")):
+        for m in self.col.models.all_names_and_ids():
             item = SidebarItem(
-                m["name"],
+                m.name,
                 ":/icons/notetype.svg",
-                lambda m=m: self.setFilter("note", m["name"]),  # type: ignore
+                lambda m=m: self.setFilter("note", m.name),  # type: ignore
             )
             root.addChild(item)
 
@@ -1171,7 +1220,7 @@ by clicking on one on the left."""
                 if c % 2 == 0:
                     txt += a + ":"
                 else:
-                    txt += a
+                    txt += re.sub(r"(\*|%|_)", r"\\\1", a)
                     for chr in " 　()":
                         if chr in txt:
                             txt = '"%s"' % txt
@@ -1231,7 +1280,7 @@ by clicking on one on the left."""
                     (_("New"), "is:new"),
                     (_("Learning"), "is:learn"),
                     (_("Review"), "is:review"),
-                    (_("Due"), "is:due"),
+                    (tr(TR.FILTERING_IS_DUE), "is:due"),
                     None,
                     (_("Suspended"), "is:suspended"),
                     (_("Buried"), "is:buried"),
@@ -1261,22 +1310,23 @@ by clicking on one on the left."""
         return m
 
     def _deckFilters(self):
-        def addDecks(parent, decks):
-            for head, did, rev, lrn, new, children in decks:
-                name = self.mw.col.decks.get(did)["name"]
-                shortname = name.split("::")[-1]
-                if children:
-                    subm = parent.addMenu(shortname)
-                    subm.addItem(_("Filter"), self._filterFunc("deck", name))
+        def addDecks(parent, decks, parent_prefix):
+            for node in decks:
+                # pylint: disable=cell-var-from-loop
+                fullname = parent_prefix + node.name
+                if node.children:
+                    subm = parent.addMenu(node.name)
+                    subm.addItem(
+                        _("Filter"), lambda: self._filterFunc("deck", fullname)
+                    )
                     subm.addSeparator()
-                    addDecks(subm, children)
+                    addDecks(subm, node.children, fullname + "::")
                 else:
-                    parent.addItem(shortname, self._filterFunc("deck", name))
+                    parent.addItem(node.name, self._filterFunc("deck", fullname))
 
-        # fixme: could rewrite to avoid calculating due # in the future
-        alldecks = self.col.sched.deckDueTree()
+        alldecks = self.col.decks.deck_tree()
         ml = MenuList()
-        addDecks(ml, alldecks)
+        addDecks(ml, alldecks.children, "")
 
         root = SubMenu(_("Decks"))
         root.addChild(ml.chunked())
@@ -1319,7 +1369,7 @@ by clicking on one on the left."""
         ml = MenuList()
         # make sure exists
         if "savedFilters" not in self.col.conf:
-            self.col.conf["savedFilters"] = {}
+            self.col.set_config("savedFilters", {})
 
         ml.addSeparator()
 
@@ -1328,7 +1378,7 @@ by clicking on one on the left."""
         else:
             ml.addItem(_("Save Current Filter..."), self._onSaveFilter)
 
-        saved = self.col.conf["savedFilters"]
+        saved = self.col.get_config("savedFilters")
         if not saved:
             return ml
 
@@ -1338,13 +1388,14 @@ by clicking on one on the left."""
 
         return ml
 
-    def _onSaveFilter(self):
+    def _onSaveFilter(self) -> None:
         name = getOnlyText(_("Please give your filter a name:"))
         if not name:
             return
         filt = self.form.searchEdit.lineEdit().text()
-        self.col.conf["savedFilters"][name] = filt
-        self.col.setMod()
+        conf = self.col.get_config("savedFilters")
+        conf[name] = filt
+        self.col.set_config("savedFilters", conf)
         self.maybeRefreshSidebar()
 
     def _onRemoveFilter(self):
@@ -1358,7 +1409,7 @@ by clicking on one on the left."""
     # returns name if found
     def _currentFilterIsSaved(self):
         filt = self.form.searchEdit.lineEdit().text()
-        for k, v in self.col.conf["savedFilters"].items():
+        for k, v in self.col.get_config("savedFilters").items():
             if filt == v:
                 return k
         return None
@@ -1369,106 +1420,35 @@ by clicking on one on the left."""
     def showCardInfo(self):
         if not self.card:
             return
+
         info, cs = self._cardInfoData()
         reps = self._revlogData(cs)
 
-        class CardInfoDialog(QDialog):
-            silentlyClose = True
-
-            def reject(self):
-                saveGeom(self, "revlog")
-                return QDialog.reject(self)
-
-        d = CardInfoDialog(self)
+        card_info_dialog = CardInfoDialog(self)
         l = QVBoxLayout()
         l.setContentsMargins(0, 0, 0, 0)
-        w = AnkiWebView()
+        w = AnkiWebView(title="browser card info")
         l.addWidget(w)
-        w.stdHtml(info + "<p>" + reps)
+        w.stdHtml(info + "<p>" + reps, context=card_info_dialog)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         l.addWidget(bb)
-        bb.rejected.connect(d.reject)
-        d.setLayout(l)
-        d.setWindowModality(Qt.WindowModal)
-        d.resize(500, 400)
-        restoreGeom(d, "revlog")
-        d.show()
+        qconnect(bb.rejected, card_info_dialog.reject)
+        card_info_dialog.setLayout(l)
+        card_info_dialog.setWindowModality(Qt.WindowModal)
+        card_info_dialog.resize(500, 400)
+        restoreGeom(card_info_dialog, "revlog")
+        card_info_dialog.show()
 
-    def _cardInfoData(self):
-        from anki.stats import CardStats
-
+    def _cardInfoData(self) -> Tuple[str, CardStats]:
         cs = CardStats(self.col, self.card)
-        rep = cs.report()
-        m = self.card.model()
-        rep = (
-            """
-<div style='width: 400px; margin: 0 auto 0;
-border: 1px solid #000; padding: 3px; '>%s</div>"""
-            % rep
-        )
+        rep = cs.report(include_revlog=True)
         return rep, cs
 
-    def _revlogData(self, cs):
-        entries = self.mw.col.db.all(
-            "select id/1000.0, ease, ivl, factor, time/1000.0, type "
-            "from revlog where cid = ?",
-            self.card.id,
-        )
-        if not entries:
-            return ""
-        s = "<table width=100%%><tr><th align=left>%s</th>" % _("Date")
-        s += ("<th align=right>%s</th>" * 5) % (
-            _("Type"),
-            _("Rating"),
-            _("Interval"),
-            _("Ease"),
-            _("Time"),
-        )
-        cnt = 0
-        for (date, ease, ivl, factor, taken, type) in reversed(entries):
-            cnt += 1
-            s += "<tr><td>%s</td>" % time.strftime(
-                _("<b>%Y-%m-%d</b> @ %H:%M"), time.localtime(date)
-            )
-            tstr = [_("Learn"), _("Review"), _("Relearn"), _("Filtered"), _("Resched")][
-                type
-            ]
-            import anki.stats as st
+    # legacy - revlog used to be generated here, and some add-ons
+    # wrapped this function
 
-            fmt = "<span style='color:%s'>%s</span>"
-            if type == 0:
-                tstr = fmt % (st.colLearn, tstr)
-            elif type == 1:
-                tstr = fmt % (st.colMature, tstr)
-            elif type == 2:
-                tstr = fmt % (st.colRelearn, tstr)
-            elif type == 3:
-                tstr = fmt % (st.colCram, tstr)
-            else:
-                tstr = fmt % ("#000", tstr)
-            if ease == 1:
-                ease = fmt % (st.colRelearn, ease)
-            if ivl == 0:
-                ivl = _("0d")
-            elif ivl > 0:
-                ivl = fmtTimeSpan(ivl * 86400, short=True)
-            else:
-                ivl = cs.time(-ivl)
-            s += ("<td align=right>%s</td>" * 5) % (
-                tstr,
-                ease,
-                ivl,
-                "%d%%" % (factor / 10) if factor else "",
-                cs.time(taken),
-            ) + "</tr>"
-        s += "</table>"
-        if cnt < self.card.reps:
-            s += _(
-                """\
-Note: Some of the history is missing. For more information, \
-please see the browser documentation."""
-            )
-        return s
+    def _revlogData(self, cs: CardStats) -> str:
+        return ""
 
     # Menu helpers
     ######################################################################
@@ -1530,214 +1510,25 @@ where id in %s"""
     # Preview
     ######################################################################
 
-    _previewTimer = None
-    _lastPreviewRender = 0
-    _lastPreviewState = None
-    _previewCardChanged = False
-
     def onTogglePreview(self):
-        if self._previewWindow:
-            self._closePreview()
+        if self._previewer:
+            self._previewer.close()
+            self._on_preview_closed()
         else:
-            self._openPreview()
+            self._previewer = PreviewDialog(self, self.mw, self._on_preview_closed)
+            self._previewer.open()
 
-    def _openPreview(self):
-        self._previewState = "question"
-        self._lastPreviewState = None
-        self._previewWindow = QDialog(None, Qt.Window)
-        self._previewWindow.setWindowTitle(_("Preview"))
+    def _renderPreview(self):
+        if self._previewer:
+            self._previewer.render_card()
 
-        self._previewWindow.finished.connect(self._onPreviewFinished)
-        self._previewWindow.silentlyClose = True
-        vbox = QVBoxLayout()
-        vbox.setContentsMargins(0, 0, 0, 0)
-        self._previewWeb = AnkiWebView()
-        vbox.addWidget(self._previewWeb)
-        bbox = QDialogButtonBox()
+    def _cleanup_preview(self):
+        if self._previewer:
+            self._previewer.cancel_timer()
+            self._previewer.close()
 
-        self._previewReplay = bbox.addButton(
-            _("Replay Audio"), QDialogButtonBox.ActionRole
-        )
-        self._previewReplay.setAutoDefault(False)
-        self._previewReplay.setShortcut(QKeySequence("R"))
-        self._previewReplay.setToolTip(_("Shortcut key: %s" % "R"))
-
-        self._previewPrev = bbox.addButton("<", QDialogButtonBox.ActionRole)
-        self._previewPrev.setAutoDefault(False)
-        self._previewPrev.setShortcut(QKeySequence("Left"))
-        self._previewPrev.setToolTip(_("Shortcut key: Left arrow"))
-
-        self._previewNext = bbox.addButton(">", QDialogButtonBox.ActionRole)
-        self._previewNext.setAutoDefault(True)
-        self._previewNext.setShortcut(QKeySequence("Right"))
-        self._previewNext.setToolTip(_("Shortcut key: Right arrow or Enter"))
-
-        self._previewPrev.clicked.connect(self._onPreviewPrev)
-        self._previewNext.clicked.connect(self._onPreviewNext)
-        self._previewReplay.clicked.connect(self._onReplayAudio)
-
-        self.previewShowBothSides = QCheckBox(_("Show Both Sides"))
-        self.previewShowBothSides.setShortcut(QKeySequence("B"))
-        self.previewShowBothSides.setToolTip(_("Shortcut key: %s" % "B"))
-        bbox.addButton(self.previewShowBothSides, QDialogButtonBox.ActionRole)
-        self._previewBothSides = self.col.conf.get("previewBothSides", False)
-        self.previewShowBothSides.setChecked(self._previewBothSides)
-        self.previewShowBothSides.toggled.connect(self._onPreviewShowBothSides)
-
-        self._setupPreviewWebview()
-
-        vbox.addWidget(bbox)
-        self._previewWindow.setLayout(vbox)
-        restoreGeom(self._previewWindow, "preview")
-        self._previewWindow.show()
-        self._renderPreview(True)
-
-    def _onPreviewFinished(self, ok):
-        saveGeom(self._previewWindow, "preview")
-        self.mw.progress.timer(100, self._onClosePreview, False)
-        self.form.previewButton.setChecked(False)
-
-    def _onPreviewPrev(self):
-        if self._previewState == "answer" and not self._previewBothSides:
-            self._previewState = "question"
-            self._renderPreview()
-        else:
-            self.editor.saveNow(lambda: self._moveCur(QAbstractItemView.MoveUp))
-
-    def _onPreviewNext(self):
-        if self._previewState == "question":
-            self._previewState = "answer"
-            self._renderPreview()
-        else:
-            self.editor.saveNow(lambda: self._moveCur(QAbstractItemView.MoveDown))
-
-    def _onReplayAudio(self):
-        self.mw.reviewer.replayAudio(self)
-
-    def _updatePreviewButtons(self):
-        if not self._previewWindow:
-            return
-        current = self.currentRow()
-        canBack = current > 0 or (
-            current == 0
-            and self._previewState == "answer"
-            and not self._previewBothSides
-        )
-        self._previewPrev.setEnabled(not not (self.singleCard and canBack))
-        canForward = (
-            self.currentRow() < self.model.rowCount(None) - 1
-            or self._previewState == "question"
-        )
-        self._previewNext.setEnabled(not not (self.singleCard and canForward))
-
-    def _closePreview(self):
-        if self._previewWindow:
-            self._previewWindow.close()
-            self._onClosePreview()
-
-    def _onClosePreview(self):
-        self._previewWindow = self._previewPrev = self._previewNext = None
-
-    def _setupPreviewWebview(self):
-        jsinc = [
-            "jquery.js",
-            "browsersel.js",
-            "mathjax/conf.js",
-            "mathjax/MathJax.js",
-            "reviewer.js",
-        ]
-        self._previewWeb.stdHtml(
-            self.mw.reviewer.revHtml(), css=["reviewer.css"], js=jsinc
-        )
-
-    def _renderPreview(self, cardChanged=False):
-        self._cancelPreviewTimer()
-        # Keep track of whether _renderPreview() has ever been called
-        # with cardChanged=True since the last successful render
-        self._previewCardChanged |= cardChanged
-        # avoid rendering in quick succession
-        elapMS = int((time.time() - self._lastPreviewRender) * 1000)
-        delay = 300
-        if elapMS < delay:
-            self._previewTimer = self.mw.progress.timer(
-                delay - elapMS, self._renderScheduledPreview, False
-            )
-        else:
-            self._renderScheduledPreview()
-
-    def _cancelPreviewTimer(self):
-        if self._previewTimer:
-            self._previewTimer.stop()
-            self._previewTimer = None
-
-    def _renderScheduledPreview(self):
-        self._cancelPreviewTimer()
-        self._lastPreviewRender = time.time()
-
-        if not self._previewWindow:
-            return
-        c = self.card
-        func = "_showQuestion"
-        if not c or not self.singleCard:
-            txt = _("(please select 1 card)")
-            bodyclass = ""
-            self._lastPreviewState = None
-        else:
-            if self._previewBothSides:
-                self._previewState = "answer"
-            elif self._previewCardChanged:
-                self._previewState = "question"
-
-            currentState = self._previewStateAndMod()
-            if currentState == self._lastPreviewState:
-                # nothing has changed, avoid refreshing
-                return
-
-            # need to force reload even if answer
-            txt = c.q(reload=True)
-
-            questionAudio = []
-            if self._previewBothSides:
-                questionAudio = allSounds(txt)
-            if self._previewState == "answer":
-                func = "_showAnswer"
-                txt = c.a()
-            txt = re.sub(r"\[\[type:[^]]+\]\]", "", txt)
-
-            bodyclass = bodyClass(self.mw.col, c)
-
-            clearAudioQueue()
-            if self.mw.reviewer.autoplay(c):
-                # if we're showing both sides at once, play question audio first
-                for audio in questionAudio:
-                    play(audio)
-                # then play any audio that hasn't already been played
-                for audio in allSounds(txt):
-                    if audio not in questionAudio:
-                        play(audio)
-
-            txt = mungeQA(self.col, txt)
-            txt = runFilter(
-                "prepareQA", txt, c, "preview" + self._previewState.capitalize()
-            )
-            self._lastPreviewState = self._previewStateAndMod()
-        self._updatePreviewButtons()
-        self._previewWeb.eval("{}({},'{}');".format(func, json.dumps(txt), bodyclass))
-        self._previewCardChanged = False
-
-    def _onPreviewShowBothSides(self, toggle):
-        self._previewBothSides = toggle
-        self.col.conf["previewBothSides"] = toggle
-        self.col.setMod()
-        if self._previewState == "answer" and not toggle:
-            self._previewState = "question"
-        self._renderPreview()
-
-    def _previewStateAndMod(self):
-        c = self.card
-        n = c.note()
-        n.load()
-        return (self._previewState, c.id, n.mod)
+    def _on_preview_closed(self):
+        self._previewer = None
 
     # Card deletion
     ######################################################################
@@ -1769,14 +1560,14 @@ where id in %s"""
         else:
             # last selection at top; place one above topmost selection
             newRow = min(selectedRows) - 1
-        self.col.remNotes(nids)
+        self.col.remove_notes(nids)
         self.search()
         if len(self.model.cards):
             newRow = min(newRow, len(self.model.cards) - 1)
             newRow = max(newRow, 0)
             self.model.focusedCard = self.model.cards[newRow]
         self.model.endReset()
-        self.mw.requireReset()
+        self.mw.reset()
         tooltip(
             ngettext("%d note deleted.", "%d notes deleted.", len(nids)) % len(nids)
         )
@@ -1812,23 +1603,9 @@ where id in %s"""
             return
         self.model.beginReset()
         self.mw.checkpoint(_("Change Deck"))
-        mod = intTime()
-        usn = self.col.usn()
-        # normal cards
-        scids = ids2str(cids)
-        # remove any cards from filtered deck first
-        self.col.sched.remFromDyn(cids)
-        # then move into new deck
-        self.col.db.execute(
-            """
-update cards set usn=?, mod=?, did=? where id in """
-            + scids,
-            usn,
-            mod,
-            did,
-        )
+        self.col.set_deck(cids, did)
         self.model.endReset()
-        self.mw.requireReset()
+        self.mw.requireReset(reason=ResetReason.BrowserSetDeck, context=self)
 
     # Tags
     ######################################################################
@@ -1854,7 +1631,7 @@ update cards set usn=?, mod=?, did=? where id in """
         self.model.beginReset()
         func(self.selectedNotes(), tags)
         self.model.endReset()
-        self.mw.requireReset()
+        self.mw.requireReset(reason=ResetReason.BrowserAddTags, context=self)
 
     def deleteTags(self, tags=None, label=None):
         if label is None:
@@ -1868,12 +1645,13 @@ update cards set usn=?, mod=?, did=? where id in """
 
     def _clearUnusedTags(self):
         self.col.tags.registerNotes()
+        self.on_tag_list_update()
 
     # Suspending
     ######################################################################
 
     def isSuspended(self):
-        return not not (self.card and self.card.queue == -1)
+        return bool(self.card and self.card.queue == QUEUE_TYPE_SUSPENDED)
 
     def onSuspend(self):
         self.editor.saveNow(self._onSuspend)
@@ -1882,11 +1660,19 @@ update cards set usn=?, mod=?, did=? where id in """
         sus = not self.isSuspended()
         c = self.selectedCards()
         if sus:
-            self.col.sched.suspendCards(c)
+            self.col.sched.suspend_cards(c)
         else:
-            self.col.sched.unsuspendCards(c)
+            self.col.sched.unsuspend_cards(c)
         self.model.reset()
-        self.mw.requireReset()
+        self.mw.requireReset(reason=ResetReason.BrowserSuspend, context=self)
+
+    # Exporting
+    ######################################################################
+
+    def _on_export_notes(self):
+        cids = self.selectedNotesAsCards()
+        if cids:
+            ExportDialog(self.mw, cids=cids)
 
     # Flags & Marking
     ######################################################################
@@ -1894,6 +1680,9 @@ update cards set usn=?, mod=?, did=? where id in """
     def onSetFlag(self, n):
         if not self.card:
             return
+        self.editor.saveNow(lambda: self._on_set_flag(n))
+
+    def _on_set_flag(self, n: int):
         # flag needs toggling off?
         if n == self.card.userFlag():
             n = 0
@@ -1926,7 +1715,7 @@ update cards set usn=?, mod=?, did=? where id in """
             self.deleteTags(tags="marked", label=False)
 
     def isMarked(self):
-        return not not (self.card and self.card.note().hasTag("Marked"))
+        return bool(self.card and self.card.note().hasTag("Marked"))
 
     # Repositioning
     ######################################################################
@@ -1937,7 +1726,8 @@ update cards set usn=?, mod=?, did=? where id in """
     def _reposition(self):
         cids = self.selectedCards()
         cids2 = self.col.db.list(
-            "select id from cards where type = 0 and id in " + ids2str(cids)
+            f"select id from cards where type = {CARD_TYPE_NEW} and id in "
+            + ids2str(cids)
         )
         if not cids2:
             return showInfo(_("Only new cards can be repositioned."))
@@ -1946,7 +1736,7 @@ update cards set usn=?, mod=?, did=? where id in """
         frm = aqt.forms.reposition.Ui_Dialog()
         frm.setupUi(d)
         (pmin, pmax) = self.col.db.first(
-            "select min(due), max(due) from cards where type=0 and odid=0"
+            f"select min(due), max(due) from cards where type={CARD_TYPE_NEW} and odid=0"
         )
         pmin = pmin or 0
         pmax = pmax or 0
@@ -1965,7 +1755,7 @@ update cards set usn=?, mod=?, did=? where id in """
             shift=frm.shift.isChecked(),
         )
         self.search()
-        self.mw.requireReset()
+        self.mw.requireReset(reason=ResetReason.BrowserReposition, context=self)
         self.model.endReset()
 
     # Rescheduling
@@ -1991,7 +1781,7 @@ update cards set usn=?, mod=?, did=? where id in """
             fmax = max(fmin, fmax)
             self.col.sched.reschedCards(self.selectedCards(), fmin, fmax)
         self.search()
-        self.mw.requireReset()
+        self.mw.requireReset(reason=ResetReason.BrowserReschedule, context=self)
         self.model.endReset()
 
     # Edit: selection
@@ -2017,26 +1807,36 @@ update cards set usn=?, mod=?, did=? where id in """
         self.form.tableView.selectAll()
         sm.select(items, QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
 
-    # Edit: undo
+    # Hooks
     ######################################################################
 
-    def setupHooks(self):
-        addHook("undoState", self.onUndoState)
-        addHook("reset", self.onReset)
-        addHook("editTimer", self.refreshCurrentCard)
-        addHook("loadNote", self.onLoadNote)
-        addHook("editFocusLost", self.refreshCurrentCardFilter)
-        for t in "newTag", "newModel", "newDeck":
-            addHook(t, self.maybeRefreshSidebar)
+    def setupHooks(self) -> None:
+        gui_hooks.undo_state_did_change.append(self.onUndoState)
+        gui_hooks.state_did_reset.append(self.onReset)
+        gui_hooks.editor_did_fire_typing_timer.append(self.refreshCurrentCard)
+        gui_hooks.editor_did_load_note.append(self.onLoadNote)
+        gui_hooks.editor_did_unfocus_field.append(self.on_unfocus_field)
+        gui_hooks.sidebar_should_refresh_decks.append(self.on_item_added)
+        gui_hooks.sidebar_should_refresh_notetypes.append(self.on_item_added)
 
-    def teardownHooks(self):
-        remHook("reset", self.onReset)
-        remHook("editTimer", self.refreshCurrentCard)
-        remHook("loadNote", self.onLoadNote)
-        remHook("editFocusLost", self.refreshCurrentCardFilter)
-        remHook("undoState", self.onUndoState)
-        for t in "newTag", "newModel", "newDeck":
-            remHook(t, self.maybeRefreshSidebar)
+    def teardownHooks(self) -> None:
+        gui_hooks.undo_state_did_change.remove(self.onUndoState)
+        gui_hooks.state_did_reset.remove(self.onReset)
+        gui_hooks.editor_did_fire_typing_timer.remove(self.refreshCurrentCard)
+        gui_hooks.editor_did_load_note.remove(self.onLoadNote)
+        gui_hooks.editor_did_unfocus_field.remove(self.on_unfocus_field)
+        gui_hooks.sidebar_should_refresh_decks.remove(self.on_item_added)
+        gui_hooks.sidebar_should_refresh_notetypes.remove(self.on_item_added)
+
+    def on_unfocus_field(self, changed: bool, note: Note, field_idx: int) -> None:
+        self.refreshCurrentCard(note)
+
+    # covers the tag, note and deck case
+    def on_item_added(self, item: Any = None) -> None:
+        self.maybeRefreshSidebar()
+
+    def on_tag_list_update(self):
+        self.maybeRefreshSidebar()
 
     def onUndoState(self, on):
         self.form.actionUndo.setEnabled(on)
@@ -2049,56 +1849,89 @@ update cards set usn=?, mod=?, did=? where id in """
     def onFindReplace(self):
         self.editor.saveNow(self._onFindReplace)
 
-    def _onFindReplace(self):
-        sf = self.selectedNotes()
-        if not sf:
+    def _onFindReplace(self) -> None:
+        nids = self.selectedNotes()
+        if not nids:
             return
         import anki.find
 
-        fields = anki.find.fieldNamesForNotes(self.mw.col, sf)
+        def find():
+            return anki.find.fieldNamesForNotes(self.mw.col, nids)
+
+        def on_done(fut):
+            self._on_find_replace_diag(fut.result(), nids)
+
+        self.mw.taskman.with_progress(find, on_done, self)
+
+    def _on_find_replace_diag(self, fields: List[str], nids: List[int]) -> None:
         d = QDialog(self)
         frm = aqt.forms.findreplace.Ui_Dialog()
         frm.setupUi(d)
         d.setWindowModality(Qt.WindowModal)
-        frm.field.addItems([_("All Fields")] + fields)
-        frm.buttonBox.helpRequested.connect(self.onFindReplaceHelp)
+
+        combo = "BrowserFindAndReplace"
+        findhistory = restore_combo_history(frm.find, combo + "Find")
+        frm.find.completer().setCaseSensitivity(True)
+        replacehistory = restore_combo_history(frm.replace, combo + "Replace")
+        frm.replace.completer().setCaseSensitivity(True)
+
+        restore_is_checked(frm.re, combo + "Regex")
+        restore_is_checked(frm.ignoreCase, combo + "ignoreCase")
+
+        frm.find.setFocus()
+        allfields = [_("All Fields")] + fields
+        frm.field.addItems(allfields)
+        restore_combo_index_for_session(frm.field, allfields, combo + "Field")
+        qconnect(frm.buttonBox.helpRequested, self.onFindReplaceHelp)
         restoreGeom(d, "findreplace")
         r = d.exec_()
         saveGeom(d, "findreplace")
         if not r:
             return
+
+        save_combo_index_for_session(frm.field, combo + "Field")
         if frm.field.currentIndex() == 0:
             field = None
         else:
             field = fields[frm.field.currentIndex() - 1]
+
+        search = save_combo_history(frm.find, findhistory, combo + "Find")
+        replace = save_combo_history(frm.replace, replacehistory, combo + "Replace")
+
+        regex = frm.re.isChecked()
+        nocase = frm.ignoreCase.isChecked()
+
+        save_is_checked(frm.re, combo + "Regex")
+        save_is_checked(frm.ignoreCase, combo + "ignoreCase")
+
         self.mw.checkpoint(_("Find and Replace"))
-        self.mw.progress.start()
+        # starts progress dialog as well
         self.model.beginReset()
-        try:
-            changed = self.col.findReplace(
-                sf,
-                str(frm.find.text()),
-                str(frm.replace.text()),
-                frm.re.isChecked(),
-                field,
-                frm.ignoreCase.isChecked(),
+
+        def do_search():
+            return self.col.find_and_replace(
+                nids, search, replace, regex, field, nocase
             )
-        except sre_constants.error:
-            showInfo(_("Invalid regular expression."), parent=self)
-            return
-        else:
+
+        def on_done(fut):
             self.search()
-            self.mw.requireReset()
-        finally:
+            self.mw.requireReset(reason=ResetReason.BrowserFindReplace, context=self)
             self.model.endReset()
-            self.mw.progress.finish()
-        showInfo(
-            ngettext(
-                "%(a)d of %(b)d note updated", "%(a)d of %(b)d notes updated", len(sf)
+
+            total = len(nids)
+            try:
+                changed = fut.result()
+            except InvalidInput as e:
+                # failed regex
+                showWarning(str(e))
+                return
+
+            showInfo(
+                tr(TR.FINDREPLACE_NOTES_UPDATED, changed=changed, total=total),
+                parent=self,
             )
-            % {"a": changed, "b": len(sf),},
-            parent=self,
-        )
+
+        self.mw.taskman.run_in_background(do_search, on_done)
 
     def onFindReplaceHelp(self):
         openHelp("findreplace")
@@ -2115,36 +1948,45 @@ update cards set usn=?, mod=?, did=? where id in """
         frm = aqt.forms.finddupes.Ui_Dialog()
         frm.setupUi(d)
         restoreGeom(d, "findDupes")
+        searchHistory = restore_combo_history(frm.search, "findDupesFind")
+
         fields = sorted(
             anki.find.fieldNames(self.col, downcase=False), key=lambda x: x.lower()
         )
         frm.fields.addItems(fields)
+        restore_combo_index_for_session(frm.fields, fields, "findDupesFields")
         self._dupesButton = None
+
         # links
-        frm.webView.onBridgeCmd = self.dupeLinkClicked
+        frm.webView.title = "find duplicates"
+        web_context = FindDupesDialog(dialog=d, browser=self)
+        frm.webView.set_bridge_command(self.dupeLinkClicked, web_context)
+        frm.webView.stdHtml("", context=web_context)
 
         def onFin(code):
             saveGeom(d, "findDupes")
 
-        d.finished.connect(onFin)
+        qconnect(d.finished, onFin)
 
         def onClick():
+            search_text = save_combo_history(frm.search, searchHistory, "findDupesFind")
+            save_combo_index_for_session(frm.fields, "findDupesFields")
             field = fields[frm.fields.currentIndex()]
-            self.duplicatesReport(frm.webView, field, frm.search.text(), frm)
+            self.duplicatesReport(frm.webView, field, search_text, frm, web_context)
 
         search = frm.buttonBox.addButton(_("Search"), QDialogButtonBox.ActionRole)
-        search.clicked.connect(onClick)
+        qconnect(search.clicked, onClick)
         d.show()
 
-    def duplicatesReport(self, web, fname, search, frm):
+    def duplicatesReport(self, web, fname, search, frm, web_context):
         self.mw.progress.start()
         res = self.mw.col.findDupes(fname, search)
         if not self._dupesButton:
             self._dupesButton = b = frm.buttonBox.addButton(
                 _("Tag Duplicates"), QDialogButtonBox.ActionRole
             )
-            b.clicked.connect(lambda: self._onTagDupes(res))
-        t = "<html><body>"
+            qconnect(b.clicked, lambda: self._onTagDupes(res))
+        t = ""
         groups = len(res)
         notes = sum(len(r[1]) for r in res)
         part1 = ngettext("%d group", "%d groups", groups) % groups
@@ -2161,8 +2003,7 @@ update cards set usn=?, mod=?, did=? where id in """
                 )
             )
         t += "</ol>"
-        t += "</body></html>"
-        web.setHtml(t)
+        web.stdHtml(t, context=web_context)
         self.mw.progress.finish()
 
     def _onTagDupes(self, res):
@@ -2173,10 +2014,10 @@ update cards set usn=?, mod=?, did=? where id in """
         nids = set()
         for s, nidlist in res:
             nids.update(nidlist)
-        self.col.tags.bulkAdd(nids, _("duplicate"))
+        self.col.tags.bulkAdd(list(nids), _("duplicate"))
         self.mw.progress.finish()
         self.model.endReset()
-        self.mw.requireReset()
+        self.mw.requireReset(reason=ResetReason.BrowserTagDupes, context=self)
         tooltip(_("Notes tagged."))
 
     def dupeLinkClicked(self, link):
@@ -2260,7 +2101,7 @@ update cards set usn=?, mod=?, did=? where id in """
 
 
 class ChangeModel(QDialog):
-    def __init__(self, browser, nids):
+    def __init__(self, browser, nids) -> None:
         QDialog.__init__(self, browser)
         self.browser = browser
         self.nids = nids
@@ -2270,9 +2111,12 @@ class ChangeModel(QDialog):
         self.setWindowModality(Qt.WindowModal)
         self.setup()
         restoreGeom(self, "changeModel")
-        addHook("reset", self.onReset)
-        addHook("currentModelChanged", self.onReset)
+        gui_hooks.state_did_reset.append(self.onReset)
+        gui_hooks.current_note_type_did_change.append(self.on_note_type_change)
         self.exec_()
+
+    def on_note_type_change(self, notetype: NoteType) -> None:
+        self.onReset()
 
     def setup(self):
         # maps
@@ -2301,7 +2145,7 @@ class ChangeModel(QDialog):
             self.browser.mw, self.form.modelChooserWidget, label=False
         )
         self.modelChooser.models.setFocus()
-        self.form.buttonBox.helpRequested.connect(self.onHelp)
+        qconnect(self.form.buttonBox.helpRequested, self.onHelp)
         self.modelChanged(self.browser.mw.col.models.current())
         self.pauseUpdate = False
 
@@ -2337,8 +2181,9 @@ class ChangeModel(QDialog):
             idx = min(i, len(targets) - 1)
             cb.setCurrentIndex(idx)
             indices[cb] = idx
-            cb.currentIndexChanged.connect(
-                lambda i, cb=cb, key=key: self.onComboChanged(i, cb, key)
+            qconnect(
+                cb.currentIndexChanged,
+                lambda i, cb=cb, key=key: self.onComboChanged(i, cb, key),
             )
             combos.append(cb)
             l.addWidget(cb, i, 1)
@@ -2377,25 +2222,25 @@ class ChangeModel(QDialog):
             old = self.oldModel["tmpls"]
             combos = self.tcombos
             new = self.targetModel["tmpls"]
-        map = {}
+        template_map: Dict[int, Optional[int]] = {}
         for i, f in enumerate(old):
             idx = combos[i].currentIndex()
             if idx == len(new):
                 # ignore
-                map[f["ord"]] = None
+                template_map[f["ord"]] = None
             else:
                 f2 = new[idx]
-                map[f["ord"]] = f2["ord"]
-        return map
+                template_map[f["ord"]] = f2["ord"]
+        return template_map
 
     def getFieldMap(self):
         return self.getTemplateMap(
             old=self.oldModel["flds"], combos=self.fcombos, new=self.targetModel["flds"]
         )
 
-    def cleanup(self):
-        remHook("reset", self.onReset)
-        remHook("currentModelChanged", self.onReset)
+    def cleanup(self) -> None:
+        gui_hooks.state_did_reset.remove(self.onReset)
+        gui_hooks.current_note_type_did_change.remove(self.on_note_type_change)
         self.modelChooser.cleanup()
         saveGeom(self, "changeModel")
 
@@ -2433,3 +2278,19 @@ Are you sure you want to continue?"""
 
     def onHelp(self):
         openHelp("browsermisc")
+
+
+# Card Info Dialog
+######################################################################
+
+
+class CardInfoDialog(QDialog):
+    silentlyClose = True
+
+    def __init__(self, browser: Browser, *args, **kwargs):
+        super().__init__(browser, *args, **kwargs)
+        self.browser = browser
+
+    def reject(self):
+        saveGeom(self, "revlog")
+        return QDialog.reject(self)

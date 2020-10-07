@@ -11,72 +11,65 @@ This module manages the tag cache and tags for notes.
 
 from __future__ import annotations
 
-import json
+import pprint
 import re
-from typing import Callable, Dict, List, Tuple
+from typing import Collection, List, Optional, Tuple
 
 import anki  # pylint: disable=unused-import
-from anki.hooks import runHook
-from anki.utils import ids2str, intTime
+from anki.utils import ids2str
 
 
 class TagManager:
+    def __init__(self, col: anki.collection.Collection) -> None:
+        self.col = col.weakref()
 
-    # Registry save/load
-    #############################################################
+    # all tags
+    def all(self) -> List[str]:
+        return [t.tag for t in self.col.backend.all_tags()]
 
-    def __init__(self, col: anki.storage._Collection) -> None:
-        self.col = col
-        self.tags: Dict[str, int] = {}
+    def __repr__(self) -> str:
+        d = dict(self.__dict__)
+        del d["col"]
+        return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
 
-    def load(self, json_) -> None:
-        self.tags = json.loads(json_)
-        self.changed = False
-
-    def flush(self) -> None:
-        if self.changed:
-            self.col.db.execute("update col set tags=?", json.dumps(self.tags))
-            self.changed = False
+    # # List of (tag, usn)
+    def allItems(self) -> List[Tuple[str, int]]:
+        return [(t.tag, t.usn) for t in self.col.backend.all_tags()]
 
     # Registering and fetching tags
     #############################################################
 
-    def register(self, tags, usn=None) -> None:
-        "Given a list of tags, add any missing ones to tag registry."
-        found = False
-        for t in tags:
-            if t not in self.tags:
-                found = True
-                self.tags[t] = self.col.usn() if usn is None else usn
-                self.changed = True
-        if found:
-            runHook("newTag")
+    def register(
+        self, tags: Collection[str], usn: Optional[int] = None, clear=False
+    ) -> None:
+        if usn is None:
+            preserve_usn = False
+            usn_ = 0
+        else:
+            usn_ = usn
+            preserve_usn = True
 
-    def all(self) -> List:
-        return list(self.tags.keys())
+        self.col.backend.register_tags(
+            tags=" ".join(tags), preserve_usn=preserve_usn, usn=usn_, clear_first=clear
+        )
 
-    def registerNotes(self, nids=None) -> None:
+    def registerNotes(self, nids: Optional[List[int]] = None) -> None:
         "Add any missing tags from notes to the tags list."
         # when called without an argument, the old list is cleared first.
         if nids:
             lim = " where id in " + ids2str(nids)
+            clear = False
         else:
             lim = ""
-            self.tags = {}
-            self.changed = True
+            clear = True
         self.register(
             set(
                 self.split(
                     " ".join(self.col.db.list("select distinct tags from notes" + lim))
                 )
-            )
+            ),
+            clear=clear,
         )
-
-    def allItems(self) -> List[Tuple[str, int]]:
-        return list(self.tags.items())
-
-    def save(self) -> None:
-        self.changed = True
 
     def byDeck(self, did, children=False) -> List[str]:
         basequery = "select n.tags from cards c, notes n WHERE c.nid = n.id"
@@ -94,66 +87,45 @@ class TagManager:
     # Bulk addition/removal from notes
     #############################################################
 
-    def bulkAdd(self, ids, tags, add=True) -> None:
+    def bulk_add(self, nids: List[int], tags: str) -> int:
+        """Add space-separate tags to provided notes, returning changed count."""
+        return self.col.backend.add_note_tags(nids=nids, tags=tags)
+
+    def bulk_update(
+        self, nids: List[int], tags: str, replacement: str, regex: bool
+    ) -> int:
+        """Replace space-separated tags, returning changed count.
+        Tags replaced with an empty string will be removed."""
+        return self.col.backend.update_note_tags(
+            nids=nids, tags=tags, replacement=replacement, regex=regex
+        )
+
+    # legacy routines
+
+    def bulkAdd(self, ids: List[int], tags: str, add: bool = True) -> None:
         "Add tags in bulk. TAGS is space-separated."
-        newTags = self.split(tags)
-        if not newTags:
-            return
-        # cache tag names
         if add:
-            self.register(newTags)
-        # find notes missing the tags
-        fn: Callable[[str, str], str]
-        if add:
-            l = "tags not "
-            fn = self.addToStr
+            self.bulk_add(ids, tags)
         else:
-            l = "tags "
-            fn = self.remFromStr
-        lim = " or ".join([l + "like :_%d" % c for c, t in enumerate(newTags)])
-        res = self.col.db.all(
-            "select id, tags from notes where id in %s and (%s)" % (ids2str(ids), lim),
-            **dict(
-                [
-                    ("_%d" % x, "%% %s %%" % y.replace("*", "%"))
-                    for x, y in enumerate(newTags)
-                ]
-            ),
-        )
-        # update tags
-        nids = []
+            self.bulk_update(ids, tags, "", False)
 
-        def fix(row):
-            nids.append(row[0])
-            return {
-                "id": row[0],
-                "t": fn(tags, row[1]),
-                "n": intTime(),
-                "u": self.col.usn(),
-            }
-
-        self.col.db.executemany(
-            "update notes set tags=:t,mod=:n,usn=:u where id = :id",
-            [fix(row) for row in res],
-        )
-
-    def bulkRem(self, ids, tags) -> None:
+    def bulkRem(self, ids: List[int], tags: str) -> None:
         self.bulkAdd(ids, tags, False)
 
     # String-based utilities
     ##########################################################################
 
-    def split(self, tags) -> List[str]:
+    def split(self, tags: str) -> List[str]:
         "Parse a string and return a list of tags."
         return [t for t in tags.replace("\u3000", " ").split(" ") if t]
 
-    def join(self, tags) -> str:
+    def join(self, tags: List[str]) -> str:
         "Join tags into a single string, with leading and trailing spaces."
         if not tags:
             return ""
         return " %s " % " ".join(tags)
 
-    def addToStr(self, addtags, tags) -> str:
+    def addToStr(self, addtags: str, tags: str) -> str:
         "Add tags if they don't exist, and canonify."
         currentTags = self.split(tags)
         for tag in self.split(addtags):
@@ -161,7 +133,7 @@ class TagManager:
                 currentTags.append(tag)
         return self.join(self.canonify(currentTags))
 
-    def remFromStr(self, deltags, tags) -> str:
+    def remFromStr(self, deltags: str, tags: str) -> str:
         "Delete tags if they exist."
 
         def wildcard(pat, str):
@@ -183,25 +155,10 @@ class TagManager:
     # List-based utilities
     ##########################################################################
 
-    def canonify(self, tagList) -> List[str]:
-        "Strip duplicates, adjust case to match existing tags, and sort."
-        strippedTags = []
-        for t in tagList:
-            s = re.sub("[\"']", "", t)
-            for existingTag in self.tags:
-                if s.lower() == existingTag.lower():
-                    s = existingTag
-            strippedTags.append(s)
-        return sorted(set(strippedTags))
+    # this is now a no-op - the tags are canonified when the note is saved
+    def canonify(self, tagList: List[str]) -> List[str]:
+        return tagList
 
-    def inList(self, tag, tags) -> bool:
+    def inList(self, tag: str, tags: List[str]) -> bool:
         "True if TAG is in TAGS. Ignore case."
         return tag.lower() in [t.lower() for t in tags]
-
-    # Sync handling
-    ##########################################################################
-
-    def beforeUpload(self) -> None:
-        for k in list(self.tags.keys()):
-            self.tags[k] = 0
-        self.save()

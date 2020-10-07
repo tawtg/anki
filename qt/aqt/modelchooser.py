@@ -1,68 +1,79 @@
 # -*- coding: utf-8 -*-
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+from typing import Optional
 
-from anki.hooks import addHook, remHook, runHook
 from anki.lang import _
+from aqt import AnkiQt, gui_hooks
 from aqt.qt import *
 from aqt.utils import shortcut
 
 
 class ModelChooser(QHBoxLayout):
-    def __init__(self, mw, widget, label=True):
+    def __init__(
+        self,
+        mw: AnkiQt,
+        widget: QWidget,
+        label: bool = True,
+        on_activated: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """If provided, on_activated() will be called when the button is clicked,
+        and the caller can call .onModelChange() to pull up the dialog when they
+        are ready."""
         QHBoxLayout.__init__(self)
-        self.widget = widget
+        self.widget = widget  # type: ignore
         self.mw = mw
         self.deck = mw.col
         self.label = label
+        if on_activated:
+            self.on_activated = on_activated
+        else:
+            self.on_activated = self.onModelChange
         self.setContentsMargins(0, 0, 0, 0)
         self.setSpacing(8)
         self.setupModels()
-        addHook("reset", self.onReset)
+        gui_hooks.state_did_reset.append(self.onReset)
         self.widget.setLayout(self)
 
-    def setupModels(self):
+    def setupModels(self) -> None:
         if self.label:
             self.modelLabel = QLabel(_("Type"))
             self.addWidget(self.modelLabel)
         # models box
         self.models = QPushButton()
-        # self.models.setStyleSheet("* { text-align: left; }")
         self.models.setToolTip(shortcut(_("Change Note Type (Ctrl+N)")))
-        s = QShortcut(
-            QKeySequence(_("Ctrl+N")), self.widget, activated=self.onModelChange
-        )
+        QShortcut(QKeySequence("Ctrl+N"), self.widget, activated=self.on_activated)  # type: ignore
         self.models.setAutoDefault(False)
         self.addWidget(self.models)
-        self.models.clicked.connect(self.onModelChange)
+        qconnect(self.models.clicked, self.onModelChange)
         # layout
         sizePolicy = QSizePolicy(QSizePolicy.Policy(7), QSizePolicy.Policy(0))
         self.models.setSizePolicy(sizePolicy)
         self.updateModels()
 
-    def cleanup(self):
-        remHook("reset", self.onReset)
+    def cleanup(self) -> None:
+        gui_hooks.state_did_reset.remove(self.onReset)
 
-    def onReset(self):
+    def onReset(self) -> None:
         self.updateModels()
 
-    def show(self):
-        self.widget.show()
+    def show(self) -> None:
+        self.widget.show()  # type: ignore
 
-    def hide(self):
-        self.widget.hide()
+    def hide(self) -> None:
+        self.widget.hide()  # type: ignore
 
-    def onEdit(self):
+    def onEdit(self) -> None:
         import aqt.models
 
         aqt.models.Models(self.mw, self.widget)
 
-    def onModelChange(self):
+    def onModelChange(self) -> None:
         from aqt.studydeck import StudyDeck
 
         current = self.deck.models.current()["name"]
         # edit button
-        edit = QPushButton(_("Manage"), clicked=self.onEdit)
+        edit = QPushButton(_("Manage"), clicked=self.onEdit)  # type: ignore
 
         def nameFunc():
             return sorted(self.deck.models.allNames())
@@ -86,8 +97,8 @@ class ModelChooser(QHBoxLayout):
         cdeck = self.deck.decks.current()
         cdeck["mid"] = m["id"]
         self.deck.decks.save(cdeck)
-        runHook("currentModelChanged")
+        gui_hooks.current_note_type_did_change(current)
         self.mw.reset()
 
-    def updateModels(self):
+    def updateModels(self) -> None:
         self.models.setText(self.deck.models.current()["name"])

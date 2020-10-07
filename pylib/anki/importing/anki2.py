@@ -5,10 +5,11 @@ import os
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
-from anki.collection import _Collection
+from anki.collection import Collection
+from anki.consts import *
+from anki.decks import DeckManager
 from anki.importing.base import Importer
 from anki.lang import _
-from anki.storage import Collection
 from anki.utils import intTime, joinFields, splitFields
 
 GUID = 1
@@ -21,10 +22,10 @@ class Anki2Importer(Importer):
     needMapper = False
     deckPrefix: Optional[str] = None
     allowUpdate = True
-    src: _Collection
-    dst: _Collection
+    src: Collection
+    dst: Collection
 
-    def __init__(self, col: _Collection, file: str) -> None:
+    def __init__(self, col: Collection, file: str) -> None:
         super().__init__(col, file)
 
         # set later, defined here for typechecking
@@ -39,7 +40,7 @@ class Anki2Importer(Importer):
         try:
             self._import()
         finally:
-            self.src.close(save=False)
+            self.src.close(save=False, downgrade=False)
 
     def _prepareFiles(self) -> None:
         importingV2 = self.file.endswith(".anki21")
@@ -64,10 +65,7 @@ class Anki2Importer(Importer):
         self._importCards()
         self._importStaticMedia()
         self._postImport()
-        self.dst.db.setAutocommit(True)
-        self.dst.db.execute("vacuum")
-        self.dst.db.execute("analyze")
-        self.dst.db.setAutocommit(False)
+        self.dst.optimize()
 
     # Notes
     ######################################################################
@@ -84,9 +82,6 @@ class Anki2Importer(Importer):
         ):
             self._notes[guid] = (id, mod, mid)
             existing[id] = True
-        # we may need to rewrite the guid if the model schemas don't match,
-        # so we need to keep track of the changes for the card import stage
-        self._changedGuids: Dict[str, bool] = {}
         # we ignore updates to changed schemas. we need to note the ignored
         # guids, so we avoid importing invalid cards
         self._ignoredGuids: Dict[str, bool] = {}
@@ -182,7 +177,6 @@ class Anki2Importer(Importer):
             "insert or replace into notes values (?,?,?,?,?,?,?,?,?,?,?)", update
         )
         self.dst.updateFieldCache(dirty)
-        self.dst.tags.registerNotes(dirty)
 
     # determine if note is a duplicate, and adjust mid and/or guid as required
     # returns true if note should be added
@@ -259,13 +253,13 @@ class Anki2Importer(Importer):
         name = g["name"]
         # if there's a prefix, replace the top level deck
         if self.deckPrefix:
-            tmpname = "::".join(name.split("::")[1:])
+            tmpname = "::".join(DeckManager.path(name)[1:])
             name = self.deckPrefix
             if tmpname:
                 name += "::" + tmpname
         # manually create any parents so we can pull in descriptions
         head = ""
-        for parent in name.split("::")[:-1]:
+        for parent in DeckManager.immediate_parent_path(name):
             if head:
                 head += "::"
             head += parent
@@ -279,9 +273,9 @@ class Anki2Importer(Importer):
         newid = self.dst.decks.id(name)
         # pull conf over
         if "conf" in g and g["conf"] != 1:
-            conf = self.src.decks.getConf(g["conf"])
+            conf = self.src.decks.get_config(g["conf"])
             self.dst.decks.save(conf)
-            self.dst.decks.updateConf(conf)
+            self.dst.decks.update_config(conf)
             g2 = self.dst.decks.get(newid)
             g2["conf"] = g["conf"]
             self.dst.decks.save(g2)
@@ -298,6 +292,7 @@ class Anki2Importer(Importer):
 
     def _importCards(self) -> None:
         if self.mustResetLearning:
+            self.src.modSchema(check=False)
             self.src.changeSchedulerVer(2)
         # build map of (guid, ord) -> cid and used id cache
         self._cards: Dict[Tuple[str, int], int] = {}
@@ -317,14 +312,11 @@ class Anki2Importer(Importer):
             "select f.guid, f.mid, c.* from cards c, notes f " "where c.nid = f.id"
         ):
             guid = card[0]
-            if guid in self._changedGuids:
-                guid = self._changedGuids[guid]
             if guid in self._ignoredGuids:
                 continue
             # does the card's note exist in dst col?
             if guid not in self._notes:
                 continue
-            dnid = self._notes[guid]
             # does the card already exist in the dst col?
             ord = card[5]
             if (guid, ord) in self._cards:
@@ -343,7 +335,10 @@ class Anki2Importer(Importer):
             card[4] = intTime()
             card[5] = usn
             # review cards have a due date relative to collection
-            if card[7] in (2, 3) or card[6] == 2:
+            if (
+                card[7] in (QUEUE_TYPE_REV, QUEUE_TYPE_DAY_LEARN_RELEARN)
+                or card[6] == CARD_TYPE_REV
+            ):
                 card[8] -= aheadBy
             # odue needs updating too
             if card[14]:
@@ -356,13 +351,13 @@ class Anki2Importer(Importer):
                 card[8] = card[14]
                 card[14] = 0
                 # queue
-                if card[6] == 1:  # type
-                    card[7] = 0
+                if card[6] == CARD_TYPE_LRN:  # type
+                    card[7] = QUEUE_TYPE_NEW
                 else:
                     card[7] = card[6]
                 # type
-                if card[6] == 1:
-                    card[6] = 0
+                if card[6] == CARD_TYPE_LRN:
+                    card[6] = CARD_TYPE_NEW
             cards.append(card)
             # we need to import revlog, rewriting card ids and bumping usn
             for rev in self.src.db.execute("select * from revlog where cid = ?", scid):

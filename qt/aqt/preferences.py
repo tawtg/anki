@@ -2,15 +2,12 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import datetime
-import time
-
 import anki.lang
 import aqt
 from anki.lang import _
 from aqt import AnkiQt
 from aqt.qt import *
-from aqt.utils import askUser, openHelp, showInfo
+from aqt.utils import TR, askUser, openHelp, showInfo, showWarning, tr
 
 
 class Preferences(QDialog):
@@ -22,8 +19,9 @@ class Preferences(QDialog):
         self.form.setupUi(self)
         self.form.buttonBox.button(QDialogButtonBox.Help).setAutoDefault(False)
         self.form.buttonBox.button(QDialogButtonBox.Close).setAutoDefault(False)
-        self.form.buttonBox.helpRequested.connect(lambda: openHelp("profileprefs"))
+        qconnect(self.form.buttonBox.helpRequested, lambda: openHelp("profileprefs"))
         self.silentlyClose = True
+        self.prefs = self.mw.col.backend.get_preferences()
         self.setupLang()
         self.setupCollection()
         self.setupNetwork()
@@ -54,12 +52,17 @@ class Preferences(QDialog):
         f = self.form
         f.lang.addItems([x[0] for x in anki.lang.langs])
         f.lang.setCurrentIndex(self.langIdx())
-        f.lang.currentIndexChanged.connect(self.onLangIdxChanged)
+        qconnect(f.lang.currentIndexChanged, self.onLangIdxChanged)
 
     def langIdx(self):
         codes = [x[1] for x in anki.lang.langs]
+        lang = anki.lang.currentLang
+        if lang in anki.lang.compatMap:
+            lang = anki.lang.compatMap[lang]
+        else:
+            lang = lang.replace("-", "_")
         try:
-            return codes.index(anki.lang.getLang())
+            return codes.index(lang)
         except:
             return codes.index("en_US")
 
@@ -76,24 +79,31 @@ class Preferences(QDialog):
 
         f = self.form
         qc = self.mw.col.conf
-        self._setupDayCutoff()
+
         if isMac:
             f.hwAccel.setVisible(False)
         else:
             f.hwAccel.setChecked(self.mw.pm.glMode() != "software")
-        f.lrnCutoff.setValue(qc["collapseTime"] / 60.0)
-        f.timeLimit.setValue(qc["timeLim"] / 60.0)
-        f.showEstimates.setChecked(qc["estTimes"])
-        f.showProgress.setChecked(qc["dueCounts"])
-        f.nightMode.setChecked(qc.get("nightMode", False))
+
         f.newSpread.addItems(list(c.newCardSchedulingLabels().values()))
-        f.newSpread.setCurrentIndex(qc["newSpread"])
+
         f.useCurrent.setCurrentIndex(int(not qc.get("addToCur", True)))
-        f.dayLearnFirst.setChecked(qc.get("dayLearnFirst", False))
-        if self.mw.col.schedVer() != 2:
+
+        s = self.prefs
+        f.lrnCutoff.setValue(s.learn_ahead_secs / 60.0)
+        f.timeLimit.setValue(s.time_limit_secs / 60.0)
+        f.showEstimates.setChecked(s.show_intervals_on_buttons)
+        f.showProgress.setChecked(s.show_remaining_due_counts)
+        f.newSpread.setCurrentIndex(s.new_review_mix)
+        f.dayLearnFirst.setChecked(s.day_learn_first)
+        f.dayOffset.setValue(s.rollover)
+
+        if s.scheduler_version < 2:
             f.dayLearnFirst.setVisible(False)
+            f.new_timezone.setVisible(False)
         else:
             f.newSched.setChecked(True)
+            f.new_timezone.setChecked(s.new_timezone)
 
     def updateCollection(self):
         f = self.form
@@ -110,15 +120,22 @@ class Preferences(QDialog):
                 showInfo(_("Changes will take effect when you restart Anki."))
 
         qc = d.conf
-        qc["dueCounts"] = f.showProgress.isChecked()
-        qc["estTimes"] = f.showEstimates.isChecked()
-        qc["newSpread"] = f.newSpread.currentIndex()
-        qc["nightMode"] = f.nightMode.isChecked()
-        qc["timeLim"] = f.timeLimit.value() * 60
-        qc["collapseTime"] = f.lrnCutoff.value() * 60
         qc["addToCur"] = not f.useCurrent.currentIndex()
-        qc["dayLearnFirst"] = f.dayLearnFirst.isChecked()
-        self._updateDayCutoff()
+
+        s = self.prefs
+        s.show_remaining_due_counts = f.showProgress.isChecked()
+        s.show_intervals_on_buttons = f.showEstimates.isChecked()
+        s.new_review_mix = f.newSpread.currentIndex()
+        s.time_limit_secs = f.timeLimit.value() * 60
+        s.learn_ahead_secs = f.lrnCutoff.value() * 60
+        s.day_learn_first = f.dayLearnFirst.isChecked()
+        s.rollover = f.dayOffset.value()
+        s.new_timezone = f.new_timezone.isChecked()
+
+        # if moving this, make sure scheduler change is moved to Rust or
+        # happens afterwards
+        self.mw.col.backend.set_preferences(self.prefs)
+
         self._updateSchedVer(f.newSched.isChecked())
         d.setMod()
 
@@ -144,48 +161,24 @@ class Preferences(QDialog):
         else:
             self.mw.col.changeSchedulerVer(1)
 
-    # Day cutoff
-    ######################################################################
-
-    def _setupDayCutoff(self):
-        if self.mw.col.schedVer() == 2:
-            self._setupDayCutoffV2()
-        else:
-            self._setupDayCutoffV1()
-
-    def _setupDayCutoffV1(self):
-        self.startDate = datetime.datetime.fromtimestamp(self.mw.col.crt)
-        self.form.dayOffset.setValue(self.startDate.hour)
-
-    def _setupDayCutoffV2(self):
-        self.form.dayOffset.setValue(self.mw.col.conf.get("rollover", 4))
-
-    def _updateDayCutoff(self):
-        if self.mw.col.schedVer() == 2:
-            self._updateDayCutoffV2()
-        else:
-            self._updateDayCutoffV1()
-
-    def _updateDayCutoffV1(self):
-        hrs = self.form.dayOffset.value()
-        old = self.startDate
-        date = datetime.datetime(old.year, old.month, old.day, hrs)
-        self.mw.col.crt = int(time.mktime(date.timetuple()))
-
-    def _updateDayCutoffV2(self):
-        self.mw.col.conf["rollover"] = self.form.dayOffset.value()
-
     # Network
     ######################################################################
 
     def setupNetwork(self):
+        self.form.media_log.setText(tr(TR.SYNC_MEDIA_LOG_BUTTON))
+        qconnect(self.form.media_log.clicked, self.on_media_log)
         self.form.syncOnProgramOpen.setChecked(self.prof["autoSync"])
         self.form.syncMedia.setChecked(self.prof["syncMedia"])
+        self.form.autoSyncMedia.setChecked(self.mw.pm.auto_sync_media_minutes() != 0)
         if not self.prof["syncKey"]:
             self._hideAuth()
         else:
             self.form.syncUser.setText(self.prof.get("syncUser", ""))
-            self.form.syncDeauth.clicked.connect(self.onSyncDeauth)
+            qconnect(self.form.syncDeauth.clicked, self.onSyncDeauth)
+        self.form.syncDeauth.setText(tr(TR.SYNC_LOG_OUT_BUTTON))
+
+    def on_media_log(self):
+        self.mw.media_syncer.show_sync_log()
 
     def _hideAuth(self):
         self.form.syncDeauth.setVisible(False)
@@ -198,14 +191,20 @@ Not currently enabled; click the sync button in the main window to enable."""
             )
         )
 
-    def onSyncDeauth(self):
+    def onSyncDeauth(self) -> None:
+        if self.mw.media_syncer.is_syncing():
+            showWarning("Can't log out while sync in progress.")
+            return
         self.prof["syncKey"] = None
-        self.mw.col.media.forceResync()
+        self.mw.col.media.force_resync()
         self._hideAuth()
 
     def updateNetwork(self):
         self.prof["autoSync"] = self.form.syncOnProgramOpen.isChecked()
         self.prof["syncMedia"] = self.form.syncMedia.isChecked()
+        self.mw.pm.set_auto_sync_media_minutes(
+            self.form.autoSyncMedia.isChecked() and 15 or 0
+        )
         if self.form.fullSync.isChecked():
             self.mw.col.modSchema(check=False)
             self.mw.col.setMod()
@@ -225,10 +224,27 @@ Not currently enabled; click the sync button in the main window to enable."""
     def setupOptions(self):
         self.form.pastePNG.setChecked(self.prof.get("pastePNG", False))
         self.form.uiScale.setValue(self.mw.pm.uiScale() * 100)
+        self.form.pasteInvert.setChecked(self.prof.get("pasteInvert", False))
+        self.form.showPlayButtons.setChecked(self.prof.get("showPlayButtons", True))
+        self.form.nightMode.setChecked(self.mw.pm.night_mode())
+        self.form.interrupt_audio.setChecked(self.mw.pm.interrupt_audio())
 
     def updateOptions(self):
+        restart_required = False
+
         self.prof["pastePNG"] = self.form.pastePNG.isChecked()
+        self.prof["pasteInvert"] = self.form.pasteInvert.isChecked()
         newScale = self.form.uiScale.value() / 100
         if newScale != self.mw.pm.uiScale():
             self.mw.pm.setUiScale(newScale)
+            restart_required = True
+        self.prof["showPlayButtons"] = self.form.showPlayButtons.isChecked()
+
+        if self.mw.pm.night_mode() != self.form.nightMode.isChecked():
+            self.mw.pm.set_night_mode(not self.mw.pm.night_mode())
+            restart_required = True
+
+        self.mw.pm.set_interrupt_audio(self.form.interrupt_audio.isChecked())
+
+        if restart_required:
             showInfo(_("Changes will take effect when you restart Anki."))

@@ -21,11 +21,18 @@ import typing
 import uuid
 
 import PyQt5.QtSvg
+import socks
 
-from anki.utils import isWin
+# legacy compat
+import anki.storage
+import anki.sync
+from anki.utils import isLin, isWin
 
 # external module access in Windows
 if isWin:
     import pythoncom
-    import win32com
     import pywintypes
+    import win32com
+
+if isLin:
+    import fcntl

@@ -4,465 +4,401 @@
 from __future__ import annotations
 
 import copy
-import json
-import re
+import pprint
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import anki  # pylint: disable=unused-import
+import anki.backend_pb2 as pb
 from anki.consts import *
-from anki.hooks import runHook
 from anki.lang import _
-from anki.types import Field, NoteType, Template
+from anki.rsbackend import NotFoundError, StockNoteType, from_json_bytes, to_json_bytes
 from anki.utils import checksum, ids2str, intTime, joinFields, splitFields
 
-# Models
-##########################################################################
+# types
+NoteType = Dict[str, Any]
+Field = Dict[str, Any]
+Template = Dict[str, Union[str, int, None]]
 
-# - careful not to add any lists/dicts/etc here, as they aren't deep copied
 
-defaultModel: NoteType = {
-    "sortf": 0,
-    "did": 1,
-    "latexPre": """\
-\\documentclass[12pt]{article}
-\\special{papersize=3in,5in}
-\\usepackage[utf8]{inputenc}
-\\usepackage{amssymb,amsmath}
-\\pagestyle{empty}
-\\setlength{\\parindent}{0in}
-\\begin{document}
-""",
-    "latexPost": "\\end{document}",
-    "mod": 0,
-    "usn": 0,
-    "vers": [],  # FIXME: remove when other clients have caught up
-    "type": MODEL_STD,
-    "css": """\
-.card {
- font-family: arial;
- font-size: 20px;
- text-align: center;
- color: black;
- background-color: white;
-}
-""",
-}
+class ModelsDictProxy:
+    def __init__(self, col: anki.collection.Collection):
+        self._col = col.weakref()
 
-defaultField: Field = {
-    "name": "",
-    "ord": None,
-    "sticky": False,
-    # the following alter editing, and are used as defaults for the
-    # template wizard
-    "rtl": False,
-    "font": "Arial",
-    "size": 20,
-    # reserved for future use
-    "media": [],
-}
+    def _warn(self):
+        print("add-on should use methods on col.models, not col.models.models dict")
 
-defaultTemplate: Template = {
-    "name": "",
-    "ord": None,
-    "qfmt": "",
-    "afmt": "",
-    "did": None,
-    "bqfmt": "",
-    "bafmt": "",
-    # we don't define these so that we pick up system font size until set
-    #'bfont': "Arial",
-    #'bsize': 12,
-}
+    def __getitem__(self, item):
+        self._warn()
+        return self._col.models.get(int(item))
+
+    def __setitem__(self, key, val):
+        self._warn()
+        self._col.models.save(val)
+
+    def __len__(self):
+        self._warn()
+        return len(self._col.models.all_names_and_ids())
+
+    def keys(self):
+        self._warn()
+        return [str(nt.id) for nt in self._col.models.all_names_and_ids()]
+
+    def values(self):
+        self._warn()
+        return self._col.models.all()
+
+    def items(self):
+        self._warn()
+        return [(str(nt["id"]), nt) for nt in self._col.models.all()]
+
+    def __contains__(self, item):
+        self._warn()
+        self._col.models.have(item)
 
 
 class ModelManager:
-    models: Dict[str, NoteType]
-
     # Saving/loading registry
     #############################################################
 
-    def __init__(self, col: anki.storage._Collection) -> None:
-        self.col = col
-        self.models = {}
-        self.changed = False
+    def __init__(self, col: anki.collection.Collection) -> None:
+        self.col = col.weakref()
+        self.models = ModelsDictProxy(col)
+        # do not access this directly!
+        self._cache = {}
 
-    def load(self, json_: str) -> None:
-        "Load registry from JSON."
-        self.changed = False
-        self.models = json.loads(json_)
+    def __repr__(self) -> str:
+        d = dict(self.__dict__)
+        del d["col"]
+        return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
 
     def save(
         self,
-        m: Optional[NoteType] = None,
+        m: NoteType = None,
+        # no longer used
         templates: bool = False,
         updateReqs: bool = True,
     ) -> None:
-        "Mark M modified if provided, and schedule registry flush."
-        if m and m["id"]:
-            m["mod"] = intTime()
-            m["usn"] = self.col.usn()
-            if updateReqs:
-                self._updateRequired(m)
-            if templates:
-                self._syncTemplates(m)
-        self.changed = True
-        runHook("newModel")
+        "Save changes made to provided note type."
+        if not m:
+            print("col.models.save() should be passed the changed notetype")
+            return
 
+        self.update(m, preserve_usn=False)
+
+    # legacy
     def flush(self) -> None:
-        "Flush the registry if any models were changed."
-        if self.changed:
-            self.ensureNotEmpty()
-            self.col.db.execute("update col set models = ?", json.dumps(self.models))
-            self.changed = False
+        pass
 
-    def ensureNotEmpty(self) -> Optional[bool]:
-        if not self.models:
-            from anki.stdmodels import addBasicModel
+    # Caching
+    #############################################################
+    # A lot of existing code expects to be able to quickly and
+    # frequently obtain access to an entire notetype, so we currently
+    # need to cache responses from the backend. Please do not
+    # access the cache directly!
 
-            addBasicModel(self.col)
-            return True
-        return None
+    _cache: Dict[int, NoteType] = {}
 
-    # Retrieving and creating models
+    def _update_cache(self, nt: NoteType) -> None:
+        self._cache[nt["id"]] = nt
+
+    def _remove_from_cache(self, ntid: int) -> None:
+        if ntid in self._cache:
+            del self._cache[ntid]
+
+    def _get_cached(self, ntid: int) -> Optional[NoteType]:
+        return self._cache.get(ntid)
+
+    def _clear_cache(self):
+        self._cache = {}
+
+    # Listing note types
     #############################################################
 
-    def current(self, forDeck: bool = True) -> Any:
+    def all_names_and_ids(self) -> Sequence[pb.NoteTypeNameID]:
+        return self.col.backend.get_notetype_names()
+
+    def all_use_counts(self) -> Sequence[pb.NoteTypeNameIDUseCount]:
+        return self.col.backend.get_notetype_names_and_counts()
+
+    # legacy
+
+    def allNames(self) -> List[str]:
+        return [n.name for n in self.all_names_and_ids()]
+
+    def ids(self) -> List[int]:
+        return [n.id for n in self.all_names_and_ids()]
+
+    # only used by importing code
+    def have(self, id: int) -> bool:
+        if isinstance(id, str):
+            id = int(id)
+        return any(True for e in self.all_names_and_ids() if e.id == id)
+
+    # Current note type
+    #############################################################
+
+    def current(self, forDeck: bool = True) -> NoteType:
         "Get current model."
         m = self.get(self.col.decks.current().get("mid"))
         if not forDeck or not m:
             m = self.get(self.col.conf["curModel"])
-        return m or list(self.models.values())[0]
+        if m:
+            return m
+        return self.get(self.all_names_and_ids()[0].id)
 
     def setCurrent(self, m: NoteType) -> None:
         self.col.conf["curModel"] = m["id"]
         self.col.setMod()
 
-    def get(self, id: Any) -> Any:
+    # Retrieving and creating models
+    #############################################################
+
+    def id_for_name(self, name: str) -> Optional[int]:
+        try:
+            return self.col.backend.get_notetype_id_by_name(name)
+        except NotFoundError:
+            return None
+
+    def get(self, id: int) -> Optional[NoteType]:
         "Get model with ID, or None."
-        id = str(id)
-        if id in self.models:
-            return self.models[id]
+        # deal with various legacy input types
+        if id is None:
+            return None
+        elif isinstance(id, str):
+            id = int(id)
 
-    def all(self) -> List:
+        nt = self._get_cached(id)
+        if not nt:
+            try:
+                nt = from_json_bytes(self.col.backend.get_notetype_legacy(id))
+                self._update_cache(nt)
+            except NotFoundError:
+                return None
+        return nt
+
+    def all(self) -> List[NoteType]:
         "Get all models."
-        return list(self.models.values())
+        return [self.get(nt.id) for nt in self.all_names_and_ids()]
 
-    def allNames(self) -> List:
-        return [m["name"] for m in self.all()]
-
-    def byName(self, name: str) -> Any:
+    def byName(self, name: str) -> Optional[NoteType]:
         "Get model with NAME."
-        for m in list(self.models.values()):
-            if m["name"] == name:
-                return m
+        id = self.id_for_name(name)
+        if id:
+            return self.get(id)
+        else:
+            return None
 
     def new(self, name: str) -> NoteType:
-        "Create a new model, save it in the registry, and return it."
+        "Create a new model, and return it."
         # caller should call save() after modifying
-        m = defaultModel.copy()
-        m["name"] = name
-        m["mod"] = intTime()
-        m["flds"] = []
-        m["tmpls"] = []
-        m["tags"] = []
-        m["id"] = None
-        return m
+        nt = from_json_bytes(
+            self.col.backend.get_stock_notetype_legacy(
+                StockNoteType.STOCK_NOTE_TYPE_BASIC
+            )
+        )
+        nt["flds"] = []
+        nt["tmpls"] = []
+        nt["name"] = name
+        return nt
 
     def rem(self, m: NoteType) -> None:
         "Delete model, and all its cards/notes."
-        self.col.modSchema(check=True)
-        current = self.current()["id"] == m["id"]
-        # delete notes/cards
-        self.col.remCards(
-            self.col.db.list(
-                """
-select id from cards where nid in (select id from notes where mid = ?)""",
-                m["id"],
-            )
-        )
-        # then the model
-        del self.models[str(m["id"])]
-        self.save()
-        # GUI should ensure last model is not deleted
-        if current:
-            self.setCurrent(list(self.models.values())[0])
+        self.remove(m["id"])
+
+    def remove_all_notetypes(self):
+        for nt in self.all_names_and_ids():
+            self._remove_from_cache(nt.id)
+            self.col.backend.remove_notetype(nt.id)
+
+    def remove(self, id: int) -> None:
+        "Modifies schema."
+        self._remove_from_cache(id)
+        self.col.backend.remove_notetype(id)
 
     def add(self, m: NoteType) -> None:
-        self._setID(m)
-        self.update(m)
-        self.setCurrent(m)
         self.save(m)
 
     def ensureNameUnique(self, m: NoteType) -> None:
-        for mcur in self.all():
-            if mcur["name"] == m["name"] and mcur["id"] != m["id"]:
-                m["name"] += "-" + checksum(str(time.time()))[:5]
-                break
+        existing_id = self.id_for_name(m["name"])
+        if existing_id is not None and existing_id != m["id"]:
+            m["name"] += "-" + checksum(str(time.time()))[:5]
 
-    def update(self, m: NoteType) -> None:
-        "Add or update an existing model. Used for syncing and merging."
+    def update(self, m: NoteType, preserve_usn=True) -> None:
+        "Add or update an existing model. Use .save() instead."
+        self._remove_from_cache(m["id"])
         self.ensureNameUnique(m)
-        self.models[str(m["id"])] = m
-        # mark registry changed, but don't bump mod time
-        self.save()
+        m["id"] = self.col.backend.add_or_update_notetype(
+            json=to_json_bytes(m), preserve_usn_and_mtime=preserve_usn
+        )
+        self.setCurrent(m)
+        self._mutate_after_write(m)
 
-    def _setID(self, m: NoteType) -> None:
-        while 1:
-            id = str(intTime(1000))
-            if id not in self.models:
-                break
-        m["id"] = id
-
-    def have(self, id: int) -> bool:
-        return str(id) in self.models
-
-    def ids(self) -> List[str]:
-        return list(self.models.keys())
+    def _mutate_after_write(self, nt: NoteType) -> None:
+        # existing code expects the note type to be mutated to reflect
+        # the changes made when adding, such as ordinal assignment :-(
+        updated = self.get(nt["id"])
+        nt.update(updated)
 
     # Tools
     ##################################################
 
-    def nids(self, m: NoteType) -> Any:
+    def nids(self, ntid: int) -> List[int]:
         "Note ids for M."
-        return self.col.db.list("select id from notes where mid = ?", m["id"])
+        if isinstance(ntid, dict):
+            # legacy callers passed in note type
+            ntid = ntid["id"]
+        return self.col.db.list("select id from notes where mid = ?", ntid)
 
-    def useCount(self, m: NoteType) -> Any:
+    def useCount(self, m: NoteType) -> int:
         "Number of note using M."
         return self.col.db.scalar("select count() from notes where mid = ?", m["id"])
-
-    def tmplUseCount(self, m: NoteType, ord) -> Any:
-        return self.col.db.scalar(
-            """
-select count() from cards, notes where cards.nid = notes.id
-and notes.mid = ? and cards.ord = ?""",
-            m["id"],
-            ord,
-        )
 
     # Copying
     ##################################################
 
-    def copy(self, m: NoteType) -> Any:
+    def copy(self, m: NoteType) -> NoteType:
         "Copy, save and return."
         m2 = copy.deepcopy(m)
         m2["name"] = _("%s copy") % m2["name"]
+        m2["id"] = 0
         self.add(m2)
         return m2
 
     # Fields
     ##################################################
 
-    def newField(self, name: str) -> Field:
-        assert isinstance(name, str)
-        f = defaultField.copy()
-        f["name"] = name
-        return f
-
-    def fieldMap(self, m: NoteType) -> Dict[str, Tuple[Any, Any]]:
+    def fieldMap(self, m: NoteType) -> Dict[str, Tuple[int, Field]]:
         "Mapping of field name -> (ord, field)."
         return dict((f["name"], (f["ord"], f)) for f in m["flds"])
 
     def fieldNames(self, m: NoteType) -> List[str]:
         return [f["name"] for f in m["flds"]]
 
-    def sortIdx(self, m: NoteType) -> Any:
+    def sortIdx(self, m: NoteType) -> int:
         return m["sortf"]
 
-    def setSortIdx(self, m: NoteType, idx: int) -> None:
-        assert 0 <= idx < len(m["flds"])
-        self.col.modSchema(check=True)
-        m["sortf"] = idx
-        self.col.updateFieldCache(self.nids(m))
-        self.save(m, updateReqs=False)
+    # Adding & changing fields
+    ##################################################
 
-    def addField(self, m: NoteType, field: Field) -> None:
-        # only mod schema if model isn't new
-        if m["id"]:
-            self.col.modSchema(check=True)
+    def new_field(self, name: str) -> Field:
+        assert isinstance(name, str)
+        nt = from_json_bytes(
+            self.col.backend.get_stock_notetype_legacy(
+                StockNoteType.STOCK_NOTE_TYPE_BASIC
+            )
+        )
+        field = nt["flds"][0]
+        field["name"] = name
+        field["ord"] = None
+        return field
+
+    def add_field(self, m: NoteType, field: Field) -> None:
+        "Modifies schema."
         m["flds"].append(field)
-        self._updateFieldOrds(m)
-        self.save(m)
 
-        def add(fields):
-            fields.append("")
-            return fields
-
-        self._transformFields(m, add)
-
-    def remField(self, m: NoteType, field: Field) -> None:
-        self.col.modSchema(check=True)
-        # save old sort field
-        sortFldName = m["flds"][m["sortf"]]["name"]
-        idx = m["flds"].index(field)
+    def remove_field(self, m: NoteType, field: Field) -> None:
+        "Modifies schema."
         m["flds"].remove(field)
-        # restore old sort field if possible, or revert to first field
-        m["sortf"] = 0
-        for c, f in enumerate(m["flds"]):
-            if f["name"] == sortFldName:
-                m["sortf"] = c
-                break
-        self._updateFieldOrds(m)
 
-        def delete(fields):
-            del fields[idx]
-            return fields
-
-        self._transformFields(m, delete)
-        if m["flds"][m["sortf"]]["name"] != sortFldName:
-            # need to rebuild sort field
-            self.col.updateFieldCache(self.nids(m))
-        # saves
-        self.renameField(m, field, None)
-
-    def moveField(self, m: NoteType, field: Field, idx: int) -> None:
-        self.col.modSchema(check=True)
+    def reposition_field(self, m: NoteType, field: Field, idx: int) -> None:
+        "Modifies schema."
         oldidx = m["flds"].index(field)
         if oldidx == idx:
             return
-        # remember old sort field
-        sortf = m["flds"][m["sortf"]]
-        # move
+
         m["flds"].remove(field)
         m["flds"].insert(idx, field)
-        # restore sort field
-        m["sortf"] = m["flds"].index(sortf)
-        self._updateFieldOrds(m)
-        self.save(m, updateReqs=False)
 
-        def move(fields, oldidx=oldidx):
-            val = fields[oldidx]
-            del fields[oldidx]
-            fields.insert(idx, val)
-            return fields
+    def rename_field(self, m: NoteType, field: Field, new_name: str) -> None:
+        assert field in m["flds"]
+        field["name"] = new_name
 
-        self._transformFields(m, move)
+    def set_sort_index(self, nt: NoteType, idx: int) -> None:
+        "Modifies schema."
+        assert 0 <= idx < len(nt["flds"])
+        nt["sortf"] = idx
 
-    def renameField(self, m: NoteType, field: Field, newName: Optional[str]) -> None:
-        self.col.modSchema(check=True)
-        if newName is not None:
-            newName = newName.replace(":", "")
-        pat = r"{{([^{}]*)([:#^/]|[^:#/^}][^:}]*?:|)%s}}"
+    # legacy
 
-        def wrap(txt):
-            def repl(match):
-                return "{{" + match.group(1) + match.group(2) + txt + "}}"
+    newField = new_field
 
-            return repl
+    def addField(self, m: NoteType, field: Field) -> None:
+        self.add_field(m, field)
+        if m["id"]:
+            self.save(m)
 
-        for t in m["tmpls"]:
-            for fmt in ("qfmt", "afmt"):
-                if newName:
-                    t[fmt] = re.sub(
-                        pat % re.escape(field["name"]), wrap(newName), t[fmt]
-                    )
-                else:
-                    t[fmt] = re.sub(pat % re.escape(field["name"]), "", t[fmt])
-        field["name"] = newName
+    def remField(self, m: NoteType, field: Field) -> None:
+        self.remove_field(m, field)
         self.save(m)
 
-    def _updateFieldOrds(self, m: NoteType) -> None:
-        for c, f in enumerate(m["flds"]):
-            f["ord"] = c
+    def moveField(self, m: NoteType, field: Field, idx: int) -> None:
+        self.reposition_field(m, field, idx)
+        self.save(m)
 
-    def _transformFields(self, m: NoteType, fn: Callable) -> None:
-        # model hasn't been added yet?
-        if not m["id"]:
-            return
-        r = []
-        for (id, flds) in self.col.db.execute(
-            "select id, flds from notes where mid = ?", m["id"]
-        ):
-            r.append((joinFields(fn(splitFields(flds))), intTime(), self.col.usn(), id))
-        self.col.db.executemany("update notes set flds=?,mod=?,usn=? where id = ?", r)
+    def renameField(self, m: NoteType, field: Field, newName: str) -> None:
+        self.rename_field(m, field, newName)
+        self.save(m)
 
-    # Templates
+    # Adding & changing templates
     ##################################################
 
-    def newTemplate(self, name: str) -> Template:
-        t = defaultTemplate.copy()
-        t["name"] = name
-        return t
+    def new_template(self, name: str) -> Template:
+        nt = from_json_bytes(
+            self.col.backend.get_stock_notetype_legacy(
+                StockNoteType.STOCK_NOTE_TYPE_BASIC
+            )
+        )
+        template = nt["tmpls"][0]
+        template["name"] = name
+        template["qfmt"] = ""
+        template["afmt"] = ""
+        template["ord"] = None
+        return template
 
-    def addTemplate(self, m: NoteType, template: Template) -> None:
-        "Note: should col.genCards() afterwards."
-        if m["id"]:
-            self.col.modSchema(check=True)
+    def add_template(self, m: NoteType, template: Template) -> None:
+        "Modifies schema."
         m["tmpls"].append(template)
-        self._updateTemplOrds(m)
-        self.save(m)
 
-    def remTemplate(self, m: NoteType, template: Template) -> bool:
-        "False if removing template would leave orphan notes."
+    def remove_template(self, m: NoteType, template: Template) -> None:
+        "Modifies schema."
         assert len(m["tmpls"]) > 1
-        # find cards using this template
-        ord = m["tmpls"].index(template)
-        cids = self.col.db.list(
-            """
-select c.id from cards c, notes f where c.nid=f.id and mid = ? and ord = ?""",
-            m["id"],
-            ord,
-        )
-        # all notes with this template must have at least two cards, or we
-        # could end up creating orphaned notes
-        if self.col.db.scalar(
-            """
-select nid, count() from cards where
-nid in (select nid from cards where id in %s)
-group by nid
-having count() < 2
-limit 1"""
-            % ids2str(cids)
-        ):
-            return False
-        # ok to proceed; remove cards
-        self.col.modSchema(check=True)
-        self.col.remCards(cids)
-        # shift ordinals
-        self.col.db.execute(
-            """
-update cards set ord = ord - 1, usn = ?, mod = ?
- where nid in (select id from notes where mid = ?) and ord > ?""",
-            self.col.usn(),
-            intTime(),
-            m["id"],
-            ord,
-        )
         m["tmpls"].remove(template)
-        self._updateTemplOrds(m)
-        self.save(m)
-        return True
 
-    def _updateTemplOrds(self, m: NoteType) -> None:
-        for c, t in enumerate(m["tmpls"]):
-            t["ord"] = c
-
-    def moveTemplate(self, m: NoteType, template: Template, idx: int) -> None:
+    def reposition_template(self, m: NoteType, template: Template, idx: int) -> None:
+        "Modifies schema."
         oldidx = m["tmpls"].index(template)
         if oldidx == idx:
             return
-        oldidxs = dict((id(t), t["ord"]) for t in m["tmpls"])
+
         m["tmpls"].remove(template)
         m["tmpls"].insert(idx, template)
-        self._updateTemplOrds(m)
-        # generate change map
-        map = []
-        for t in m["tmpls"]:
-            map.append("when ord = %d then %d" % (oldidxs[id(t)], t["ord"]))
-        # apply
-        self.save(m, updateReqs=False)
-        self.col.db.execute(
-            """
-update cards set ord = (case %s end),usn=?,mod=? where nid in (
-select id from notes where mid = ?)"""
-            % " ".join(map),
-            self.col.usn(),
-            intTime(),
-            m["id"],
-        )
 
-    def _syncTemplates(self, m: NoteType) -> None:
-        rem = self.col.genCards(self.nids(m))
+    # legacy
+
+    newTemplate = new_template
+
+    def addTemplate(self, m: NoteType, template: Template) -> None:
+        self.add_template(m, template)
+        if m["id"]:
+            self.save(m)
+
+    def remTemplate(self, m: NoteType, template: Template) -> None:
+        self.remove_template(m, template)
+        self.save(m)
+
+    def moveTemplate(self, m: NoteType, template: Template, idx: int) -> None:
+        self.reposition_template(m, template, idx)
+        self.save(m)
+
+    def template_use_count(self, ntid: int, ord: int) -> int:
+        return self.col.db.scalar(
+            """
+select count() from cards, notes where cards.nid = notes.id
+and notes.mid = ? and cards.ord = ?""",
+            ntid,
+            ord,
+        )
 
     # Model changing
     ##########################################################################
@@ -470,7 +406,12 @@ select id from notes where mid = ?)"""
     # - newModel should be self if model is not changing
 
     def change(
-        self, m: NoteType, nids: List[int], newModel: NoteType, fmap: Any, cmap: Any
+        self,
+        m: NoteType,
+        nids: List[int],
+        newModel: NoteType,
+        fmap: Optional[Dict[int, Union[None, int]]],
+        cmap: Optional[Dict[int, Union[None, int]]],
     ) -> None:
         self.col.modSchema(check=True)
         assert newModel["id"] == m["id"] or (fmap and cmap)
@@ -478,7 +419,7 @@ select id from notes where mid = ?)"""
             self._changeNotes(nids, newModel, fmap)
         if cmap:
             self._changeCards(nids, m, newModel, cmap)
-        self.col.genCards(nids)
+        self.col.after_note_updates(nids, mark_modified=True)
 
     def _changeNotes(
         self, nids: List[int], newModel: NoteType, map: Dict[int, Union[None, int]]
@@ -497,18 +438,17 @@ select id from notes where mid = ?)"""
                 flds.append(newflds.get(c, ""))
             flds = joinFields(flds)
             d.append(
-                dict(
-                    nid=nid,
-                    flds=flds,
-                    mid=newModel["id"],
-                    m=intTime(),
-                    u=self.col.usn(),
+                (
+                    flds,
+                    newModel["id"],
+                    intTime(),
+                    self.col.usn(),
+                    nid,
                 )
             )
         self.col.db.executemany(
-            "update notes set flds=:flds,mid=:mid,mod=:m,usn=:u where id = :nid", d
+            "update notes set flds=?,mid=?,mod=?,usn=? where id = ?", d
         )
-        self.col.updateFieldCache(nids)
 
     def _changeCards(
         self,
@@ -535,13 +475,11 @@ select id from notes where mid = ?)"""
                 # mapping from a regular note, so the map should be valid
                 new = map[ord]
             if new is not None:
-                d.append(dict(cid=cid, new=new, u=self.col.usn(), m=intTime()))
+                d.append((new, self.col.usn(), intTime(), cid))
             else:
                 deleted.append(cid)
-        self.col.db.executemany(
-            "update cards set ord=:new,usn=:u,mod=:m where id=:cid", d
-        )
-        self.col.remCards(deleted)
+        self.col.db.executemany("update cards set ord=?,usn=?,mod=? where id=?", d)
+        self.col.remove_cards_and_orphaned_notes(deleted)
 
     # Schema hash
     ##########################################################################
@@ -555,130 +493,12 @@ select id from notes where mid = ?)"""
             s += t["name"]
         return checksum(s)
 
-    # Required field/text cache
+    # Cloze
     ##########################################################################
 
-    def _updateRequired(self, m: NoteType) -> None:
-        self._updateRequiredNew(m)
-
-    def _updateRequiredLegacy(self, m: NoteType) -> None:
-        if m["type"] == MODEL_CLOZE:
-            # nothing to do
-            return
-        req = []
-        flds = [f["name"] for f in m["flds"]]
-        for t in m["tmpls"]:
-            ret = self._reqForTemplate(m, flds, t)
-            req.append([t["ord"], ret[0], ret[1]])
-        m["req"] = req
-
-    def _updateRequiredNew(self, m: NoteType) -> None:
-        fronts = [t["qfmt"] for t in m["tmpls"]]
-        field_map = {}
-        for (idx, fld) in enumerate(m["flds"]):
-            field_map[fld["name"]] = idx
-        reqs = self.col.backend.template_requirements(fronts, field_map)
-        m["req"] = [list(l) for l in reqs]
-
-    def _reqForTemplate(
-        self, m: NoteType, flds: List[str], t: Template
-    ) -> Tuple[Union[str, List[int]], ...]:
-        a = []
-        b = []
-        for f in flds:
-            a.append("ankiflag")
-            b.append("")
-
-        def renderWithFields(fields):
-            return self.col._renderQA(
-                (1, 1, m["id"], 1, t["ord"], "", joinFields(fields), 0)
-            )["q"]
-
-        full = renderWithFields(a)
-        empty = renderWithFields(b)
-        # if full and empty are the same, the template is invalid and there is
-        # no way to satisfy it
-        if full == empty:
-            return "none", [], []
-        type = "all"
-        req = []
-        for i in range(len(flds)):
-            tmp = a[:]
-            tmp[i] = ""
-            # if no field content appeared, field is required
-            if "ankiflag" not in renderWithFields(tmp):
-                req.append(i)
-        if req:
-            return type, req
-        # if there are no required fields, switch to any mode
-        type = "any"
-        req = []
-        for i in range(len(flds)):
-            tmp = b[:]
-            tmp[i] = "1"
-            # if not the same as empty, this field can make the card non-blank
-            if renderWithFields(tmp) != empty:
-                req.append(i)
-        return type, req
-
-    def availOrds(self, m: NoteType, flds: str) -> List:
-        "Given a joined field string, return available template ordinals."
-        if m["type"] == MODEL_CLOZE:
-            return self._availClozeOrds(m, flds)
-        fields = {}
-        for c, f in enumerate(splitFields(flds)):
-            fields[c] = f.strip()
-        avail = []
-        for ord, type, req in m["req"]:
-            # unsatisfiable template
-            if type == "none":
-                continue
-            # AND requirement?
-            elif type == "all":
-                ok = True
-                for idx in req:
-                    if not fields[idx]:
-                        # missing and was required
-                        ok = False
-                        break
-                if not ok:
-                    continue
-            # OR requirement?
-            elif type == "any":
-                ok = False
-                for idx in req:
-                    if fields[idx]:
-                        ok = True
-                        break
-                if not ok:
-                    continue
-            avail.append(ord)
-        return avail
-
-    def _availClozeOrds(self, m: NoteType, flds: str, allowEmpty: bool = True) -> List:
-        sflds = splitFields(flds)
-        map = self.fieldMap(m)
-        ords = set()
-        matches = re.findall("{{[^}]*?cloze:(?:[^}]?:)*(.+?)}}", m["tmpls"][0]["qfmt"])
-        matches += re.findall("<%cloze:(.+?)%>", m["tmpls"][0]["qfmt"])
-        for fname in matches:
-            if fname not in map:
-                continue
-            ord = map[fname][0]
-            ords.update(
-                [int(m) - 1 for m in re.findall(r"(?s){{c(\d+)::.+?}}", sflds[ord])]
-            )
-        if -1 in ords:
-            ords.remove(-1)
-        if not ords and allowEmpty:
-            # empty clozes use first ord
-            return [0]
-        return list(ords)
-
-    # Sync handling
-    ##########################################################################
-
-    def beforeUpload(self) -> None:
-        for m in self.all():
-            m["usn"] = 0
-        self.save()
+    def _availClozeOrds(
+        self, m: NoteType, flds: str, allowEmpty: bool = True
+    ) -> List[int]:
+        print("_availClozeOrds() is deprecated; use note.cloze_numbers_in_fields()")
+        note = anki.rsbackend.BackendNote(fields=[flds])
+        return list(self.col.backend.cloze_numbers_in_note(note))

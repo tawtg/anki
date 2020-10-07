@@ -2,24 +2,53 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
 import aqt
 from anki.lang import _
-from aqt.sound import clearAudioQueue
+from aqt import gui_hooks
+from aqt.sound import av_player
+from aqt.toolbar import BottomBar
 from aqt.utils import askUserDialog, openLink, shortcut, tooltip
+
+
+class OverviewBottomBar:
+    def __init__(self, overview: Overview):
+        self.overview = overview
+
+
+@dataclass
+class OverviewContent:
+    """Stores sections of HTML content that the overview will be
+    populated with.
+
+    Attributes:
+        deck {str} -- Plain text deck name
+        shareLink {str} -- HTML of the share link section
+        desc {str} -- HTML of the deck description section
+        table {str} -- HTML of the deck stats table section
+    """
+
+    deck: str
+    shareLink: str
+    desc: str
+    table: str
 
 
 class Overview:
     "Deck overview."
 
-    def __init__(self, mw):
+    def __init__(self, mw: aqt.AnkiQt) -> None:
         self.mw = mw
         self.web = mw.web
-        self.bottom = aqt.toolbar.BottomBar(mw, mw.bottomWeb)
+        self.bottom = BottomBar(mw, mw.bottomWeb)
 
     def show(self):
-        clearAudioQueue()
-        self.web.resetHandlers()
-        self.web.onBridgeCmd = self._linkHandler
+        av_player.stop_and_clear_queue()
+        self.web.set_bridge_command(self._linkHandler, self)
         self.mw.setStateShortcuts(self._shortcutKeys())
         self.refresh()
 
@@ -28,6 +57,7 @@ class Overview:
         self._renderPage()
         self._renderBottom()
         self.mw.web.setFocus()
+        gui_hooks.overview_did_refresh(self)
 
     # Handlers
     ############################################################
@@ -46,16 +76,16 @@ class Overview:
             deck = self.mw.col.decks.current()
             self.mw.onCram("'deck:%s'" % deck["name"])
         elif url == "refresh":
-            self.mw.col.sched.rebuildDyn()
+            self.mw.col.sched.rebuild_filtered_deck(self.mw.col.decks.selected())
             self.mw.reset()
         elif url == "empty":
-            self.mw.col.sched.emptyDyn(self.mw.col.decks.selected())
+            self.mw.col.sched.empty_filtered_deck(self.mw.col.decks.selected())
             self.mw.reset()
         elif url == "decks":
             self.mw.moveToState("deckBrowser")
         elif url == "review":
             openLink(aqt.appShared + "info/%s?v=%s" % (self.sid, self.sidVer))
-        elif url == "studymore":
+        elif url == "studymore" or url == "customStudy":
             self.onStudyMore()
         elif url == "unbury":
             self.onUnbury()
@@ -77,12 +107,12 @@ class Overview:
 
     def onRebuildKey(self):
         if self._filteredDeck():
-            self.mw.col.sched.rebuildDyn()
+            self.mw.col.sched.rebuild_filtered_deck(self.mw.col.decks.selected())
             self.mw.reset()
 
     def onEmptyKey(self):
         if self._filteredDeck():
-            self.mw.col.sched.emptyDyn(self.mw.col.decks.selected())
+            self.mw.col.sched.empty_filtered_deck(self.mw.col.decks.selected())
             self.mw.reset()
 
     def onCustomStudyKey(self):
@@ -95,10 +125,8 @@ class Overview:
             self.mw.reset()
             return
 
-        sibs = self.mw.col.sched.haveBuriedSiblings()
-        man = self.mw.col.sched.haveManuallyBuried()
-
-        if sibs and man:
+        info = self.mw.col.sched.congratulations_info()
+        if info.have_sched_buried and info.have_user_buried:
             opts = [
                 _("Manually Buried Cards"),
                 _("Buried Siblings"),
@@ -132,17 +160,27 @@ class Overview:
             shareLink = '<a class=smallLink href="review">Reviews and Updates</a>'
         else:
             shareLink = ""
+        table_text = self._table()
+        if not table_text:
+            # deck is finished
+            self._show_finished_screen()
+            return
+        content = OverviewContent(
+            deck=deck["name"],
+            shareLink=shareLink,
+            desc=self._desc(deck),
+            table=self._table(),
+        )
+        gui_hooks.overview_will_render_content(self, content)
         self.web.stdHtml(
-            self._body
-            % dict(
-                deck=deck["name"],
-                shareLink=shareLink,
-                desc=self._desc(deck),
-                table=self._table(),
-            ),
+            self._body % content.__dict__,
             css=["overview.css"],
             js=["jquery.js", "overview.js"],
+            context=self,
         )
+
+    def _show_finished_screen(self):
+        self.web.load_ts_page("congrats")
 
     def _desc(self, deck):
         if deck["dyn"]:
@@ -170,26 +208,21 @@ to their original deck."""
             dyn = ""
         return '<div class="descfont descmid description %s">%s</div>' % (dyn, desc)
 
-    def _table(self):
+    def _table(self) -> Optional[str]:
+        "Return table text if deck is not finished."
         counts = list(self.mw.col.sched.counts())
         finished = not sum(counts)
-        if self.mw.col.schedVer() == 1:
-            for n in range(len(counts)):
-                if counts[n] >= 1000:
-                    counts[n] = "1000+"
         but = self.mw.button
         if finished:
-            return '<div style="white-space: pre-wrap;">%s</div>' % (
-                self.mw.col.sched.finishedMsg()
-            )
+            return None
         else:
             return """
 <table width=400 cellpadding=5>
 <tr><td align=center valign=top>
 <table cellspacing=5>
-<tr><td>%s:</td><td><b><font color=#00a>%s</font></b></td></tr>
-<tr><td>%s:</td><td><b><font color=#C35617>%s</font></b></td></tr>
-<tr><td>%s:</td><td><b><font color=#0a0>%s</font></b></td></tr>
+<tr><td>%s:</td><td><b><span class=new-count>%s</span></b></td></tr>
+<tr><td>%s:</td><td><b><span class=learn-count>%s</span></b></td></tr>
+<tr><td>%s:</td><td><b><span class=review-count>%s</span></b></td></tr>
 </table>
 </td><td align=center>
 %s</td></tr></table>""" % (
@@ -234,8 +267,9 @@ to their original deck."""
 <button title="%s" onclick='pycmd("%s")'>%s</button>""" % tuple(
                 b
             )
-        self.bottom.draw(buf)
-        self.bottom.web.onBridgeCmd = self._linkHandler
+        self.bottom.draw(
+            buf=buf, link_handler=self._linkHandler, web_context=OverviewBottomBar(self)
+        )
 
     # Studying more
     ######################################################################

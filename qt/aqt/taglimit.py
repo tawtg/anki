@@ -1,5 +1,6 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/copyleft/agpl.html
+from typing import List, Optional
 
 import aqt
 from aqt.qt import *
@@ -9,19 +10,20 @@ from aqt.utils import restoreGeom, saveGeom
 class TagLimit(QDialog):
     def __init__(self, mw, parent):
         QDialog.__init__(self, parent, Qt.Window)
+        self.tags: Union[str, List] = ""
         self.mw = mw
-        self.parent = parent
+        self.parent: Optional[QWidget] = parent
         self.deck = self.parent.deck
         self.dialog = aqt.forms.taglimit.Ui_Dialog()
         self.dialog.setupUi(self)
         s = QShortcut(
             QKeySequence("ctrl+d"), self.dialog.activeList, context=Qt.WidgetShortcut
         )
-        s.activated.connect(self.dialog.activeList.clearSelection)
+        qconnect(s.activated, self.dialog.activeList.clearSelection)
         s = QShortcut(
             QKeySequence("ctrl+d"), self.dialog.inactiveList, context=Qt.WidgetShortcut
         )
-        s.activated.connect(self.dialog.inactiveList.clearSelection)
+        qconnect(s.activated, self.dialog.inactiveList.clearSelection)
         self.rebuildTagList()
         restoreGeom(self, "tagLimit")
         self.exec_()
@@ -93,12 +95,12 @@ class TagLimit(QDialog):
         if yes:
             arr = []
             for req in yes:
-                arr.append("tag:'%s'" % req)
+                arr.append('tag:"%s"' % req)
             self.tags += "(" + " or ".join(arr) + ")"
         if no:
             arr = []
             for req in no:
-                arr.append("-tag:'%s'" % req)
+                arr.append('-tag:"%s"' % req)
             self.tags += " " + " ".join(arr)
         saveGeom(self, "tagLimit")
         QDialog.accept(self)

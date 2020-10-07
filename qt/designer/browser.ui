@@ -301,6 +301,7 @@
      <string>&amp;Notes</string>
     </property>
     <addaction name="actionAdd"/>
+    <addaction name="actionExport"/>
     <addaction name="separator"/>
     <addaction name="actionAdd_Tags"/>
     <addaction name="actionRemove_Tags"/>
@@ -597,6 +598,14 @@
    </property>
    <property name="shortcut">
     <string notr="true">Ctrl+K</string>
+   </property>
+  </action>
+  <action name="actionExport">
+   <property name="text">
+    <string>&amp;Export Notes...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+Shift+E</string>
    </property>
   </action>
  </widget>

@@ -1,11 +1,16 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 from operator import itemgetter
+from typing import Any, Dict
+
+from PyQt5.QtWidgets import QLineEdit
 
 import aqt
 from anki.consts import NEW_CARDS_RANDOM
 from anki.lang import _, ngettext
+from aqt import gui_hooks
 from aqt.qt import *
 from aqt.utils import (
     askUser,
@@ -20,7 +25,7 @@ from aqt.utils import (
 
 
 class DeckConf(QDialog):
-    def __init__(self, mw, deck):
+    def __init__(self, mw: aqt.AnkiQt, deck: Dict):
         QDialog.__init__(self, mw)
         self.mw = mw
         self.deck = deck
@@ -28,18 +33,21 @@ class DeckConf(QDialog):
         self._origNewOrder = None
         self.form = aqt.forms.dconf.Ui_Dialog()
         self.form.setupUi(self)
+        gui_hooks.deck_conf_did_setup_ui_form(self)
         self.mw.checkpoint(_("Options"))
         self.setupCombos()
         self.setupConfs()
         self.setWindowModality(Qt.WindowModal)
-        self.form.buttonBox.helpRequested.connect(lambda: openHelp("deckoptions"))
-        self.form.confOpts.clicked.connect(self.confOpts)
-        self.form.buttonBox.button(QDialogButtonBox.RestoreDefaults).clicked.connect(
-            self.onRestore
+        qconnect(self.form.buttonBox.helpRequested, lambda: openHelp("deckoptions"))
+        qconnect(self.form.confOpts.clicked, self.confOpts)
+        qconnect(
+            self.form.buttonBox.button(QDialogButtonBox.RestoreDefaults).clicked,
+            self.onRestore,
         )
         self.setWindowTitle(_("Options for %s") % self.deck["name"])
         # qt doesn't size properly with altered fonts otherwise
         restoreGeom(self, "deckconf", adjustSize=True)
+        gui_hooks.deck_conf_will_show(self)
         self.show()
         self.exec_()
         saveGeom(self, "deckconf")
@@ -49,13 +57,13 @@ class DeckConf(QDialog):
 
         f = self.form
         f.newOrder.addItems(list(cs.newCardOrderLabels().values()))
-        f.newOrder.currentIndexChanged.connect(self.onNewOrderChanged)
+        qconnect(f.newOrder.currentIndexChanged, self.onNewOrderChanged)
 
     # Conf list
     ######################################################################
 
     def setupConfs(self):
-        self.form.dconf.currentIndexChanged.connect(self.onConfChange)
+        qconnect(self.form.dconf.currentIndexChanged, self.onConfChange)
         self.conf = None
         self.loadConfs()
 
@@ -79,13 +87,13 @@ class DeckConf(QDialog):
     def confOpts(self):
         m = QMenu(self.mw)
         a = m.addAction(_("Add"))
-        a.triggered.connect(self.addGroup)
+        qconnect(a.triggered, self.addGroup)
         a = m.addAction(_("Delete"))
-        a.triggered.connect(self.remGroup)
+        qconnect(a.triggered, self.remGroup)
         a = m.addAction(_("Rename"))
-        a.triggered.connect(self.renameGroup)
+        qconnect(a.triggered, self.renameGroup)
         a = m.addAction(_("Set for all subdecks"))
-        a.triggered.connect(self.setChildren)
+        qconnect(a.triggered, self.setChildren)
         if not self.childDids:
             a.setEnabled(False)
         m.exec_(QCursor.pos())
@@ -97,13 +105,9 @@ class DeckConf(QDialog):
             self.saveConf()
         conf = self.confList[idx]
         self.deck["conf"] = conf["id"]
+        self.mw.col.decks.save(self.deck)
         self.loadConf()
-        cnt = 0
-        for d in self.mw.col.decks.all():
-            if d["dyn"]:
-                continue
-            if d["conf"] == conf["id"]:
-                cnt += 1
+        cnt = len(self.mw.col.decks.didsForConf(conf))
         if cnt > 1:
             txt = _(
                 "Your changes will affect multiple decks. If you wish to "
@@ -113,33 +117,41 @@ class DeckConf(QDialog):
             txt = ""
         self.form.count.setText(txt)
 
-    def addGroup(self):
+    def addGroup(self) -> None:
         name = getOnlyText(_("New options group name:"))
         if not name:
             return
+
         # first, save currently entered data to current conf
         self.saveConf()
         # then clone the conf
-        id = self.mw.col.decks.confId(name, cloneFrom=self.conf)
+        id = self.mw.col.decks.add_config_returning_id(name, clone_from=self.conf)
+        gui_hooks.deck_conf_did_add_config(self, self.deck, self.conf, name, id)
         # set the deck to the new conf
         self.deck["conf"] = id
         # then reload the conf list
         self.loadConfs()
 
-    def remGroup(self):
+    def remGroup(self) -> None:
         if int(self.conf["id"]) == 1:
             showInfo(_("The default configuration can't be removed."), self)
         else:
-            self.mw.col.decks.remConf(self.conf["id"])
+            gui_hooks.deck_conf_will_remove_config(self, self.deck, self.conf)
+            self.mw.col.modSchema(check=True)
+            self.mw.col.decks.remove_config(self.conf["id"])
+            self.conf = None
             self.deck["conf"] = 1
             self.loadConfs()
 
-    def renameGroup(self):
+    def renameGroup(self) -> None:
         old = self.conf["name"]
         name = getOnlyText(_("New name:"), default=old)
         if not name or name == old:
             return
+
+        gui_hooks.deck_conf_will_rename_config(self, self.deck, self.conf, name)
         self.conf["name"] = name
+        self.saveConf()
         self.loadConfs()
 
     def setChildren(self):
@@ -162,7 +174,13 @@ class DeckConf(QDialog):
     ##################################################
 
     def listToUser(self, l):
-        return " ".join([str(x) for x in l])
+        def num_to_user(n: Union[int, float]):
+            if n == round(n):
+                return str(int(n))
+            else:
+                return str(n)
+
+        return " ".join(map(num_to_user, l))
 
     def parentLimText(self, type="new"):
         # top level?
@@ -218,6 +236,7 @@ class DeckConf(QDialog):
         f.replayQuestion.setChecked(c.get("replayq", True))
         # description
         f.desc.setPlainText(self.deck["desc"])
+        gui_hooks.deck_conf_did_load_config(self, self.deck, self.conf)
 
     def onRestore(self):
         self.mw.progress.start()
@@ -240,14 +259,14 @@ class DeckConf(QDialog):
     # Saving
     ##################################################
 
-    def updateList(self, conf, key, w, minSize=1):
+    def updateList(self, conf: Any, key: str, w: QLineEdit, minSize: int = 1) -> None:
         items = str(w.text()).split(" ")
         ret = []
-        for i in items:
-            if not i:
+        for item in items:
+            if not item:
                 continue
             try:
-                i = float(i)
+                i = float(item)
                 assert i > 0
                 if i == int(i):
                     i = int(i)
@@ -301,6 +320,7 @@ class DeckConf(QDialog):
         c["replayq"] = f.replayQuestion.isChecked()
         # description
         self.deck["desc"] = f.desc.toPlainText()
+        gui_hooks.deck_conf_will_save_config(self, self.deck, self.conf)
         self.mw.col.decks.save(self.deck)
         self.mw.col.decks.save(self.conf)
 

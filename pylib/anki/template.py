@@ -12,49 +12,276 @@ and applied using the hook system. For example,
 and then attempt to apply myfilter. If no add-ons have provided the filter,
 the filter is skipped.
 
-Add-ons can register a filter by adding a hook to "fmod_<filter name>".
-As standard filters will not be run after a custom filter, it is up to the
-add-on to do any further processing that is required.
+Add-ons can register a filter with the following code:
 
-The hook is called with the arguments
-(field_text, filter_args, field_map, field_name, "").
-The last argument is no longer used.
-If the field name contains a hyphen, it is split on the hyphen, eg
-{{foo-bar:baz}} calls fmod_foo with filter_args set to "bar".
+from anki import hooks
+hooks.field_filter.append(myfunc)
+
+This will call myfunc, passing the field text in as the first argument.
+Your function should decide if it wants to modify the text by checking
+the filter_name argument, and then return the text whether it has been
+modified or not.
 
 A Python implementation of the standard filters is currently available in the
-template_legacy.py file.
+template_legacy.py file, using the legacy addHook() system.
 """
 
 from __future__ import annotations
 
-import re
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import anki
-from anki.hooks import runFilter
-from anki.rsbackend import TemplateReplacementList
+from anki import hooks
+from anki.cards import Card
+from anki.decks import DeckManager
+from anki.models import NoteType
+from anki.notes import Note
+from anki.rsbackend import pb, to_json_bytes
+from anki.sound import AVTag, SoundOrVideoTag, TTSTag
+
+CARD_BLANK_HELP = (
+    "https://anki.tenderapp.com/kb/card-appearance/the-front-of-this-card-is-blank"
+)
 
 
-def render_card(
-    col: anki.storage._Collection,
-    qfmt: str,
-    afmt: str,
-    fields: Dict[str, str],
-    card_ord: int,
-) -> Tuple[str, str]:
-    "Renders the provided templates, returning rendered q & a text."
+@dataclass
+class TemplateReplacement:
+    field_name: str
+    current_text: str
+    filters: List[str]
 
-    (qnodes, anodes) = col.backend.render_card(qfmt, afmt, fields, card_ord)
 
-    qtext = apply_custom_filters(qnodes, fields, front_side=None)
-    atext = apply_custom_filters(anodes, fields, front_side=qtext)
+TemplateReplacementList = List[Union[str, TemplateReplacement]]
 
-    return qtext, atext
+
+@dataclass
+class PartiallyRenderedCard:
+    qnodes: TemplateReplacementList
+    anodes: TemplateReplacementList
+
+    @classmethod
+    def from_proto(cls, out: pb.RenderCardOut) -> PartiallyRenderedCard:
+        qnodes = cls.nodes_from_proto(out.question_nodes)
+        anodes = cls.nodes_from_proto(out.answer_nodes)
+
+        return PartiallyRenderedCard(qnodes, anodes)
+
+    @staticmethod
+    def nodes_from_proto(
+        nodes: Sequence[pb.RenderedTemplateNode],
+    ) -> TemplateReplacementList:
+        results: TemplateReplacementList = []
+        for node in nodes:
+            if node.WhichOneof("value") == "text":
+                results.append(node.text)
+            else:
+                results.append(
+                    TemplateReplacement(
+                        field_name=node.replacement.field_name,
+                        current_text=node.replacement.current_text,
+                        filters=list(node.replacement.filters),
+                    )
+                )
+        return results
+
+
+def av_tag_to_native(tag: pb.AVTag) -> AVTag:
+    val = tag.WhichOneof("value")
+    if val == "sound_or_video":
+        return SoundOrVideoTag(filename=tag.sound_or_video)
+    else:
+        return TTSTag(
+            field_text=tag.tts.field_text,
+            lang=tag.tts.lang,
+            voices=list(tag.tts.voices),
+            other_args=list(tag.tts.other_args),
+            speed=tag.tts.speed,
+        )
+
+
+def av_tags_to_native(tags: Sequence[pb.AVTag]) -> List[AVTag]:
+    return list(map(av_tag_to_native, tags))
+
+
+class TemplateRenderContext:
+    """Holds information for the duration of one card render.
+
+    This may fetch information lazily in the future, so please avoid
+    using the _private fields directly."""
+
+    @staticmethod
+    def from_existing_card(card: Card, browser: bool) -> TemplateRenderContext:
+        return TemplateRenderContext(card.col, card, card.note(), browser)
+
+    @classmethod
+    def from_card_layout(
+        cls,
+        note: Note,
+        card: Card,
+        notetype: NoteType,
+        template: Dict,
+        fill_empty: bool,
+    ) -> TemplateRenderContext:
+        return TemplateRenderContext(
+            note.col,
+            card,
+            note,
+            notetype=notetype,
+            template=template,
+            fill_empty=fill_empty,
+        )
+
+    def __init__(
+        self,
+        col: anki.collection.Collection,
+        card: Card,
+        note: Note,
+        browser: bool = False,
+        notetype: NoteType = None,
+        template: Optional[Dict] = None,
+        fill_empty: bool = False,
+    ) -> None:
+        self._col = col.weakref()
+        self._card = card
+        self._note = note
+        self._browser = browser
+        self._template = template
+        self._fill_empty = fill_empty
+        self._fields: Optional[Dict] = None
+        if not notetype:
+            self._note_type = note.model()
+        else:
+            self._note_type = notetype
+
+        # if you need to store extra state to share amongst rendering
+        # hooks, you can insert it into this dictionary
+        self.extra_state: Dict[str, Any] = {}
+
+    def col(self) -> anki.collection.Collection:
+        return self._col
+
+    def fields(self) -> Dict[str, str]:
+        print(".fields() is obsolete, use .note() or .card()")
+        if not self._fields:
+            # fields from note
+            fields = dict(self._note.items())
+
+            # add (most) special fields
+            fields["Tags"] = self._note.stringTags().strip()
+            fields["Type"] = self._note_type["name"]
+            fields["Deck"] = self._col.decks.name(self._card.odid or self._card.did)
+            fields["Subdeck"] = DeckManager.basename(fields["Deck"])
+            if self._template:
+                fields["Card"] = self._template["name"]
+            else:
+                fields["Card"] = ""
+            flag = self._card.userFlag()
+            fields["CardFlag"] = flag and f"flag{flag}" or ""
+            self._fields = fields
+
+        return self._fields
+
+    def card(self) -> Card:
+        """Returns the card being rendered.
+
+        Be careful not to call .q() or .a() on the card, or you'll create an
+        infinite loop."""
+        return self._card
+
+    def note(self) -> Note:
+        return self._note
+
+    def note_type(self) -> NoteType:
+        return self._note_type
+
+    # legacy
+    def qfmt(self) -> str:
+        return templates_for_card(self.card(), self._browser)[0]
+
+    # legacy
+    def afmt(self) -> str:
+        return templates_for_card(self.card(), self._browser)[1]
+
+    def render(self) -> TemplateRenderOutput:
+        try:
+            partial = self._partially_render()
+        except anki.rsbackend.TemplateError as e:
+            return TemplateRenderOutput(
+                question_text=str(e),
+                answer_text=str(e),
+                question_av_tags=[],
+                answer_av_tags=[],
+            )
+
+        qtext = apply_custom_filters(partial.qnodes, self, front_side=None)
+        qout = self.col().backend.extract_av_tags(text=qtext, question_side=True)
+
+        atext = apply_custom_filters(partial.anodes, self, front_side=qout.text)
+        aout = self.col().backend.extract_av_tags(text=atext, question_side=False)
+
+        output = TemplateRenderOutput(
+            question_text=qout.text,
+            answer_text=aout.text,
+            question_av_tags=av_tags_to_native(qout.av_tags),
+            answer_av_tags=av_tags_to_native(aout.av_tags),
+            css=self.note_type()["css"],
+        )
+
+        if not self._browser:
+            hooks.card_did_render(output, self)
+
+        return output
+
+    def _partially_render(self) -> PartiallyRenderedCard:
+        if self._template:
+            # card layout screen
+            out = self._col.backend.render_uncommitted_card(
+                note=self._note.to_backend_note(),
+                card_ord=self._card.ord,
+                template=to_json_bytes(self._template),
+                fill_empty=self._fill_empty,
+            )
+        else:
+            # existing card (eg study mode)
+            out = self._col.backend.render_existing_card(
+                card_id=self._card.id, browser=self._browser
+            )
+        return PartiallyRenderedCard.from_proto(out)
+
+
+@dataclass
+class TemplateRenderOutput:
+    "Stores the rendered templates and extracted AV tags."
+    question_text: str
+    answer_text: str
+    question_av_tags: List[AVTag]
+    answer_av_tags: List[AVTag]
+    css: str = ""
+
+    def question_and_style(self) -> str:
+        return f"<style>{self.css}</style>{self.question_text}"
+
+    def answer_and_style(self) -> str:
+        return f"<style>{self.css}</style>{self.answer_text}"
+
+
+# legacy
+def templates_for_card(card: Card, browser: bool) -> Tuple[str, str]:
+    template = card.template()
+    if browser:
+        q, a = template.get("bqfmt"), template.get("bafmt")
+    else:
+        q, a = None, None
+    q = q or template.get("qfmt")
+    a = a or template.get("afmt")
+    return q, a  # type: ignore
 
 
 def apply_custom_filters(
-    rendered: TemplateReplacementList, fields: Dict[str, str], front_side: Optional[str]
+    rendered: TemplateReplacementList,
+    ctx: TemplateRenderContext,
+    front_side: Optional[str],
 ) -> str:
     "Complete rendering by applying any pending custom filters."
     # template already fully rendered?
@@ -70,66 +297,20 @@ def apply_custom_filters(
             if node.field_name == "FrontSide" and front_side is not None:
                 node.current_text = front_side
 
-            res += apply_field_filters(
-                node.field_name, node.current_text, fields, node.filters
-            )
+            field_text = node.current_text
+            for filter_name in node.filters:
+                field_text = hooks.field_filter(
+                    field_text, node.field_name, filter_name, ctx
+                )
+                # legacy hook - the second and fifth argument are no longer used.
+                field_text = anki.hooks.runFilter(
+                    "fmod_" + filter_name,
+                    field_text,
+                    "",
+                    ctx.note().items(),
+                    node.field_name,
+                    "",
+                )
+
+            res += field_text
     return res
-
-
-def apply_field_filters(
-    field_name: str, field_text: str, fields: Dict[str, str], filters: List[str]
-) -> str:
-    """Apply filters to field text, returning modified text."""
-    for filter in filters:
-        if "-" in filter:
-            filter_base, filter_args = filter.split("-", maxsplit=1)
-        else:
-            filter_base = filter
-            filter_args = ""
-
-        # the fifth argument is no longer used
-        field_text = runFilter(
-            "fmod_" + filter_base, field_text, filter_args, fields, field_name, ""
-        )
-    return field_text
-
-
-# Cloze handling
-##########################################################################
-
-# Matches a {{c123::clozed-out text::hint}} Cloze deletion, case-insensitively.
-# The regex should be interpolated with a regex number and creates the following
-# named groups:
-#   - tag: The lowercase or uppercase 'c' letter opening the Cloze.
-#          The c/C difference is only relevant to the legacy code.
-#   - content: Clozed-out content.
-#   - hint: Cloze hint, if provided.
-clozeReg = r"(?si)\{\{(?P<tag>c)%s::(?P<content>.*?)(::(?P<hint>.*?))?\}\}"
-
-# Constants referring to group names within clozeReg.
-CLOZE_REGEX_MATCH_GROUP_TAG = "tag"
-CLOZE_REGEX_MATCH_GROUP_CONTENT = "content"
-CLOZE_REGEX_MATCH_GROUP_HINT = "hint"
-
-# used by the media check functionality
-def expand_clozes(string: str) -> List[str]:
-    "Render all clozes in string."
-    ords = set(re.findall(r"{{c(\d+)::.+?}}", string))
-    strings = []
-
-    def qrepl(m):
-        if m.group(CLOZE_REGEX_MATCH_GROUP_HINT):
-            return "[%s]" % m.group(CLOZE_REGEX_MATCH_GROUP_HINT)
-        else:
-            return "[...]"
-
-    def arepl(m):
-        return m.group(CLOZE_REGEX_MATCH_GROUP_CONTENT)
-
-    for ord in ords:
-        s = re.sub(clozeReg % ord, qrepl, string)
-        s = re.sub(clozeReg % ".+?", arepl, s)
-        strings.append(s)
-    strings.append(re.sub(clozeReg % ".+?", arepl, string))
-
-    return strings

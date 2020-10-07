@@ -4,16 +4,16 @@
 var time: number; // set in python code
 
 let maxTime = 0;
-$(function() {
+$(function () {
     $("#ansbut").focus();
     updateTime();
-    setInterval(function() {
+    setInterval(function () {
         time += 1;
         updateTime();
     }, 1000);
 });
 
-let updateTime = function() {
+let updateTime = function () {
     let timeNode = $("#time");
     if (!maxTime) {
         timeNode.text("");
@@ -36,14 +36,12 @@ let updateTime = function() {
 function showQuestion(txt, maxTime_) {
     // much faster than jquery's .html()
     $("#middle")[0].innerHTML = txt;
-    $("#ansbut").focus();
     time = 0;
     maxTime = maxTime_;
 }
 
 function showAnswer(txt) {
     $("#middle")[0].innerHTML = txt;
-    $("#defease").focus();
 }
 
 function selectedAnswerButton() {
