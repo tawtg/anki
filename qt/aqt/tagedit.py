@@ -4,65 +4,75 @@
 from __future__ import annotations
 
 import re
+from typing import Iterable
 
+from anki.collection import Collection
 from aqt import gui_hooks
 from aqt.qt import *
 
 
 class TagEdit(QLineEdit):
-    completer: Union[QCompleter, TagCompleter]
+    _completer: QCompleter | TagCompleter
 
     lostFocus = pyqtSignal()
 
     # 0 = tags, 1 = decks
-    def __init__(self, parent, type=0):
+    def __init__(self, parent: QWidget, type: int = 0) -> None:
         QLineEdit.__init__(self, parent)
-        self.col = None
+        self.col: Collection | None = None
         self.model = QStringListModel()
         self.type = type
         if type == 0:
-            self.completer = TagCompleter(self.model, parent, self)
+            self._completer = TagCompleter(self.model, parent, self)
         else:
-            self.completer = QCompleter(self.model, parent)
-        self.completer.setCompletionMode(QCompleter.PopupCompletion)
-        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.setCompleter(self.completer)
+            self._completer = QCompleter(self.model, parent)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.setCompleter(self._completer)
 
-    def setCol(self, col):
+    def setCol(self, col: Collection) -> None:
         "Set the current col, updating list of available tags."
         self.col = col
+        l: Iterable[str]
         if self.type == 0:
             l = self.col.tags.all()
         else:
             l = (d.name for d in self.col.decks.all_names_and_ids())
         self.model.setStringList(l)
 
-    def focusInEvent(self, evt):
+    def focusInEvent(self, evt: QFocusEvent) -> None:
         QLineEdit.focusInEvent(self, evt)
 
-    def keyPressEvent(self, evt):
-        if evt.key() in (Qt.Key_Up, Qt.Key_Down):
+    def keyPressEvent(self, evt: QKeyEvent) -> None:
+        if evt.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             # show completer on arrow key up/down
-            if not self.completer.popup().isVisible():
+            if not self._completer.popup().isVisible():
                 self.showCompleter()
             return
-        if evt.key() == Qt.Key_Tab and evt.modifiers() & Qt.ControlModifier:
+        if (
+            evt.key() == Qt.Key.Key_Tab
+            and evt.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
             # select next completion
-            if not self.completer.popup().isVisible():
+            if not self._completer.popup().isVisible():
                 self.showCompleter()
-            index = self.completer.currentIndex()
-            self.completer.popup().setCurrentIndex(index)
+            index = self._completer.currentIndex()
+            self._completer.popup().setCurrentIndex(index)
             cur_row = index.row()
-            if not self.completer.setCurrentRow(cur_row + 1):
-                self.completer.setCurrentRow(0)
+            if not self._completer.setCurrentRow(cur_row + 1):
+                self._completer.setCurrentRow(0)
             return
-        if evt.key() in (Qt.Key_Enter, Qt.Key_Return):
+        if (
+            evt.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return)
+            and self._completer.popup().isVisible()
+        ):
             # apply first completion if no suggestion selected
-            selected_row = self.completer.popup().currentIndex().row()
+            selected_row = self._completer.popup().currentIndex().row()
             if selected_row == -1:
-                self.completer.setCurrentRow(0)
-                index = self.completer.currentIndex()
-                self.completer.popup().setCurrentIndex(index)
+                self._completer.setCurrentRow(0)
+                index = self._completer.currentIndex()
+                self._completer.popup().setCurrentIndex(index)
             self.hideCompleter()
             QWidget.keyPressEvent(self, evt)
             return
@@ -71,40 +81,45 @@ class TagEdit(QLineEdit):
             # if it's a modifier, don't show
             return
         if evt.key() not in (
-            Qt.Key_Enter,
-            Qt.Key_Return,
-            Qt.Key_Escape,
-            Qt.Key_Space,
-            Qt.Key_Tab,
-            Qt.Key_Backspace,
-            Qt.Key_Delete,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Escape,
+            Qt.Key.Key_Space,
+            Qt.Key.Key_Tab,
+            Qt.Key.Key_Backspace,
+            Qt.Key.Key_Delete,
         ):
             self.showCompleter()
         gui_hooks.tag_editor_did_process_key(self, evt)
 
-    def showCompleter(self):
-        self.completer.setCompletionPrefix(self.text())
-        self.completer.complete()
+    def showCompleter(self) -> None:
+        self._completer.setCompletionPrefix(self.text())
+        self._completer.complete()
 
-    def focusOutEvent(self, evt) -> None:
+    def focusOutEvent(self, evt: QFocusEvent) -> None:
         QLineEdit.focusOutEvent(self, evt)
         self.lostFocus.emit()  # type: ignore
-        self.completer.popup().hide()
+        self._completer.popup().hide()
 
-    def hideCompleter(self):
-        if sip.isdeleted(self.completer):
+    def hideCompleter(self) -> None:
+        if sip.isdeleted(self._completer):  # type: ignore
             return
-        self.completer.popup().hide()
+        self._completer.popup().hide()
 
 
 class TagCompleter(QCompleter):
-    def __init__(self, model, parent, edit, *args):
+    def __init__(
+        self,
+        model: QStringListModel,
+        parent: QWidget,
+        edit: TagEdit,
+    ) -> None:
         QCompleter.__init__(self, model, parent)
-        self.tags = []
+        self.tags: list[str] = []
         self.edit = edit
-        self.cursor = None
+        self.cursor: int | None = None
 
-    def splitPath(self, tags):
+    def splitPath(self, tags: str) -> list[str]:
         stripped_tags = tags.strip()
         stripped_tags = re.sub("  +", " ", stripped_tags)
         self.tags = self.edit.col.tags.split(stripped_tags)
@@ -116,7 +131,7 @@ class TagCompleter(QCompleter):
             self.cursor = stripped_tags.count(" ", 0, p)
         return [self.tags[self.cursor]]
 
-    def pathFromIndex(self, idx):
+    def pathFromIndex(self, idx: QModelIndex) -> str:
         if self.cursor is None:
             return self.edit.text()
         ret = QCompleter.pathFromIndex(self, idx)
@@ -125,4 +140,4 @@ class TagCompleter(QCompleter):
             self.tags.remove("")
         except ValueError:
             pass
-        return " ".join(self.tags) + " "
+        return f"{' '.join(self.tags)} "

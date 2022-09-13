@@ -1,26 +1,36 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::err::{AnkiError, Result, SyncErrorKind};
-use crate::media::changetracker::ChangeTracker;
-use crate::media::database::{MediaDatabaseContext, MediaDatabaseMetadata, MediaEntry};
-use crate::media::files::{
-    add_file_from_ankiweb, data_for_file, mtime_as_i64, normalize_filename, AddedFile,
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    io,
+    io::{Read, Write},
+    path::Path,
+    time,
 };
-use crate::media::MediaManager;
-use crate::{sync::Timeouts, version};
+
 use bytes::Bytes;
 use reqwest::{multipart, Client, Response};
 use serde_derive::{Deserialize, Serialize};
 use serde_tuple::Serialize_tuple;
 use slog::{debug, Logger};
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::path::Path;
-use std::{io, time};
 use time::Duration;
 use version::sync_client_version;
+
+use crate::{
+    error::{AnkiError, Result, SyncErrorKind},
+    media::{
+        changetracker::ChangeTracker,
+        database::{MediaDatabaseContext, MediaDatabaseMetadata, MediaEntry},
+        files::{
+            add_file_from_ankiweb, data_for_file, mtime_as_i64, normalize_filename, AddedFile,
+        },
+        MediaManager,
+    },
+    sync::Timeouts,
+    version,
+};
 
 static SYNC_MAX_FILES: usize = 25;
 static SYNC_MAX_BYTES: usize = (2.5 * 1024.0 * 1024.0) as usize;
@@ -64,9 +74,9 @@ struct SyncBeginResponse {
 
 #[derive(Debug, Clone, Copy)]
 enum LocalState {
-    NotInDB,
-    InDBNotPending,
-    InDBAndPending,
+    NotInDb,
+    InDbNotPending,
+    InDbAndPending,
 }
 
 #[derive(PartialEq, Debug)]
@@ -250,7 +260,7 @@ where
         let resp = self
             .client
             .get(&url)
-            .query(&[("k", hkey), ("v", &sync_client_version())])
+            .query(&[("k", hkey), ("v", sync_client_version())])
             .send()
             .await?
             .error_for_status()?;
@@ -402,10 +412,7 @@ where
                 Ok(())
             } else {
                 self.ctx.transact(|ctx| ctx.force_resync())?;
-                Err(AnkiError::SyncError {
-                    info: "".into(),
-                    kind: SyncErrorKind::ResyncRequired,
-                })
+                Err(AnkiError::sync_error("", SyncErrorKind::ResyncRequired))
             }
         } else {
             Err(AnkiError::server_message(resp.err))
@@ -468,17 +475,17 @@ fn determine_required_change(
 
     match (local_sha1, remote_sha1, local_state) {
         // both deleted, not in local DB
-        ("", "", L::NotInDB) => R::None,
+        ("", "", L::NotInDb) => R::None,
         // both deleted, in local DB
         ("", "", _) => R::Delete,
         // added on server, add even if local deletion pending
         ("", _, _) => R::Download,
         // deleted on server but added locally; upload later
-        (_, "", L::InDBAndPending) => R::None,
+        (_, "", L::InDbAndPending) => R::None,
         // deleted on server and not pending sync
         (_, "", _) => R::Delete,
         // if pending but the same as server, don't need to upload
-        (lsum, rsum, L::InDBAndPending) if lsum == rsum => R::RemovePending,
+        (lsum, rsum, L::InDbAndPending) if lsum == rsum => R::RemovePending,
         (lsum, rsum, _) => {
             if lsum == rsum {
                 // not pending and same as server, nothing to do
@@ -510,12 +517,12 @@ fn determine_required_changes<'a>(
                     None => "".to_string(),
                 },
                 if entry.sync_required {
-                    LocalState::InDBAndPending
+                    LocalState::InDbAndPending
                 } else {
-                    LocalState::InDBNotPending
+                    LocalState::InDbNotPending
                 },
             ),
-            None => ("".to_string(), LocalState::NotInDB),
+            None => ("".to_string(), LocalState::NotInDb),
         };
 
         let req_change = determine_required_change(&local_sha1, &remote.sha1, local_state);
@@ -608,7 +615,7 @@ fn extract_into_media_folder(
 
         let real_name = fmap
             .get(name)
-            .ok_or_else(|| AnkiError::sync_misc("malformed zip"))?;
+            .ok_or_else(|| AnkiError::sync_error("malformed zip", SyncErrorKind::Other))?;
 
         let mut data = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut data)?;
@@ -808,13 +815,16 @@ fn zip_files<'a>(
 
 #[cfg(test)]
 mod test {
-    use crate::err::Result;
-    use crate::media::sync::{
-        determine_required_change, LocalState, MediaSyncProgress, RequiredChange,
-    };
-    use crate::media::MediaManager;
     use tempfile::tempdir;
     use tokio::runtime::Runtime;
+
+    use crate::{
+        error::Result,
+        media::{
+            sync::{determine_required_change, LocalState, MediaSyncProgress, RequiredChange},
+            MediaManager,
+        },
+    };
 
     async fn test_sync(hkey: &str) -> Result<()> {
         let dir = tempdir()?;
@@ -846,7 +856,7 @@ mod test {
             }
         };
 
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(test_sync(&hkey)).unwrap()
     }
 
@@ -855,14 +865,14 @@ mod test {
         use determine_required_change as d;
         use LocalState as L;
         use RequiredChange as R;
-        assert_eq!(d("", "", L::NotInDB), R::None);
-        assert_eq!(d("", "", L::InDBNotPending), R::Delete);
-        assert_eq!(d("", "1", L::InDBAndPending), R::Download);
-        assert_eq!(d("1", "", L::InDBAndPending), R::None);
-        assert_eq!(d("1", "", L::InDBNotPending), R::Delete);
-        assert_eq!(d("1", "1", L::InDBNotPending), R::None);
-        assert_eq!(d("1", "1", L::InDBAndPending), R::RemovePending);
-        assert_eq!(d("a", "b", L::InDBAndPending), R::Download);
-        assert_eq!(d("a", "b", L::InDBNotPending), R::Download);
+        assert_eq!(d("", "", L::NotInDb), R::None);
+        assert_eq!(d("", "", L::InDbNotPending), R::Delete);
+        assert_eq!(d("", "1", L::InDbAndPending), R::Download);
+        assert_eq!(d("1", "", L::InDbAndPending), R::None);
+        assert_eq!(d("1", "", L::InDbNotPending), R::Delete);
+        assert_eq!(d("1", "1", L::InDbNotPending), R::None);
+        assert_eq!(d("1", "1", L::InDbAndPending), R::RemovePending);
+        assert_eq!(d("a", "b", L::InDbAndPending), R::Download);
+        assert_eq!(d("a", "b", L::InDbNotPending), R::Download);
     }
 }

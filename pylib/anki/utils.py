@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-# some add-ons expect json to be in the utils module
-import json  # pylint: disable=unused-import
-import locale
+import json as _json
 import os
 import platform
 import random
@@ -16,200 +14,128 @@ import subprocess
 import sys
 import tempfile
 import time
-import traceback
 from contextlib import contextmanager
 from hashlib import sha1
-from html.entities import name2codepoint
-from typing import Iterable, Iterator, List, Optional, Union
+from typing import Any, Iterable, Iterator, no_type_check
 
+from anki._legacy import DeprecatedNamesMixinForModule
 from anki.dbproxy import DBProxy
 
-_tmpdir: Optional[str]
+_tmpdir: str | None
+
+try:
+    # pylint: disable=c-extension-no-member
+    import orjson
+
+    to_json_bytes = orjson.dumps
+    from_json_bytes = orjson.loads
+except:
+    print("orjson is missing; DB operations will be slower")
+    to_json_bytes = lambda obj: _json.dumps(obj).encode("utf8")  # type: ignore
+    from_json_bytes = _json.loads
+
 
 # Time handling
 ##############################################################################
 
 
-def intTime(scale: int = 1) -> int:
+def int_time(scale: int = 1) -> int:
     "The time in integer seconds. Pass scale=1000 to get milliseconds."
     return int(time.time() * scale)
 
 
-# Locale
-##############################################################################
-
-
-def fmtPercentage(float_value, point=1) -> str:
-    "Return float with percentage sign"
-    fmt = "%" + "0.%(b)df" % {"b": point}
-    return locale.format_string(fmt, float_value) + "%"
-
-
-def fmtFloat(float_value, point=1) -> str:
-    "Return a string with decimal separator according to current locale"
-    fmt = "%" + "0.%(b)df" % {"b": point}
-    return locale.format_string(fmt, float_value)
-
-
 # HTML
 ##############################################################################
-reComment = re.compile("(?s)<!--.*?-->")
-reStyle = re.compile("(?si)<style.*?>.*?</style>")
-reScript = re.compile("(?si)<script.*?>.*?</script>")
-reTag = re.compile("(?s)<.*?>")
-reEnts = re.compile(r"&#?\w+;")
-reMedia = re.compile("(?i)<img[^>]+src=[\"']?([^\"'>]+)[\"']?[^>]*>")
 
 
-def stripHTML(s: str) -> str:
-    s = reComment.sub("", s)
-    s = reStyle.sub("", s)
-    s = reScript.sub("", s)
-    s = reTag.sub("", s)
-    s = entsToTxt(s)
-    return s
+def strip_html(txt: str) -> str:
+    import anki.lang
+    from anki.collection import StripHtmlMode
+
+    return anki.lang.current_i18n.strip_html(text=txt, mode=StripHtmlMode.NORMAL)
 
 
-def stripHTMLMedia(s: str) -> str:
+def strip_html_media(txt: str) -> str:
     "Strip HTML but keep media filenames"
-    s = reMedia.sub(" \\1 ", s)
-    return stripHTML(s)
+    import anki.lang
+    from anki.collection import StripHtmlMode
 
-
-def minimizeHTML(s: str) -> str:
-    "Correct Qt's verbose bold/underline/etc."
-    s = re.sub('<span style="font-weight:600;">(.*?)</span>', "<b>\\1</b>", s)
-    s = re.sub('<span style="font-style:italic;">(.*?)</span>', "<i>\\1</i>", s)
-    s = re.sub(
-        '<span style="text-decoration: underline;">(.*?)</span>', "<u>\\1</u>", s
+    return anki.lang.current_i18n.strip_html(
+        text=txt, mode=StripHtmlMode.PRESERVE_MEDIA_FILENAMES
     )
-    return s
 
 
-def htmlToTextLine(s: str) -> str:
-    s = s.replace("<br>", " ")
-    s = s.replace("<br />", " ")
-    s = s.replace("<div>", " ")
-    s = s.replace("\n", " ")
-    s = re.sub(r"\[sound:[^]]+\]", "", s)
-    s = re.sub(r"\[\[type:[^]]+\]\]", "", s)
-    s = stripHTMLMedia(s)
-    s = s.strip()
-    return s
-
-
-def entsToTxt(html: str) -> str:
-    # entitydefs defines nbsp as \xa0 instead of a standard space, so we
-    # replace it first
-    html = html.replace("&nbsp;", " ")
-
-    def fixup(m):
-        text = m.group(0)
-        if text[:2] == "&#":
-            # character reference
-            try:
-                if text[:3] == "&#x":
-                    return chr(int(text[3:-1], 16))
-                else:
-                    return chr(int(text[2:-1]))
-            except ValueError:
-                pass
-        else:
-            # named entity
-            try:
-                text = chr(name2codepoint[text[1:-1]])
-            except KeyError:
-                pass
-        return text  # leave as is
-
-    return reEnts.sub(fixup, html)
+def html_to_text_line(txt: str) -> str:
+    txt = txt.replace("<br>", " ")
+    txt = txt.replace("<br />", " ")
+    txt = txt.replace("<div>", " ")
+    txt = txt.replace("\n", " ")
+    txt = re.sub(r"\[sound:[^]]+\]", "", txt)
+    txt = re.sub(r"\[\[type:[^]]+\]\]", "", txt)
+    txt = strip_html_media(txt)
+    txt = txt.strip()
+    return txt
 
 
 # IDs
 ##############################################################################
 
 
-def hexifyID(id) -> str:
-    return "%x" % int(id)
-
-
-def dehexifyID(id) -> int:
-    return int(id, 16)
-
-
-def ids2str(ids: Iterable[Union[int, str]]) -> str:
+def ids2str(ids: Iterable[int | str]) -> str:
     """Given a list of integers, return a string '(int1,int2,...)'."""
-    return "(%s)" % ",".join(str(i) for i in ids)
+    return f"({','.join(str(i) for i in ids)})"
 
 
-def timestampID(db: DBProxy, table: str) -> int:
+def timestamp_id(db: DBProxy, table: str) -> int:
     "Return a non-conflicting timestamp for table."
     # be careful not to create multiple objects without flushing them, or they
     # may share an ID.
-    t = intTime(1000)
-    while db.scalar("select id from %s where id = ?" % table, t):
-        t += 1
-    return t
+    timestamp = int_time(1000)
+    while db.scalar(f"select id from {table} where id = ?", timestamp):
+        timestamp += 1
+    return timestamp
 
 
-def maxID(db: DBProxy) -> int:
+def max_id(db: DBProxy) -> int:
     "Return the first safe ID to use."
-    now = intTime(1000)
+    now = int_time(1000)
     for tbl in "cards", "notes":
-        now = max(now, db.scalar("select max(id) from %s" % tbl) or 0)
+        now = max(now, db.scalar(f"select max(id) from {tbl}") or 0)
     return now + 1
 
 
 # used in ankiweb
 def base62(num: int, extra: str = "") -> str:
-    s = string
-    table = s.ascii_letters + s.digits + extra
+    table = string.ascii_letters + string.digits + extra
     buf = ""
     while num:
-        num, i = divmod(num, len(table))
-        buf = table[i] + buf
+        num, mod = divmod(num, len(table))
+        buf = table[mod] + buf
     return buf
 
 
-_base91_extra_chars = "!#$%&()*+,-./:;<=>?@[]^_`{|}~"
+_BASE91_EXTRA_CHARS = "!#$%&()*+,-./:;<=>?@[]^_`{|}~"
 
 
 def base91(num: int) -> str:
     # all printable characters minus quotes, backslash and separators
-    return base62(num, _base91_extra_chars)
+    return base62(num, _BASE91_EXTRA_CHARS)
 
 
 def guid64() -> str:
     "Return a base91-encoded 64bit random number."
-    return base91(random.randint(0, 2 ** 64 - 1))
-
-
-# increment a guid by one, for note type conflicts
-def incGuid(guid) -> str:
-    return _incGuid(guid[::-1])[::-1]
-
-
-def _incGuid(guid) -> str:
-    s = string
-    table = s.ascii_letters + s.digits + _base91_extra_chars
-    idx = table.index(guid[0])
-    if idx + 1 == len(table):
-        # overflow
-        guid = table[0] + _incGuid(guid[1:])
-    else:
-        guid = table[idx + 1] + guid[1:]
-    return guid
+    return base91(random.randint(0, 2**64 - 1))
 
 
 # Fields
 ##############################################################################
 
 
-def joinFields(list: List[str]) -> str:
+def join_fields(list: list[str]) -> str:
     return "\x1f".join(list)
 
 
-def splitFields(string: str) -> List[str]:
+def split_fields(string: str) -> list[str]:
     return string.split("\x1f")
 
 
@@ -217,29 +143,29 @@ def splitFields(string: str) -> List[str]:
 ##############################################################################
 
 
-def checksum(data: Union[bytes, str]) -> str:
+def checksum(data: bytes | str) -> str:
     if isinstance(data, str):
         data = data.encode("utf-8")
     return sha1(data).hexdigest()
 
 
-def fieldChecksum(data: str) -> int:
+def field_checksum(data: str) -> int:
     # 32 bit unsigned number from first 8 digits of sha1 hash
-    return int(checksum(stripHTMLMedia(data).encode("utf-8"))[:8], 16)
+    return int(checksum(strip_html_media(data).encode("utf-8"))[:8], 16)
 
 
 # Temp files
 ##############################################################################
 
-_tmpdir = None
+_tmpdir = None  # pylint: disable=invalid-name
 
 
 def tmpdir() -> str:
     "A reusable temp folder which we clean out on each program invocation."
-    global _tmpdir
+    global _tmpdir  # pylint: disable=invalid-name
     if not _tmpdir:
 
-        def cleanup():
+        def cleanup() -> None:
             if os.path.exists(_tmpdir):
                 shutil.rmtree(_tmpdir)
 
@@ -255,18 +181,18 @@ def tmpdir() -> str:
 
 
 def tmpfile(prefix: str = "", suffix: str = "") -> str:
-    (fd, name) = tempfile.mkstemp(dir=tmpdir(), prefix=prefix, suffix=suffix)
-    os.close(fd)
+    (descriptor, name) = tempfile.mkstemp(dir=tmpdir(), prefix=prefix, suffix=suffix)
+    os.close(descriptor)
     return name
 
 
-def namedtmp(name: str, rm: bool = True) -> str:
+def namedtmp(name: str, remove: bool = True) -> str:
     "Return tmpdir+name. Deletes any existing file."
     path = os.path.join(tmpdir(), name)
-    if rm:
+    if remove:
         try:
             os.unlink(path)
-        except (OSError, IOError):
+        except OSError:
             pass
     return path
 
@@ -276,29 +202,29 @@ def namedtmp(name: str, rm: bool = True) -> str:
 
 
 @contextmanager
-def noBundledLibs() -> Iterator[None]:
+def no_bundled_libs() -> Iterator[None]:
     oldlpath = os.environ.pop("LD_LIBRARY_PATH", None)
     yield
     if oldlpath is not None:
         os.environ["LD_LIBRARY_PATH"] = oldlpath
 
 
-def call(argv: List[str], wait: bool = True, **kwargs) -> int:
+def call(argv: list[str], wait: bool = True, **kwargs: Any) -> int:
     "Execute a command. If WAIT, return exit code."
     # ensure we don't open a separate window for forking process on windows
-    if isWin:
-        si = subprocess.STARTUPINFO()  # type: ignore
+    if is_win:
+        info = subprocess.STARTUPINFO()  # type: ignore
         try:
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore
+            info.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore
         except:
             # pylint: disable=no-member
-            si.dwFlags |= subprocess._subprocess.STARTF_USESHOWWINDOW  # type: ignore
+            info.dwFlags |= subprocess._subprocess.STARTF_USESHOWWINDOW  # type: ignore
     else:
-        si = None
+        info = None
     # run
     try:
-        with noBundledLibs():
-            o = subprocess.Popen(argv, startupinfo=si, **kwargs)
+        with no_bundled_libs():
+            process = subprocess.Popen(argv, startupinfo=info, **kwargs)
     except OSError:
         # command not found
         return -1
@@ -306,7 +232,7 @@ def call(argv: List[str], wait: bool = True, **kwargs) -> int:
     if wait:
         while 1:
             try:
-                ret = o.wait()
+                ret = process.wait()
             except OSError:
                 # interrupted system call
                 continue
@@ -319,44 +245,44 @@ def call(argv: List[str], wait: bool = True, **kwargs) -> int:
 # OS helpers
 ##############################################################################
 
-isMac = sys.platform.startswith("darwin")
-isWin = sys.platform.startswith("win32")
-isLin = not isMac and not isWin
-devMode = os.getenv("ANKIDEV", "")
+is_mac = sys.platform.startswith("darwin")
+is_win = sys.platform.startswith("win32")
+# also covers *BSD
+is_lin = not is_mac and not is_win
+dev_mode = os.getenv("ANKIDEV", "")
 
-invalidFilenameChars = ':*?"<>|'
+INVALID_FILENAME_CHARS = ':*?"<>|'
 
 
-def invalidFilename(str, dirsep=True) -> Optional[str]:
-    for c in invalidFilenameChars:
-        if c in str:
-            return c
-    if (dirsep or isWin) and "/" in str:
+def invalid_filename(str: str, dirsep: bool = True) -> str | None:
+    for char in INVALID_FILENAME_CHARS:
+        if char in str:
+            return char
+    if (dirsep or is_win) and "/" in str:
         return "/"
-    elif (dirsep or not isWin) and "\\" in str:
+    elif (dirsep or not is_win) and "\\" in str:
         return "\\"
     elif str.strip().startswith("."):
         return "."
     return None
 
 
-def platDesc() -> str:
+def plat_desc() -> str:
     # we may get an interrupted system call, so try this in a loop
-    n = 0
     theos = "unknown"
-    while n < 100:
-        n += 1
+    for _ in range(100):
         try:
             system = platform.system()
-            if isMac:
-                theos = "mac:%s" % (platform.mac_ver()[0])
-            elif isWin:
-                theos = "win:%s" % (platform.win32_ver()[0])
+            if is_mac:
+                theos = f"mac:{platform.mac_ver()[0]}"
+            elif is_win:
+                theos = f"win:{platform.win32_ver()[0]}"
             elif system == "Linux":
                 import distro  # pytype: disable=import-error # pylint: disable=import-error
 
-                r = distro.linux_distribution(full_distribution_name=False)
-                theos = "lin:%s:%s" % (r[0], r[1])
+                dist_id = distro.id()
+                dist_version = distro.version()
+                theos = f"lin:{dist_id}:{dist_version}"
             else:
                 theos = system
             break
@@ -365,33 +291,36 @@ def platDesc() -> str:
     return theos
 
 
-# Debugging
-##############################################################################
-
-
-class TimedLog:
-    def __init__(self) -> None:
-        self._last = time.time()
-
-    def log(self, s) -> None:
-        path, num, fn, y = traceback.extract_stack(limit=2)[0]
-        sys.stderr.write(
-            "%5dms: %s(): %s\n" % ((time.time() - self._last) * 1000, fn, s)
-        )
-        self._last = time.time()
-
-
 # Version
 ##############################################################################
 
 
-def versionWithBuild() -> str:
+def version_with_build() -> str:
     from anki.buildinfo import buildhash, version
 
-    return "%s (%s)" % (version, buildhash)
+    return f"{version} ({buildhash})"
 
 
-def pointVersion() -> int:
+def point_version() -> int:
     from anki.buildinfo import version
 
     return int(version.split(".")[-1])
+
+
+# keep the legacy alias around without a deprecation warning for now
+pointVersion = point_version
+
+_deprecated_names = DeprecatedNamesMixinForModule(globals())
+_deprecated_names.register_deprecated_aliases(
+    stripHTML=strip_html,
+    stripHTMLMedia=strip_html_media,
+    timestampID=timestamp_id,
+    maxID=max_id,
+    invalidFilenameChars=(INVALID_FILENAME_CHARS, "INVALID_FILENAME_CHARS"),
+)
+_deprecated_names.register_deprecated_attributes(json=((_json, "_json"), None))
+
+
+@no_type_check
+def __getattr__(name: str) -> Any:
+    return _deprecated_names.__getattr__(name)

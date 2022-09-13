@@ -1,9 +1,12 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 import os
 import shutil
 import tempfile
 import time
 
-from anki import Collection as aopen
+from anki.collection import Collection as aopen
 
 # Between 2-4AM, shift the time back so test assumptions hold.
 lt = time.localtime()

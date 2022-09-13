@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from re import Match
+from typing import TYPE_CHECKING, Any, Iterable, Sequence, Union
 
-import anki
+if TYPE_CHECKING:
+    import anki._backend
 
 # DBValue is actually Union[str, int, float, None], but if defined
 # that way, every call site needs to do a type check prior to using
@@ -21,16 +23,16 @@ class DBProxy:
     # Lifecycle
     ###############
 
-    def __init__(self, backend: anki.rsbackend.RustBackend) -> None:
+    def __init__(self, backend: anki._backend.RustBackend) -> None:
         self._backend = backend
-        self.mod = False
+        self.modified_in_python = False
         self.last_begin_at = 0
 
     # Transactions
     ###############
 
     def begin(self) -> None:
-        self.last_begin_at = anki.utils.intTime(1000)
+        self.last_begin_at = self.scalar("select mod from col")
         self._backend.db_begin()
 
     def commit(self) -> None:
@@ -43,13 +45,17 @@ class DBProxy:
     ################
 
     def _query(
-        self, sql: str, *args: ValueForDB, first_row_only: bool = False, **kwargs
-    ) -> List[Row]:
+        self,
+        sql: str,
+        *args: ValueForDB,
+        first_row_only: bool = False,
+        **kwargs: ValueForDB,
+    ) -> list[Row]:
         # mark modified?
-        s = sql.strip().lower()
+        cananoized = sql.strip().lower()
         for stmt in "insert", "update", "delete":
-            if s.startswith(stmt):
-                self.mod = True
+            if cananoized.startswith(stmt):
+                self.modified_in_python = True
         sql, args2 = emulate_named_args(sql, args, kwargs)
         # fetch rows
         return self._backend.db_query(sql, args2, first_row_only)
@@ -57,20 +63,22 @@ class DBProxy:
     # Query shortcuts
     ###################
 
-    def all(self, sql: str, *args: ValueForDB, **kwargs) -> List[Row]:
-        return self._query(sql, *args, **kwargs)
+    def all(self, sql: str, *args: ValueForDB, **kwargs: ValueForDB) -> list[Row]:
+        return self._query(sql, *args, first_row_only=False, **kwargs)
 
-    def list(self, sql: str, *args: ValueForDB, **kwargs) -> List[ValueFromDB]:
-        return [x[0] for x in self._query(sql, *args, **kwargs)]
+    def list(
+        self, sql: str, *args: ValueForDB, **kwargs: ValueForDB
+    ) -> list[ValueFromDB]:
+        return [x[0] for x in self._query(sql, *args, first_row_only=False, **kwargs)]
 
-    def first(self, sql: str, *args: ValueForDB, **kwargs) -> Optional[Row]:
+    def first(self, sql: str, *args: ValueForDB, **kwargs: ValueForDB) -> Row | None:
         rows = self._query(sql, *args, first_row_only=True, **kwargs)
         if rows:
             return rows[0]
         else:
             return None
 
-    def scalar(self, sql: str, *args: ValueForDB, **kwargs) -> ValueFromDB:
+    def scalar(self, sql: str, *args: ValueForDB, **kwargs: ValueForDB) -> ValueFromDB:
         rows = self._query(sql, *args, first_row_only=True, **kwargs)
         if rows:
             return rows[0][0]
@@ -85,7 +93,7 @@ class DBProxy:
     ################
 
     def executemany(self, sql: str, args: Iterable[Sequence[ValueForDB]]) -> None:
-        self.mod = True
+        self.modified_in_python = True
         if isinstance(args, list):
             list_args = args
         else:
@@ -95,8 +103,8 @@ class DBProxy:
 
 # convert kwargs to list format
 def emulate_named_args(
-    sql: str, args: Tuple, kwargs: Dict[str, Any]
-) -> Tuple[str, Sequence[ValueForDB]]:
+    sql: str, args: tuple, kwargs: dict[str, Any]
+) -> tuple[str, Sequence[ValueForDB]]:
     # nothing to do?
     if not kwargs:
         return sql, args
@@ -106,11 +114,11 @@ def emulate_named_args(
     args2 = list(args)
     for key, val in kwargs.items():
         args2.append(val)
-        n = len(args2)
-        arg_num[key] = n
+        number = len(args2)
+        arg_num[key] = number
     # update refs
-    def repl(m):
-        arg = m.group(1)
+    def repl(match: Match) -> str:
+        arg = match.group(1)
         return f"?{arg_num[arg]}"
 
     sql = re.sub(":([a-zA-Z_0-9]+)", repl, sql)

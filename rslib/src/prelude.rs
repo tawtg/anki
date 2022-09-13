@@ -1,17 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+pub use slog::{debug, Logger};
+
+pub(crate) use crate::types::IntoNewtypeVec;
 pub use crate::{
-    card::{Card, CardID},
+    card::{Card, CardId},
     collection::Collection,
-    deckconf::DeckConfID,
-    decks::DeckID,
-    err::{AnkiError, Result},
-    i18n::{tr_args, tr_strs, TR},
-    notes::NoteID,
-    notetype::NoteTypeID,
-    revlog::RevlogID,
+    config::BoolKey,
+    deckconfig::{DeckConfig, DeckConfigId},
+    decks::{Deck, DeckId, DeckKind, NativeDeckName},
+    error::{AnkiError, Result},
+    i18n::I18n,
+    media::Sha1Hash,
+    notes::{Note, NoteId},
+    notetype::{Notetype, NotetypeId},
+    ops::{Op, OpChanges, OpOutput},
+    revlog::RevlogId,
+    search::{SearchBuilder, TryIntoSearch},
     timestamp::{TimestampMillis, TimestampSecs},
     types::Usn,
 };
-pub use slog::{debug, Logger};

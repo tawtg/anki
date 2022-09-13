@@ -1,21 +1,18 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::DeckID;
-use super::{
-    human_deck_name_to_native, Deck, DeckCommon, DeckKind, FilteredDeck, FilteredSearchTerm,
-    NormalDeck,
-};
-use crate::{
-    serde::{default_on_invalid, deserialize_bool_from_anything, deserialize_number_from_string},
-    timestamp::TimestampSecs,
-    types::Usn,
-};
+use std::collections::HashMap;
 
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_tuple::Serialize_tuple;
-use std::collections::HashMap;
+
+use super::{DeckCommon, FilteredDeck, FilteredSearchTerm, NormalDeck};
+use crate::{
+    pb::decks::deck::normal::DayLimit,
+    prelude::*,
+    serde::{default_on_invalid, deserialize_bool_from_anything, deserialize_number_from_string},
+};
 
 #[derive(Serialize, PartialEq, Debug, Clone)]
 #[serde(untagged)]
@@ -26,9 +23,10 @@ pub enum DeckSchema11 {
 
 // serde doesn't support integer/bool enum tags, so we manually pick the correct variant
 mod dynfix {
-    use super::{DeckSchema11, FilteredDeckSchema11, NormalDeckSchema11};
     use serde::de::{self, Deserialize, Deserializer};
     use serde_json::{Map, Value};
+
+    use super::{DeckSchema11, FilteredDeckSchema11, NormalDeckSchema11};
 
     impl<'de> Deserialize<'de> for DeckSchema11 {
         fn deserialize<D>(deserializer: D) -> Result<DeckSchema11, D::Error>
@@ -75,10 +73,14 @@ mod dynfix {
     }
 }
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct DeckCommonSchema11 {
     #[serde(deserialize_with = "deserialize_number_from_string")]
-    pub(crate) id: DeckID,
+    pub(crate) id: DeckId,
     #[serde(
         rename = "mod",
         deserialize_with = "deserialize_number_from_string",
@@ -95,6 +97,8 @@ pub struct DeckCommonSchema11 {
     browser_collapsed: bool,
     #[serde(default)]
     desc: String,
+    #[serde(default, rename = "md", skip_serializing_if = "is_false")]
+    markdown_description: bool,
     #[serde(rename = "dyn")]
     dynamic: u8,
     #[serde(flatten)]
@@ -113,6 +117,14 @@ pub struct NormalDeckSchema11 {
     extend_new: i32,
     #[serde(default, deserialize_with = "default_on_invalid")]
     extend_rev: i32,
+    #[serde(default, deserialize_with = "default_on_invalid")]
+    review_limit: Option<u32>,
+    #[serde(default, deserialize_with = "default_on_invalid")]
+    new_limit: Option<u32>,
+    #[serde(default, deserialize_with = "default_on_invalid")]
+    review_limit_today: Option<DayLimit>,
+    #[serde(default, deserialize_with = "default_on_invalid")]
+    new_limit_today: Option<DayLimit>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -189,7 +201,7 @@ impl DeckSchema11 {
     //     }
     // }
 
-    pub fn id(&self) -> DeckID {
+    pub fn id(&self) -> DeckId {
         self.common().id
     }
 
@@ -208,7 +220,7 @@ impl Default for NormalDeckSchema11 {
     fn default() -> Self {
         NormalDeckSchema11 {
             common: DeckCommonSchema11 {
-                id: DeckID(0),
+                id: DeckId(0),
                 mtime: TimestampSecs(0),
                 name: "".to_string(),
                 usn: Usn(0),
@@ -218,10 +230,15 @@ impl Default for NormalDeckSchema11 {
                 today: Default::default(),
                 other: Default::default(),
                 dynamic: 0,
+                markdown_description: false,
             },
             conf: 1,
             extend_new: 0,
             extend_rev: 0,
+            review_limit: None,
+            new_limit: None,
+            review_limit_today: None,
+            new_limit_today: None,
         }
     }
 }
@@ -233,7 +250,7 @@ impl From<DeckSchema11> for Deck {
         match deck {
             DeckSchema11::Normal(d) => Deck {
                 id: d.common.id,
-                name: human_deck_name_to_native(&d.common.name),
+                name: NativeDeckName::from_human_name(&d.common.name),
                 mtime_secs: d.common.mtime,
                 usn: d.common.usn,
                 common: (&d.common).into(),
@@ -241,7 +258,7 @@ impl From<DeckSchema11> for Deck {
             },
             DeckSchema11::Filtered(d) => Deck {
                 id: d.common.id,
-                name: human_deck_name_to_native(&d.common.name),
+                name: NativeDeckName::from_human_name(&d.common.name),
                 mtime_secs: d.common.mtime,
                 usn: d.common.usn,
                 common: (&d.common).into(),
@@ -292,7 +309,12 @@ impl From<NormalDeckSchema11> for NormalDeck {
             config_id: deck.conf,
             extend_new: deck.extend_new.max(0) as u32,
             extend_review: deck.extend_rev.max(0) as u32,
+            markdown_description: deck.common.markdown_description,
             description: deck.common.desc,
+            review_limit: deck.review_limit,
+            new_limit: deck.new_limit,
+            review_limit_today: deck.review_limit_today,
+            new_limit_today: deck.new_limit_today,
         }
     }
 }
@@ -327,6 +349,10 @@ impl From<Deck> for DeckSchema11 {
                 conf: norm.config_id,
                 extend_new: norm.extend_new as i32,
                 extend_rev: norm.extend_review as i32,
+                review_limit: norm.review_limit,
+                new_limit: norm.new_limit,
+                review_limit_today: norm.review_limit_today,
+                new_limit_today: norm.new_limit_today,
                 common: deck.into(),
             }),
             DeckKind::Filtered(ref filt) => DeckSchema11::Filtered(FilteredDeckSchema11 {
@@ -347,15 +373,16 @@ impl From<Deck> for DeckSchema11 {
 
 impl From<Deck> for DeckCommonSchema11 {
     fn from(deck: Deck) -> Self {
-        let other: HashMap<String, Value> = if deck.common.other.is_empty() {
+        let mut other: HashMap<String, Value> = if deck.common.other.is_empty() {
             Default::default()
         } else {
             serde_json::from_slice(&deck.common.other).unwrap_or_default()
         };
+        clear_other_duplicates(&mut other);
         DeckCommonSchema11 {
             id: deck.id,
             mtime: deck.mtime_secs,
-            name: deck.name.replace("\x1f", "::"),
+            name: deck.human_name(),
             usn: deck.usn,
             today: (&deck).into(),
             study_collapsed: deck.common.study_collapsed,
@@ -365,12 +392,28 @@ impl From<Deck> for DeckCommonSchema11 {
             } else {
                 0
             },
+            markdown_description: match &deck.kind {
+                DeckKind::Normal(n) => n.markdown_description,
+                DeckKind::Filtered(_) => false,
+            },
             desc: match deck.kind {
                 DeckKind::Normal(n) => n.description,
                 DeckKind::Filtered(_) => String::new(),
             },
             other,
         }
+    }
+}
+
+/// See [crate::deckconfig::schema11::clear_other_duplicates()].
+fn clear_other_duplicates(other: &mut HashMap<String, Value>) {
+    for key in [
+        "reviewLimit",
+        "newLimit",
+        "reviewLimitToday",
+        "newLimitToday",
+    ] {
+        other.remove(key);
     }
 }
 

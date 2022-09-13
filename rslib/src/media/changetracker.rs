@@ -1,20 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::err::{AnkiError, Result};
-use crate::log::{debug, Logger};
-use crate::media::database::{MediaDatabaseContext, MediaEntry};
-use crate::media::files::{
-    filename_if_normalized, mtime_as_i64, sha1_of_file, MEDIA_SYNC_FILESIZE_LIMIT,
-    NONSYNCABLE_FILENAME,
+use std::{collections::HashMap, path::Path, time};
+
+use crate::{
+    log::{debug, Logger},
+    media::{
+        database::{MediaDatabaseContext, MediaEntry},
+        files::{
+            filename_if_normalized, mtime_as_i64, sha1_of_file, MEDIA_SYNC_FILESIZE_LIMIT,
+            NONSYNCABLE_FILENAME,
+        },
+    },
+    prelude::*,
 };
-use std::collections::HashMap;
-use std::path::Path;
-use std::time;
 
 struct FilesystemEntry {
     fname: String,
-    sha1: Option<[u8; 20]>,
+    sha1: Option<Sha1Hash>,
     mtime: i64,
     is_new: bool,
 }
@@ -111,7 +114,7 @@ where
             };
 
             // make sure the filename is normalized
-            let fname = match filename_if_normalized(&disk_fname) {
+            let fname = match filename_if_normalized(disk_fname) {
                 Some(fname) => fname,
                 None => {
                     // not normalized; skip it
@@ -151,9 +154,8 @@ where
             }
 
             // add entry to the list
-            let data = sha1_of_file(&dentry.path()).map_err(|e| AnkiError::IOError {
-                info: format!("unable to read {}: {}", fname, e),
-            })?;
+            let data = sha1_of_file(&dentry.path())
+                .map_err(|e| AnkiError::IoError(format!("unable to read {}: {}", fname, e)))?;
             let sha1 = Some(data);
             added_or_changed.push(FilesystemEntry {
                 fname: fname.to_string(),
@@ -244,15 +246,16 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::err::Result;
-    use crate::media::changetracker::ChangeTracker;
-    use crate::media::database::MediaEntry;
-    use crate::media::files::sha1_of_data;
-    use crate::media::MediaManager;
-    use std::path::Path;
-    use std::time::Duration;
-    use std::{fs, time};
+    use std::{fs, path::Path, time, time::Duration};
+
     use tempfile::tempdir;
+
+    use crate::{
+        error::Result,
+        media::{
+            changetracker::ChangeTracker, database::MediaEntry, files::sha1_of_data, MediaManager,
+        },
+    };
 
     // helper
     fn change_mtime(p: &Path) {

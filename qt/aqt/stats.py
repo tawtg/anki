@@ -1,32 +1,34 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
-
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import aqt
-from anki.lang import _
+import aqt.forms
+import aqt.main
 from aqt import gui_hooks
 from aqt.qt import *
 from aqt.theme import theme_manager
 from aqt.utils import (
     addCloseShortcut,
+    disable_help_button,
     getSaveFile,
     maybeHideClose,
     restoreGeom,
     saveGeom,
     tooltip,
+    tr,
 )
 
 
 class NewDeckStats(QDialog):
     """New deck stats."""
 
-    def __init__(self, mw: aqt.main.AnkiQt):
-        QDialog.__init__(self, mw, Qt.Window)
-        mw.setupDialogGC(self)
+    def __init__(self, mw: aqt.main.AnkiQt) -> None:
+        QDialog.__init__(self, mw, Qt.WindowType.Window)
+        mw.garbage_collect_on_dialog_finish(self)
         self.mw = mw
         self.name = "deckStats"
         self.period = 0
@@ -34,12 +36,15 @@ class NewDeckStats(QDialog):
         self.oldPos = None
         self.wholeCollection = False
         self.setMinimumWidth(700)
+        disable_help_button(self)
         f = self.form
         f.setupUi(self)
         f.groupBox.setVisible(False)
         f.groupBox_2.setVisible(False)
         restoreGeom(self, self.name)
-        b = f.buttonBox.addButton(_("Save PDF"), QDialogButtonBox.ActionRole)
+        b = f.buttonBox.addButton(
+            tr.statistics_save_pdf(), QDialogButtonBox.ButtonRole.ActionRole
+        )
         qconnect(b.clicked, self.saveImage)
         b.setAutoDefault(False)
         maybeHideClose(self.form.buttonBox)
@@ -47,24 +52,26 @@ class NewDeckStats(QDialog):
         gui_hooks.stats_dialog_will_show(self)
         self.show()
         self.refresh()
+        self.form.web.set_bridge_command(self._on_bridge_cmd, self)
         self.activateWindow()
 
-    def reject(self):
+    def reject(self) -> None:
+        self.form.web.cleanup()
         self.form.web = None
         saveGeom(self, self.name)
         aqt.dialogs.markClosed("NewDeckStats")
         QDialog.reject(self)
 
-    def closeWithCallback(self, callback):
+    def closeWithCallback(self, callback: Callable[[], None]) -> None:
         self.reject()
         callback()
 
-    def _imagePath(self):
+    def _imagePath(self) -> str:
         name = time.strftime("-%Y-%m-%d@%H-%M-%S.pdf", time.localtime(time.time()))
-        name = "anki-" + _("stats") + name
+        name = f"anki-{tr.statistics_stats()}{name}"
         file = getSaveFile(
             self,
-            title=_("Save PDF"),
+            title=tr.statistics_save_pdf(),
             dir_description="stats",
             key="stats",
             ext=".pdf",
@@ -72,29 +79,45 @@ class NewDeckStats(QDialog):
         )
         return file
 
-    def saveImage(self):
+    def saveImage(self) -> None:
         path = self._imagePath()
         if not path:
             return
-        self.form.web.page().printToPdf(path)
-        tooltip(_("Saved."))
+        # When scrolled down in dark mode, the top of the page in the
+        # final PDF will have a white background, making the text and graphs
+        # unreadable. A simple fix for now is to scroll to the top of the
+        # page first.
+        def after_scroll(arg: Any) -> None:
+            self.form.web.page().printToPdf(path)
+            tooltip(tr.statistics_saved())
 
-    def changePeriod(self, n):
+        self.form.web.evalWithCallback("window.scrollTo(0, 0);", after_scroll)
+
+    # legacy add-ons
+    def changePeriod(self, n: Any) -> None:
         pass
 
-    def changeScope(self, type):
+    def changeScope(self, type: Any) -> None:
         pass
 
-    def refresh(self):
+    def _on_bridge_cmd(self, cmd: str) -> bool:
+        if cmd.startswith("browserSearch"):
+            _, query = cmd.split(":", 1)
+            browser = aqt.dialogs.open("Browser", self.mw)
+            browser.search_for(query)
+
+        return False
+
+    def refresh(self) -> None:
         self.form.web.load_ts_page("graphs")
 
 
 class DeckStats(QDialog):
     """Legacy deck stats, used by some add-ons."""
 
-    def __init__(self, mw):
-        QDialog.__init__(self, mw, Qt.Window)
-        mw.setupDialogGC(self)
+    def __init__(self, mw: aqt.main.AnkiQt) -> None:
+        QDialog.__init__(self, mw, Qt.WindowType.Window)
+        mw.garbage_collect_on_dialog_finish(self)
         self.mw = mw
         self.name = "deckStats"
         self.period = 0
@@ -102,6 +125,7 @@ class DeckStats(QDialog):
         self.oldPos = None
         self.wholeCollection = False
         self.setMinimumWidth(700)
+        disable_help_button(self)
         f = self.form
         if theme_manager.night_mode and not theme_manager.macos_dark_mode():
             # the grouping box renders incorrectly in the fusion theme. 5.9+
@@ -111,7 +135,9 @@ class DeckStats(QDialog):
             self.setStyleSheet("QGroupBox { border: 0; }")
         f.setupUi(self)
         restoreGeom(self, self.name)
-        b = f.buttonBox.addButton(_("Save PDF"), QDialogButtonBox.ActionRole)
+        b = f.buttonBox.addButton(
+            tr.statistics_save_pdf(), QDialogButtonBox.ButtonRole.ActionRole
+        )
         qconnect(b.clicked, self.saveImage)
         b.setAutoDefault(False)
         qconnect(f.groups.clicked, lambda: self.changeScope("deck"))
@@ -127,22 +153,23 @@ class DeckStats(QDialog):
         self.refresh()
         self.activateWindow()
 
-    def reject(self):
+    def reject(self) -> None:
+        self.form.web.cleanup()
         self.form.web = None
         saveGeom(self, self.name)
         aqt.dialogs.markClosed("DeckStats")
         QDialog.reject(self)
 
-    def closeWithCallback(self, callback):
+    def closeWithCallback(self, callback: Callable[[], None]) -> None:
         self.reject()
         callback()
 
-    def _imagePath(self):
+    def _imagePath(self) -> str:
         name = time.strftime("-%Y-%m-%d@%H-%M-%S.pdf", time.localtime(time.time()))
-        name = "anki-" + _("stats") + name
+        name = f"anki-{tr.statistics_stats()}{name}"
         file = getSaveFile(
             self,
-            title=_("Save PDF"),
+            title=tr.statistics_save_pdf(),
             dir_description="stats",
             key="stats",
             ext=".pdf",
@@ -150,30 +177,30 @@ class DeckStats(QDialog):
         )
         return file
 
-    def saveImage(self):
+    def saveImage(self) -> None:
         path = self._imagePath()
         if not path:
             return
         self.form.web.page().printToPdf(path)
-        tooltip(_("Saved."))
+        tooltip(tr.statistics_saved())
 
-    def changePeriod(self, n):
+    def changePeriod(self, n: int) -> None:
         self.period = n
         self.refresh()
 
-    def changeScope(self, type):
+    def changeScope(self, type: str) -> None:
         self.wholeCollection = type == "collection"
         self.refresh()
 
-    def refresh(self):
+    def refresh(self) -> None:
         self.mw.progress.start(parent=self)
         stats = self.mw.col.stats()
         stats.wholeCollection = self.wholeCollection
         self.report = stats.report(type=self.period)
-        self.form.web.title = "deck stats"
+        self.form.web.set_title("deck stats")
         self.form.web.stdHtml(
-            "<html><body>" + self.report + "</body></html>",
-            js=["jquery.js", "plot.js"],
+            f"<html><body>{self.report}</body></html>",
+            js=["js/vendor/jquery.min.js", "js/vendor/plot.js"],
             context=self,
         )
         self.mw.progress.finish()

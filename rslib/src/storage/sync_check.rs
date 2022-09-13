@@ -3,27 +3,24 @@
 
 use super::*;
 use crate::{
-    err::SyncErrorKind,
+    error::SyncErrorKind,
     prelude::*,
     sync::{SanityCheckCounts, SanityCheckDueCounts},
 };
-use rusqlite::NO_PARAMS;
 
 impl SqliteStorage {
     fn table_has_usn(&self, table: &str) -> Result<bool> {
         Ok(self
             .db
             .prepare(&format!("select null from {} where usn=-1", table))?
-            .query(NO_PARAMS)?
+            .query([])?
             .next()?
             .is_some())
     }
 
     fn table_count(&self, table: &str) -> Result<u32> {
         self.db
-            .query_row(&format!("select count() from {}", table), NO_PARAMS, |r| {
-                r.get(0)
-            })
+            .query_row(&format!("select count() from {}", table), [], |r| r.get(0))
             .map_err(Into::into)
     }
 
@@ -39,10 +36,10 @@ impl SqliteStorage {
             "notetypes",
         ] {
             if self.table_has_usn(table)? {
-                return Err(AnkiError::SyncError {
-                    info: format!("table had usn=-1: {}", table),
-                    kind: SyncErrorKind::Other,
-                });
+                return Err(AnkiError::sync_error(
+                    format!("table had usn=-1: {}", table),
+                    SyncErrorKind::Other,
+                ));
             }
         }
 

@@ -1,8 +1,15 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{CardGenContext, NoteType};
-use crate::{collection::Collection, err::Result};
+//! Updates to notes/cards when the structure of a notetype is changed.
+
+use std::collections::HashMap;
+
+use super::{CardGenContext, CardTemplate, Notetype};
+use crate::{
+    prelude::*,
+    search::{JoinSearches, TemplateKind},
+};
 
 /// True if any ordinals added, removed or reordered.
 fn ords_changed(ords: &[Option<u32>], previous_len: usize) -> bool {
@@ -16,15 +23,15 @@ fn ords_changed(ords: &[Option<u32>], previous_len: usize) -> bool {
 #[derive(Default, PartialEq, Debug)]
 struct TemplateOrdChanges {
     added: Vec<u32>,
-    removed: Vec<u32>,
+    removed: Vec<u16>,
     // map of old->new
-    moved: Vec<(u32, u32)>,
+    moved: HashMap<u16, u16>,
 }
 
 impl TemplateOrdChanges {
     fn new(ords: Vec<Option<u32>>, previous_len: u32) -> Self {
         let mut changes = TemplateOrdChanges::default();
-        let mut removed: Vec<_> = (0..previous_len).map(|v| Some(v as u32)).collect();
+        let mut removed: Vec<_> = (0..previous_len).map(|v| Some(v as u16)).collect();
         for (idx, old_ord) in ords.into_iter().enumerate() {
             if let Some(old_ord) = old_ord {
                 if let Some(entry) = removed.get_mut(old_ord as usize) {
@@ -34,16 +41,20 @@ impl TemplateOrdChanges {
                 if old_ord == idx as u32 {
                     // no action
                 } else {
-                    changes.moved.push((old_ord as u32, idx as u32));
+                    changes.moved.insert(old_ord as u16, idx as u16);
                 }
             } else {
                 changes.added.push(idx as u32);
             }
         }
 
-        changes.removed = removed.into_iter().filter_map(|v| v).collect();
+        changes.removed = removed.into_iter().flatten().collect();
 
         changes
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -52,38 +63,49 @@ impl Collection {
     /// Caller must create transaction.
     pub(crate) fn update_notes_for_changed_fields(
         &mut self,
-        nt: &NoteType,
+        nt: &Notetype,
         previous_field_count: usize,
         previous_sort_idx: u32,
         normalize_text: bool,
     ) -> Result<()> {
+        let usn = self.usn()?;
         let ords: Vec<_> = nt.fields.iter().map(|f| f.ord).collect();
         if !ords_changed(&ords, previous_field_count) {
             if nt.config.sort_field_idx != previous_sort_idx {
                 // only need to update sort field
-                let nids = self.search_notes(&format!("mid:{}", nt.id))?;
+                self.set_schema_modified()?;
+                let nids = self.search_notes_unordered(nt.id)?;
                 for nid in nids {
                     let mut note = self.storage.get_note(nid)?.unwrap();
-                    note.prepare_for_update(nt, normalize_text)?;
-                    self.storage.update_note(&note)?;
+                    let original = note.clone();
+                    self.update_note_inner_without_cards(
+                        &mut note,
+                        &original,
+                        nt,
+                        usn,
+                        true,
+                        normalize_text,
+                        false,
+                    )?;
                 }
             } else {
                 // nothing to do
-                return Ok(());
             }
+            return Ok(());
         }
 
-        self.storage.set_schema_modified()?;
-
-        let nids = self.search_notes(&format!("mid:{}", nt.id))?;
+        // fields have changed
+        self.set_schema_modified()?;
+        let nids = self.search_notes_unordered(nt.id)?;
         let usn = self.usn()?;
         for nid in nids {
             let mut note = self.storage.get_note(nid)?.unwrap();
-            note.fields = ords
+            let original = note.clone();
+            *note.fields_mut() = ords
                 .iter()
                 .map(|f| {
                     if let Some(idx) = f {
-                        note.fields
+                        note.fields()
                             .get(*idx as usize)
                             .map(AsRef::as_ref)
                             .unwrap_or("")
@@ -93,9 +115,15 @@ impl Collection {
                 })
                 .map(Into::into)
                 .collect();
-            note.prepare_for_update(nt, normalize_text)?;
-            note.set_modified(usn);
-            self.storage.update_note(&note)?;
+            self.update_note_inner_without_cards(
+                &mut note,
+                &original,
+                nt,
+                usn,
+                true,
+                normalize_text,
+                false,
+            )?;
         }
         Ok(())
     }
@@ -105,46 +133,76 @@ impl Collection {
     /// Caller must create transaction.
     pub(crate) fn update_cards_for_changed_templates(
         &mut self,
-        nt: &NoteType,
-        previous_template_count: usize,
+        nt: &Notetype,
+        old_templates: &[CardTemplate],
     ) -> Result<()> {
+        let usn = self.usn()?;
         let ords: Vec<_> = nt.templates.iter().map(|f| f.ord).collect();
-        if !ords_changed(&ords, previous_template_count) {
-            // nothing to do
-            return Ok(());
+        let changes = TemplateOrdChanges::new(ords, old_templates.len() as u32);
+
+        if !changes.is_empty() {
+            self.set_schema_modified()?;
         }
 
-        self.storage.set_schema_modified()?;
-
-        let changes = TemplateOrdChanges::new(ords, previous_template_count as u32);
+        // remove any cards where the template was deleted
         if !changes.removed.is_empty() {
-            self.storage
-                .remove_cards_for_deleted_templates(nt.id, &changes.removed)?;
+            let ords =
+                SearchBuilder::any(changes.removed.iter().cloned().map(TemplateKind::Ordinal));
+            for card in self.all_cards_for_search(nt.id.and(ords))? {
+                self.remove_card_and_add_grave_undoable(card, usn)?;
+            }
         }
+        // update ordinals for cards with a repositioned template
         if !changes.moved.is_empty() {
-            self.storage
-                .move_cards_for_repositioned_templates(nt.id, &changes.moved)?;
+            let ords = SearchBuilder::any(changes.moved.keys().cloned().map(TemplateKind::Ordinal));
+            for mut card in self.all_cards_for_search(nt.id.and(ords))? {
+                let original = card.clone();
+                card.template_idx = *changes.moved.get(&card.template_idx).unwrap();
+                self.update_card_inner(&mut card, original, usn)?;
+            }
         }
 
-        let ctx = CardGenContext::new(nt, self.usn()?);
-        self.generate_cards_for_notetype(&ctx)?;
+        if should_generate_cards(&changes, nt, old_templates) {
+            let last_deck = self.get_last_deck_added_to_for_notetype(nt.id);
+            let ctx = CardGenContext::new(nt, last_deck, usn);
+            self.generate_cards_for_notetype(&ctx)?;
+        }
 
         Ok(())
+    }
+}
+
+fn should_generate_cards(
+    changes: &TemplateOrdChanges,
+    nt: &Notetype,
+    old_templates: &[CardTemplate],
+) -> bool {
+    // must regenerate if any front side has changed, but also in the (unlikely)
+    // case that a template has been replaced by one with an identical front
+    !(changes.added.is_empty() && nt.template_fronts_are_identical(old_templates))
+}
+
+impl Notetype {
+    fn template_fronts_are_identical(&self, other_templates: &[CardTemplate]) -> bool {
+        self.templates
+            .iter()
+            .map(|t| &t.config.q_format)
+            .eq(other_templates.iter().map(|t| &t.config.q_format))
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::{ords_changed, TemplateOrdChanges};
-    use crate::{collection::open_test_collection, decks::DeckID, err::Result, search::SortMode};
+    use crate::{collection::open_test_collection, decks::DeckId, error::Result, search::SortMode};
 
     #[test]
     fn ord_changes() {
-        assert_eq!(ords_changed(&[Some(0), Some(1)], 2), false);
-        assert_eq!(ords_changed(&[Some(0), Some(1)], 1), true);
-        assert_eq!(ords_changed(&[Some(1), Some(0)], 2), true);
-        assert_eq!(ords_changed(&[None, Some(1)], 2), true);
-        assert_eq!(ords_changed(&[Some(0), Some(1), None], 2), true);
+        assert!(!ords_changed(&[Some(0), Some(1)], 2));
+        assert!(ords_changed(&[Some(0), Some(1)], 1));
+        assert!(ords_changed(&[Some(1), Some(0)], 2));
+        assert!(ords_changed(&[None, Some(1)], 2));
+        assert!(ords_changed(&[Some(0), Some(1), None], 2));
     }
 
     #[test]
@@ -164,7 +222,7 @@ mod test {
             TemplateOrdChanges::new(vec![Some(1)], 2),
             TemplateOrdChanges {
                 removed: vec![0],
-                moved: vec![(1, 0)],
+                moved: vec![(1, 0)].into_iter().collect(),
                 ..Default::default()
             }
         );
@@ -179,7 +237,7 @@ mod test {
             TemplateOrdChanges::new(vec![Some(2), None, Some(0)], 2),
             TemplateOrdChanges {
                 added: vec![1],
-                moved: vec![(2, 0), (0, 2)],
+                moved: vec![(2, 0), (0, 2)].into_iter().collect(),
                 removed: vec![1],
             }
         );
@@ -187,7 +245,7 @@ mod test {
             TemplateOrdChanges::new(vec![None, Some(2), None, Some(4)], 5),
             TemplateOrdChanges {
                 added: vec![0, 2],
-                moved: vec![(2, 1), (4, 3)],
+                moved: vec![(2, 1), (4, 3)].into_iter().collect(),
                 removed: vec![0, 1, 3],
             }
         );
@@ -201,24 +259,22 @@ mod test {
             .get_notetype(col.get_current_notetype_id().unwrap())?
             .unwrap();
         let mut note = nt.new_note();
-        assert_eq!(note.fields.len(), 2);
-        note.fields = vec!["one".into(), "two".into()];
-        col.add_note(&mut note, DeckID(1))?;
+        assert_eq!(note.fields().len(), 2);
+        note.set_field(0, "one")?;
+        note.set_field(1, "two")?;
+        col.add_note(&mut note, DeckId(1))?;
 
         nt.add_field("three");
         col.update_notetype(&mut nt, false)?;
 
         let note = col.storage.get_note(note.id)?.unwrap();
-        assert_eq!(
-            note.fields,
-            vec!["one".to_string(), "two".into(), "".into()]
-        );
+        assert_eq!(note.fields(), &["one".to_string(), "two".into(), "".into()]);
 
         nt.fields.remove(1);
         col.update_notetype(&mut nt, false)?;
 
         let note = col.storage.get_note(note.id)?.unwrap();
-        assert_eq!(note.fields, vec!["one".to_string(), "".into()]);
+        assert_eq!(note.fields(), &["one".to_string(), "".into()]);
 
         Ok(())
     }
@@ -252,25 +308,22 @@ mod test {
             .get_notetype(col.get_current_notetype_id().unwrap())?
             .unwrap();
         let mut note = nt.new_note();
-        assert_eq!(note.fields.len(), 2);
-        note.fields = vec!["one".into(), "two".into()];
-        col.add_note(&mut note, DeckID(1))?;
+        assert_eq!(note.fields().len(), 2);
+        note.set_field(0, "one")?;
+        note.set_field(1, "two")?;
+        col.add_note(&mut note, DeckId(1))?;
 
         assert_eq!(
-            col.search_cards(&format!("nid:{}", note.id), SortMode::NoOrder)
-                .unwrap()
-                .len(),
+            col.search_cards(note.id, SortMode::NoOrder).unwrap().len(),
             1
         );
 
         // add an extra card template
-        nt.add_template("card 2", "{{Front}}", "");
+        nt.add_template("card 2", "{{Front}}2", "");
         col.update_notetype(&mut nt, false)?;
 
         assert_eq!(
-            col.search_cards(&format!("nid:{}", note.id), SortMode::NoOrder)
-                .unwrap()
-                .len(),
+            col.search_cards(note.id, SortMode::NoOrder).unwrap().len(),
             2
         );
 

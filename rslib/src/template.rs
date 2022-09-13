@@ -1,20 +1,28 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::err::{AnkiError, Result, TemplateError};
-use crate::i18n::{tr_args, tr_strs, I18n, TR};
-use crate::{cloze::add_cloze_numbers_in_string, template_filters::apply_filters};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt::Write,
+    iter,
+};
+
 use lazy_static::lazy_static;
-use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
 use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_until},
     combinator::{map, rest, verify},
     sequence::delimited,
 };
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
-use std::{borrow::Cow, iter};
+
+use crate::{
+    cloze::add_cloze_numbers_in_string,
+    error::{AnkiError, Result, TemplateError},
+    i18n::I18n,
+    template_filters::apply_filters,
+};
 
 pub type FieldMap<'a> = HashMap<&'a str, u16>;
 type TemplateResult<T> = std::result::Result<T, TemplateError>;
@@ -90,12 +98,12 @@ fn classify_handle(s: &str) -> Token {
     if start.len() < 2 {
         return Token::Replacement(start);
     }
-    if start.starts_with('#') {
-        Token::OpenConditional(&start[1..].trim_start())
-    } else if start.starts_with('/') {
-        Token::CloseConditional(&start[1..].trim_start())
-    } else if start.starts_with('^') {
-        Token::OpenNegated(&start[1..].trim_start())
+    if let Some(stripped) = start.strip_prefix('#') {
+        Token::OpenConditional(stripped.trim_start())
+    } else if let Some(stripped) = start.strip_prefix('/') {
+        Token::CloseConditional(stripped.trim_start())
+    } else if let Some(stripped) = start.strip_prefix('^') {
+        Token::OpenNegated(stripped.trim_start())
     } else {
         Token::Replacement(start)
     }
@@ -116,9 +124,9 @@ fn legacy_text_token(s: &str) -> nom::IResult<&str, Token> {
     // if we locate a starting normal or alternate handlebar, use
     // whichever one we found first
     let normal_result: nom::IResult<&str, &str> = take_until("{{")(s);
-    let (normal_remaining, normal_span) = normal_result.unwrap_or_else(|_e| ("", s));
+    let (normal_remaining, normal_span) = normal_result.unwrap_or(("", s));
     let alt_result: nom::IResult<&str, &str> = take_until("<%")(s);
-    let (alt_remaining, alt_span) = alt_result.unwrap_or_else(|_e| ("", s));
+    let (alt_remaining, alt_span) = alt_result.unwrap_or(("", s));
     match (normal_span.len(), alt_span.len()) {
         (0, 0) => {
             // neither handlebar kind found
@@ -246,60 +254,61 @@ fn parse_inner<'a, I: Iterator<Item = TemplateResult<Token<'a>>>>(
     }
 }
 
-fn template_error_to_anki_error(err: TemplateError, q_side: bool, i18n: &I18n) -> AnkiError {
-    let header = i18n.tr(if q_side {
-        TR::CardTemplateRenderingFrontSideProblem
-    } else {
-        TR::CardTemplateRenderingBackSideProblem
-    });
-    let details = localized_template_error(i18n, err);
-    let more_info = i18n.tr(TR::CardTemplateRenderingMoreInfo);
+fn template_error_to_anki_error(
+    err: TemplateError,
+    q_side: bool,
+    browser: bool,
+    tr: &I18n,
+) -> AnkiError {
+    let header = match (q_side, browser) {
+        (true, false) => tr.card_template_rendering_front_side_problem(),
+        (false, false) => tr.card_template_rendering_back_side_problem(),
+        (true, true) => tr.card_template_rendering_browser_front_side_problem(),
+        (false, true) => tr.card_template_rendering_browser_back_side_problem(),
+    };
+    let details = htmlescape::encode_minimal(&localized_template_error(tr, err));
+    let more_info = tr.card_template_rendering_more_info();
     let info = format!(
         "{}<br>{}<br><a href='{}'>{}</a>",
         header, details, TEMPLATE_ERROR_LINK, more_info
     );
 
-    AnkiError::TemplateError { info }
+    AnkiError::TemplateError(info)
 }
 
-fn localized_template_error(i18n: &I18n, err: TemplateError) -> String {
+fn localized_template_error(tr: &I18n, err: TemplateError) -> String {
     match err {
-        TemplateError::NoClosingBrackets(tag) => i18n.trn(
-            TR::CardTemplateRenderingNoClosingBrackets,
-            tr_strs!("tag"=>tag, "missing"=>"}}"),
-        ),
-        TemplateError::ConditionalNotClosed(tag) => i18n.trn(
-            TR::CardTemplateRenderingConditionalNotClosed,
-            tr_strs!("missing"=>format!("{{{{/{}}}}}", tag)),
-        ),
+        TemplateError::NoClosingBrackets(tag) => tr
+            .card_template_rendering_no_closing_brackets("}}", tag)
+            .into(),
+        TemplateError::ConditionalNotClosed(tag) => tr
+            .card_template_rendering_conditional_not_closed(format!("{{{{/{}}}}}", tag))
+            .into(),
         TemplateError::ConditionalNotOpen {
             closed,
             currently_open,
-        } => {
-            if let Some(open) = currently_open {
-                i18n.trn(
-                    TR::CardTemplateRenderingWrongConditionalClosed,
-                    tr_strs!(
-                "found"=>format!("{{{{/{}}}}}", closed),
-                "expected"=>format!("{{{{/{}}}}}", open)),
-                )
-            } else {
-                i18n.trn(
-                    TR::CardTemplateRenderingConditionalNotOpen,
-                    tr_strs!(
-                    "found"=>format!("{{{{/{}}}}}", closed),
-                    "missing1"=>format!("{{{{#{}}}}}", closed),
-                    "missing2"=>format!("{{{{^{}}}}}", closed)
-                    ),
-                )
-            }
+        } => if let Some(open) = currently_open {
+            tr.card_template_rendering_wrong_conditional_closed(
+                format!("{{{{/{}}}}}", closed),
+                format!("{{{{/{}}}}}", open),
+            )
+        } else {
+            tr.card_template_rendering_conditional_not_open(
+                format!("{{{{/{}}}}}", closed),
+                format!("{{{{#{}}}}}", closed),
+                format!("{{{{^{}}}}}", closed),
+            )
         }
-        TemplateError::FieldNotFound { field, filters } => i18n.trn(
-            TR::CardTemplateRenderingNoSuchField,
-            tr_strs!(
-            "found"=>format!("{{{{{}{}}}}}", filters, field),
-            "field"=>field),
-        ),
+        .into(),
+        TemplateError::FieldNotFound { field, filters } => tr
+            .card_template_rendering_no_such_field(format!("{{{{{}{}}}}}", filters, field), field)
+            .into(),
+        TemplateError::NoSuchConditional(condition) => tr
+            .card_template_rendering_no_such_field(
+                format!("{{{{{}}}}}", condition),
+                &condition[1..],
+            )
+            .into(),
     }
 }
 
@@ -388,10 +397,10 @@ impl ParsedTemplate {
     /// Replacements that use only standard filters will become part of
     /// a text node. If a non-standard filter is encountered, a partially
     /// rendered Replacement is returned for the calling code to complete.
-    fn render(&self, context: &RenderContext) -> TemplateResult<Vec<RenderedNode>> {
+    fn render(&self, context: &RenderContext, tr: &I18n) -> TemplateResult<Vec<RenderedNode>> {
         let mut rendered = vec![];
 
-        render_into(&mut rendered, self.0.as_ref(), context)?;
+        render_into(&mut rendered, self.0.as_ref(), context, tr)?;
 
         Ok(rendered)
     }
@@ -401,6 +410,7 @@ fn render_into(
     rendered_nodes: &mut Vec<RenderedNode>,
     nodes: &[ParsedNode],
     context: &RenderContext,
+    tr: &I18n,
 ) -> TemplateResult<()> {
     use ParsedNode::*;
     for node in nodes {
@@ -417,7 +427,7 @@ fn render_into(
                     current_text: "".into(),
                 });
             }
-            Replacement { key, filters } if key == "" && !filters.is_empty() => {
+            Replacement { key, filters } if key.is_empty() && !filters.is_empty() => {
                 // if a filter is provided, we accept an empty field name to
                 // mean 'pass an empty string to the filter, and it will add
                 // its own text'
@@ -468,19 +478,40 @@ fn render_into(
                 }
             }
             Conditional { key, children } => {
-                if context.nonempty_fields.contains(key.as_str()) {
-                    render_into(rendered_nodes, children.as_ref(), context)?;
+                if context.evaluate_conditional(key.as_str(), false)? {
+                    render_into(rendered_nodes, children.as_ref(), context, tr)?;
+                } else {
+                    // keep checking for errors, but discard rendered nodes
+                    render_into(&mut vec![], children.as_ref(), context, tr)?;
                 }
             }
             NegatedConditional { key, children } => {
-                if !context.nonempty_fields.contains(key.as_str()) {
-                    render_into(rendered_nodes, children.as_ref(), context)?;
+                if context.evaluate_conditional(key.as_str(), true)? {
+                    render_into(rendered_nodes, children.as_ref(), context, tr)?;
+                } else {
+                    render_into(&mut vec![], children.as_ref(), context, tr)?;
                 }
             }
         };
     }
 
     Ok(())
+}
+
+impl<'a> RenderContext<'a> {
+    fn evaluate_conditional(&self, key: &str, negated: bool) -> TemplateResult<bool> {
+        if self.nonempty_fields.contains(key) {
+            Ok(true ^ negated)
+        } else if self.fields.contains_key(key) || is_cloze_conditional(key) {
+            Ok(false ^ negated)
+        } else {
+            let prefix = if negated { "^" } else { "#" };
+            Err(TemplateError::NoSuchConditional(format!(
+                "{}{}",
+                prefix, key
+            )))
+        }
+    }
 }
 
 /// Append to last node if last node is a string, else add new node.
@@ -542,7 +573,8 @@ pub fn render_card(
     field_map: &HashMap<&str, Cow<str>>,
     card_ord: u16,
     is_cloze: bool,
-    i18n: &I18n,
+    browser: bool,
+    tr: &I18n,
 ) -> Result<(Vec<RenderedNode>, Vec<RenderedNode>)> {
     // prepare context
     let mut context = RenderContext {
@@ -554,38 +586,37 @@ pub fn render_card(
 
     // question side
     let (mut qnodes, qtmpl) = ParsedTemplate::from_text(qfmt)
-        .and_then(|tmpl| Ok((tmpl.render(&context)?, tmpl)))
-        .map_err(|e| template_error_to_anki_error(e, true, i18n))?;
+        .and_then(|tmpl| Ok((tmpl.render(&context, tr)?, tmpl)))
+        .map_err(|e| template_error_to_anki_error(e, true, browser, tr))?;
 
     // check if the front side was empty
-    if is_cloze {
-        if cloze_is_empty(field_map, card_ord) {
-            let info = format!(
-                "<div>{}<br><a href='{}'>{}</a></div>",
-                i18n.trn(
-                    TR::CardTemplateRenderingMissingCloze,
-                    tr_args!["number"=>card_ord+1]
-                ),
-                TEMPLATE_BLANK_CLOZE_LINK,
-                i18n.tr(TR::CardTemplateRenderingMoreInfo)
-            );
-            qnodes.push(RenderedNode::Text { text: info });
-        }
-    } else if !qtmpl.renders_with_fields(context.nonempty_fields) {
-        let info = format!(
+    let empty_message = if is_cloze && cloze_is_empty(field_map, card_ord) {
+        Some(format!(
             "<div>{}<br><a href='{}'>{}</a></div>",
-            i18n.tr(TR::CardTemplateRenderingEmptyFront),
+            tr.card_template_rendering_missing_cloze(card_ord + 1),
+            TEMPLATE_BLANK_CLOZE_LINK,
+            tr.card_template_rendering_more_info()
+        ))
+    } else if !is_cloze && !qtmpl.renders_with_fields(context.nonempty_fields) {
+        Some(format!(
+            "<div>{}<br><a href='{}'>{}</a></div>",
+            tr.card_template_rendering_empty_front(),
             TEMPLATE_BLANK_LINK,
-            i18n.tr(TR::CardTemplateRenderingMoreInfo)
-        );
-        qnodes.push(RenderedNode::Text { text: info });
+            tr.card_template_rendering_more_info()
+        ))
+    } else {
+        None
+    };
+    if let Some(text) = empty_message {
+        qnodes.push(RenderedNode::Text { text: text.clone() });
+        return Ok((qnodes, vec![RenderedNode::Text { text }]));
     }
 
     // answer side
     context.question_side = false;
     let anodes = ParsedTemplate::from_text(afmt)
-        .and_then(|tmpl| tmpl.render(&context))
-        .map_err(|e| template_error_to_anki_error(e, false, i18n))?;
+        .and_then(|tmpl| tmpl.render(&context, tr))
+        .map_err(|e| template_error_to_anki_error(e, false, browser, tr))?;
 
     Ok((qnodes, anodes))
 }
@@ -657,12 +688,9 @@ impl ParsedTemplate {
 impl ParsedTemplate {
     /// Given a map of old to new field names, update references to the new names.
     /// Returns true if any changes made.
-    pub(crate) fn rename_and_remove_fields(
-        self,
-        fields: &HashMap<String, Option<String>>,
-    ) -> ParsedTemplate {
-        let out = rename_and_remove_fields(self.0, fields);
-        ParsedTemplate(out)
+    pub(crate) fn rename_and_remove_fields(&mut self, fields: &HashMap<String, Option<String>>) {
+        let old_nodes = std::mem::take(&mut self.0);
+        self.0 = rename_and_remove_fields(old_nodes, fields);
     }
 }
 
@@ -751,12 +779,12 @@ fn nodes_to_string(buf: &mut String, nodes: &[ParsedNode]) {
             }
             ParsedNode::Conditional { key, children } => {
                 write!(buf, "{{{{#{}}}}}", key).unwrap();
-                nodes_to_string(buf, &children);
+                nodes_to_string(buf, children);
                 write!(buf, "{{{{/{}}}}}", key).unwrap();
             }
             ParsedNode::NegatedConditional { key, children } => {
                 write!(buf, "{{{{^{}}}}}", key).unwrap();
-                nodes_to_string(buf, &children);
+                nodes_to_string(buf, children);
                 write!(buf, "{{{{/{}}}}}", key).unwrap();
             }
         }
@@ -767,36 +795,49 @@ fn nodes_to_string(buf: &mut String, nodes: &[ParsedNode]) {
 //----------------------------------------
 
 impl ParsedTemplate {
-    /// A set of field names with a cloze filter attached.
     /// Field names may not be valid.
-    pub(crate) fn cloze_fields(&self) -> HashSet<&str> {
+    pub(crate) fn all_referenced_field_names(&self) -> HashSet<&str> {
         let mut set = HashSet::new();
-        find_fields_with_filter(&self.0, &mut set, "cloze");
+        find_field_references(&self.0, &mut set, false, true);
+        set
+    }
+
+    /// Field names may not be valid.
+    pub(crate) fn all_referenced_cloze_field_names(&self) -> HashSet<&str> {
+        let mut set = HashSet::new();
+        find_field_references(&self.0, &mut set, true, false);
         set
     }
 }
 
-fn find_fields_with_filter<'a>(
+fn find_field_references<'a>(
     nodes: &'a [ParsedNode],
     fields: &mut HashSet<&'a str>,
-    filter: &str,
+    cloze_only: bool,
+    with_conditionals: bool,
 ) {
     for node in nodes {
         match node {
             ParsedNode::Text(_) => {}
             ParsedNode::Replacement { key, filters } => {
-                if filters.iter().any(|f| f == filter) {
+                if !cloze_only || filters.iter().any(|f| f == "cloze") {
                     fields.insert(key);
                 }
             }
-            ParsedNode::Conditional { children, .. } => {
-                find_fields_with_filter(&children, fields, filter);
-            }
-            ParsedNode::NegatedConditional { children, .. } => {
-                find_fields_with_filter(&children, fields, filter);
+            ParsedNode::Conditional { key, children }
+            | ParsedNode::NegatedConditional { key, children } => {
+                if with_conditionals && !is_cloze_conditional(key) {
+                    fields.insert(key);
+                }
+                find_field_references(children, fields, cloze_only, with_conditionals);
             }
         }
     }
+}
+
+fn is_cloze_conditional(key: &str) -> bool {
+    key.strip_prefix('c')
+        .map_or(false, |s| s.parse::<u32>().is_ok())
 }
 
 // Tests
@@ -804,25 +845,24 @@ fn find_fields_with_filter<'a>(
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+
     use super::{FieldMap, ParsedNode::*, ParsedTemplate as PT};
-    use crate::err::TemplateError;
     use crate::{
+        error::TemplateError,
         i18n::I18n,
-        log,
         template::{field_is_empty, nonempty_fields, FieldRequirements, RenderContext},
     };
-    use std::collections::{HashMap, HashSet};
-    use std::iter::FromIterator;
 
     #[test]
     fn field_empty() {
-        assert_eq!(field_is_empty(""), true);
-        assert_eq!(field_is_empty(" "), true);
-        assert_eq!(field_is_empty("x"), false);
-        assert_eq!(field_is_empty("<BR>"), true);
-        assert_eq!(field_is_empty("<div />"), true);
-        assert_eq!(field_is_empty(" <div> <br> </div>\n"), true);
-        assert_eq!(field_is_empty(" <div>x</div>\n"), false);
+        assert!(field_is_empty(""));
+        assert!(field_is_empty(" "));
+        assert!(!field_is_empty("x"));
+        assert!(field_is_empty("<BR>"));
+        assert!(field_is_empty("<div />"));
+        assert!(field_is_empty(" <div> <br> </div>\n"));
+        assert!(!field_is_empty(" <div>x</div>\n"));
     }
 
     #[test]
@@ -886,19 +926,19 @@ mod test {
 
     #[test]
     fn nonempty() {
-        let fields = HashSet::from_iter(vec!["1", "3"].into_iter());
+        let fields = vec!["1", "3"].into_iter().collect();
         let mut tmpl = PT::from_text("{{2}}{{1}}").unwrap();
-        assert_eq!(tmpl.renders_with_fields(&fields), true);
+        assert!(tmpl.renders_with_fields(&fields));
         tmpl = PT::from_text("{{2}}").unwrap();
-        assert_eq!(tmpl.renders_with_fields(&fields), false);
+        assert!(!tmpl.renders_with_fields(&fields));
         tmpl = PT::from_text("{{2}}{{4}}").unwrap();
-        assert_eq!(tmpl.renders_with_fields(&fields), false);
+        assert!(!tmpl.renders_with_fields(&fields));
         tmpl = PT::from_text("{{#3}}{{^2}}{{1}}{{/2}}{{/3}}").unwrap();
-        assert_eq!(tmpl.renders_with_fields(&fields), true);
+        assert!(tmpl.renders_with_fields(&fields));
 
         tmpl = PT::from_text("{{^1}}{{3}}{{/1}}").unwrap();
-        assert_eq!(tmpl.renders_with_fields(&fields), false);
-        assert_eq!(tmpl.renders_with_fields_for_reqs(&fields), true);
+        assert!(!tmpl.renders_with_fields(&fields));
+        assert!(tmpl.renders_with_fields_for_reqs(&fields));
     }
 
     #[test]
@@ -912,13 +952,13 @@ mod test {
         let mut tmpl = PT::from_text("{{a}}{{b}}").unwrap();
         assert_eq!(
             tmpl.requirements(&field_map),
-            FieldRequirements::Any(HashSet::from_iter(vec![0, 1].into_iter()))
+            FieldRequirements::Any(vec![0, 1].into_iter().collect())
         );
 
         tmpl = PT::from_text("{{#a}}{{b}}{{/a}}").unwrap();
         assert_eq!(
             tmpl.requirements(&field_map),
-            FieldRequirements::All(HashSet::from_iter(vec![0, 1].into_iter()))
+            FieldRequirements::All(vec![0, 1].into_iter().collect())
         );
 
         tmpl = PT::from_text("{{z}}").unwrap();
@@ -927,19 +967,19 @@ mod test {
         tmpl = PT::from_text("{{^a}}{{b}}{{/a}}").unwrap();
         assert_eq!(
             tmpl.requirements(&field_map),
-            FieldRequirements::Any(HashSet::from_iter(vec![1].into_iter()))
+            FieldRequirements::Any(vec![1].into_iter().collect())
         );
 
         tmpl = PT::from_text("{{^a}}{{#b}}{{c}}{{/b}}{{/a}}").unwrap();
         assert_eq!(
             tmpl.requirements(&field_map),
-            FieldRequirements::All(HashSet::from_iter(vec![1, 2].into_iter()))
+            FieldRequirements::All(vec![1, 2].into_iter().collect())
         );
 
         tmpl = PT::from_text("{{#a}}{{#b}}{{a}}{{/b}}{{/a}}").unwrap();
         assert_eq!(
             tmpl.requirements(&field_map),
-            FieldRequirements::All(HashSet::from_iter(vec![0, 1].into_iter()))
+            FieldRequirements::All(vec![0, 1].into_iter().collect())
         );
 
         tmpl = PT::from_text(
@@ -958,7 +998,7 @@ mod test {
 
         assert_eq!(
             tmpl.requirements(&field_map),
-            FieldRequirements::Any(HashSet::from_iter(vec![0, 1].into_iter()))
+            FieldRequirements::Any(vec![0, 1].into_iter().collect())
         );
     }
 
@@ -1012,7 +1052,7 @@ mod test {
 
     #[test]
     fn render_single() {
-        let map: HashMap<_, _> = vec![("F", "f"), ("B", "b"), ("E", " ")]
+        let map: HashMap<_, _> = vec![("F", "f"), ("B", "b"), ("E", " "), ("c1", "1")]
             .into_iter()
             .map(|r| (r.0, r.1.into()))
             .collect();
@@ -1026,8 +1066,9 @@ mod test {
 
         use crate::template::RenderedNode as FN;
         let mut tmpl = PT::from_text("{{B}}A{{F}}").unwrap();
+        let tr = I18n::template_only();
         assert_eq!(
-            tmpl.render(&ctx).unwrap(),
+            tmpl.render(&ctx, &tr).unwrap(),
             vec![FN::Text {
                 text: "bAf".to_owned()
             },]
@@ -1035,30 +1076,37 @@ mod test {
 
         // empty
         tmpl = PT::from_text("{{#E}}A{{/E}}").unwrap();
-        assert_eq!(tmpl.render(&ctx).unwrap(), vec![]);
+        assert_eq!(tmpl.render(&ctx, &tr).unwrap(), vec![]);
 
         // missing
-        tmpl = PT::from_text("{{^M}}A{{/M}}").unwrap();
+        tmpl = PT::from_text("{{#E}}}{{^M}}A{{/M}}{{/E}}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap(),
-            vec![FN::Text {
-                text: "A".to_owned()
-            },]
+            tmpl.render(&ctx, &tr).unwrap_err(),
+            TemplateError::NoSuchConditional("^M".to_string())
         );
 
         // nested
         tmpl = PT::from_text("{{^E}}1{{#F}}2{{#B}}{{F}}{{/B}}{{/F}}{{/E}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap(),
+            tmpl.render(&ctx, &tr).unwrap(),
             vec![FN::Text {
                 text: "12f".to_owned()
+            },]
+        );
+
+        // card conditionals
+        tmpl = PT::from_text("{{^c2}}1{{#c1}}2{{/c1}}{{/c2}}").unwrap();
+        assert_eq!(
+            tmpl.render(&ctx, &tr).unwrap(),
+            vec![FN::Text {
+                text: "12".to_owned()
             },]
         );
 
         // unknown filters
         tmpl = PT::from_text("{{one:two:B}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap(),
+            tmpl.render(&ctx, &tr).unwrap(),
             vec![FN::Replacement {
                 field_name: "B".to_owned(),
                 filters: vec!["two".to_string(), "one".to_string()],
@@ -1070,7 +1118,7 @@ mod test {
         // excess colons are ignored
         tmpl = PT::from_text("{{one::text:B}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap(),
+            tmpl.render(&ctx, &tr).unwrap(),
             vec![FN::Replacement {
                 field_name: "B".to_owned(),
                 filters: vec!["one".to_string()],
@@ -1081,7 +1129,7 @@ mod test {
         // known filter
         tmpl = PT::from_text("{{text:B}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap(),
+            tmpl.render(&ctx, &tr).unwrap(),
             vec![FN::Text {
                 text: "b".to_owned()
             }]
@@ -1090,7 +1138,7 @@ mod test {
         // unknown field
         tmpl = PT::from_text("{{X}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap_err(),
+            tmpl.render(&ctx, &tr).unwrap_err(),
             TemplateError::FieldNotFound {
                 field: "X".to_owned(),
                 filters: "".to_owned()
@@ -1100,7 +1148,7 @@ mod test {
         // unknown field with filters
         tmpl = PT::from_text("{{foo:text:X}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap_err(),
+            tmpl.render(&ctx, &tr).unwrap_err(),
             TemplateError::FieldNotFound {
                 field: "X".to_owned(),
                 filters: "foo:text:".to_owned()
@@ -1110,7 +1158,7 @@ mod test {
         // a blank field is allowed if it has filters
         tmpl = PT::from_text("{{filter:}}").unwrap();
         assert_eq!(
-            tmpl.render(&ctx).unwrap(),
+            tmpl.render(&ctx, &tr).unwrap(),
             vec![FN::Replacement {
                 field_name: "".to_string(),
                 current_text: "".to_string(),
@@ -1126,10 +1174,10 @@ mod test {
             .map(|r| (r.0, r.1.into()))
             .collect();
 
-        let i18n = I18n::new(&[""], "", log::terminal());
+        let tr = I18n::template_only();
         use crate::template::RenderedNode as FN;
 
-        let qnodes = super::render_card("test{{E}}", "", &map, 1, false, &i18n)
+        let qnodes = super::render_card("test{{E}}", "", &map, 1, false, false, &tr)
             .unwrap()
             .0;
         assert_eq!(

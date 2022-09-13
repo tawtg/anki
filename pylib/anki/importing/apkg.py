@@ -1,18 +1,20 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+# pylint: disable=invalid-name
+
 import json
 import os
 import unicodedata
 import zipfile
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from anki.importing.anki2 import Anki2Importer
+from anki.importing.anki2 import Anki2Importer, MediaMapInvalid
 from anki.utils import tmpfile
 
 
 class AnkiPackageImporter(Anki2Importer):
-    nameToNum: Dict[str, str]
+    nameToNum: dict[str, str]
     zip: Optional[zipfile.ZipFile]
 
     def run(self) -> None:  # type: ignore
@@ -25,7 +27,7 @@ class AnkiPackageImporter(Anki2Importer):
         except KeyError:
             suffix = ".anki2"
 
-        col = z.read("collection" + suffix)
+        col = z.read(f"collection{suffix}")
         colpath = tmpfile(suffix=".anki2")
         with open(colpath, "wb") as f:
             f.write(col)
@@ -34,14 +36,18 @@ class AnkiPackageImporter(Anki2Importer):
         # number to use during the import
         self.nameToNum = {}
         dir = self.col.media.dir()
-        for k, v in list(json.loads(z.read("media").decode("utf8")).items()):
+        try:
+            media_dict = json.loads(z.read("media").decode("utf8"))
+        except Exception as exc:
+            raise MediaMapInvalid() from exc
+        for k, v in list(media_dict.items()):
             path = os.path.abspath(os.path.join(dir, v))
             if os.path.commonprefix([path, dir]) != dir:
                 raise Exception("Invalid file")
 
             self.nameToNum[unicodedata.normalize("NFC", v)] = k
         # run anki2 importer
-        Anki2Importer.run(self)
+        Anki2Importer.run(self, importing_v2=suffix == ".anki21")
         # import static media
         for file, c in list(self.nameToNum.items()):
             if not file.startswith("_") and not file.startswith("latex-"):

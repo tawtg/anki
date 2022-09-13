@@ -1,0 +1,27 @@
+@use "sass/scrollbar";
+
+* {
+    max-width: 100%;
+}
+
+p {
+    margin-top: 0;
+    margin-bottom: 1rem;
+
+    &:empty::after {
+        content: "\a";
+        white-space: pre;
+    }
+}
+
+[hidden] {
+    display: none;
+}
+
+:host(body) {
+    @include scrollbar.custom;
+}
+
+pre {
+    white-space: pre-wrap;
+}

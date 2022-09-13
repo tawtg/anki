@@ -1,13 +1,15 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+# pylint: disable=invalid-name
+
 import re
 import time
+from typing import cast
 
 from anki.db import DB
 from anki.importing.noteimp import ForeignCard, ForeignNote, NoteImporter
-from anki.lang import _, ngettext
-from anki.stdmodels import addBasicModel, addClozeModel
+from anki.stdmodels import _legacy_add_basic_model, _legacy_add_cloze_model
 
 
 class MnemosyneImporter(NoteImporter):
@@ -20,7 +22,9 @@ class MnemosyneImporter(NoteImporter):
         db = DB(self.file)
         ver = db.scalar("select value from global_variables where key='version'")
         if not ver.startswith("Mnemosyne SQL 1") and ver not in ("2", "3"):
-            self.log.append(_("File version unknown, trying import anyway."))
+            self.log.append(
+                self.col.tr.importing_file_version_unknown_trying_import_anyway()
+            )
         # gather facts into temp objects
         curid = None
         notes = {}
@@ -100,9 +104,7 @@ acq_reps+ret_reps, lapses, card_type_id from cards"""
         self.total += total
         self._addCloze(cloze)
         self.total += total
-        self.log.append(
-            ngettext("%d note imported.", "%d notes imported.", self.total) % self.total
-        )
+        self.log.append(self.col.tr.importing_note_imported(count=self.total))
 
     def fields(self):
         return self._fields
@@ -130,11 +132,11 @@ acq_reps+ret_reps, lapses, card_type_id from cards"""
             data.append(n)
         # add a basic model
         if not model:
-            model = addBasicModel(self.col)
+            model = _legacy_add_basic_model(self.col)
             model["name"] = "Mnemosyne-FrontOnly"
         mm = self.col.models
         mm.save(model)
-        mm.setCurrent(model)
+        mm.set_current(model)
         self.model = model
         self._fields = len(model["flds"])
         self.initMapping()
@@ -142,37 +144,33 @@ acq_reps+ret_reps, lapses, card_type_id from cards"""
         self.importNotes(data)
 
     def _addFrontBacks(self, notes):
-        m = addBasicModel(self.col)
+        m = _legacy_add_basic_model(self.col)
         m["name"] = "Mnemosyne-FrontBack"
         mm = self.col.models
-        t = mm.newTemplate("Back")
+        t = mm.new_template("Back")
         t["qfmt"] = "{{Back}}"
-        t["afmt"] = t["qfmt"] + "\n\n<hr id=answer>\n\n{{Front}}"  # type: ignore
-        mm.addTemplate(m, t)
+        t["afmt"] = f"{t['qfmt']}\n\n<hr id=answer>\n\n{{{{Front}}}}"  # type: ignore
+        mm.add_template(m, t)
         self._addFronts(notes, m)
 
     def _addVocabulary(self, notes):
         mm = self.col.models
         m = mm.new("Mnemosyne-Vocabulary")
         for f in "Expression", "Pronunciation", "Meaning", "Notes":
-            fm = mm.newField(f)
+            fm = mm.new_field(f)
             mm.addField(m, fm)
-        t = mm.newTemplate("Recognition")
+        t = mm.new_template("Recognition")
         t["qfmt"] = "{{Expression}}"
-        t["afmt"] = (
-            t["qfmt"]
-            + """\n\n<hr id=answer>\n\n\
-{{Pronunciation}}<br>\n{{Meaning}}<br>\n{{Notes}}"""  # type: ignore
-        )
-        mm.addTemplate(m, t)
-        t = mm.newTemplate("Production")
+        t[
+            "afmt"
+        ] = f"{cast(str, t['qfmt'])}\n\n<hr id=answer>\n\n{{{{Pronunciation}}}}<br>\n{{{{Meaning}}}}<br>\n{{{{Notes}}}}"
+        mm.add_template(m, t)
+        t = mm.new_template("Production")
         t["qfmt"] = "{{Meaning}}"
-        t["afmt"] = (
-            t["qfmt"]
-            + """\n\n<hr id=answer>\n\n\
-{{Expression}}<br>\n{{Pronunciation}}<br>\n{{Notes}}"""  # type: ignore
-        )
-        mm.addTemplate(m, t)
+        t[
+            "afmt"
+        ] = f"{cast(str, t['qfmt'])}\n\n<hr id=answer>\n\n{{{{Expression}}}}<br>\n{{{{Pronunciation}}}}<br>\n{{{{Notes}}}}"
+        mm.add_template(m, t)
         mm.add(m)
         self._addFronts(notes, m, fields=("f", "p_1", "m_1", "n"))
 
@@ -202,11 +200,11 @@ acq_reps+ret_reps, lapses, card_type_id from cards"""
             n.cards = orig.get("cards", {})
             data.append(n)
         # add cloze model
-        model = addClozeModel(self.col)
+        model = _legacy_add_cloze_model(self.col)
         model["name"] = "Mnemosyne-Cloze"
         mm = self.col.models
         mm.save(model)
-        mm.setCurrent(model)
+        mm.set_current(model)
         self.model = model
         self._fields = len(model["flds"])
         self.initMapping()

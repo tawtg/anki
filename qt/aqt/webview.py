@@ -1,29 +1,31 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import dataclasses
 import json
 import re
 import sys
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Optional, Sequence, cast
 
 import anki
-from anki.lang import _, is_rtl
-from anki.utils import isLin, isMac, isWin
-from aqt import gui_hooks
+import anki.lang
+from anki.lang import is_rtl
+from anki.utils import is_lin, is_mac, is_win
+from aqt import colors, gui_hooks
 from aqt.qt import *
 from aqt.theme import theme_manager
-from aqt.utils import openLink, showInfo
+from aqt.utils import askUser, is_gesture_or_zoom_event, openLink, showInfo, tr
 
 serverbaseurl = re.compile(r"^.+:\/\/[^\/]+")
 
 # Page for debug messages
 ##########################################################################
 
+BridgeCommandHandler = Callable[[str], Any]
+
 
 class AnkiWebPage(QWebEnginePage):
-    def __init__(self, onBridgeCmd):
+    def __init__(self, onBridgeCmd: BridgeCommandHandler) -> None:
         QWebEnginePage.__init__(self)
         self._onBridgeCmd = onBridgeCmd
         self._setupBridge()
@@ -31,12 +33,15 @@ class AnkiWebPage(QWebEnginePage):
 
     def _setupBridge(self) -> None:
         class Bridge(QObject):
+            def __init__(self, bridge_handler: Callable[[str], Any]) -> None:
+                super().__init__()
+                self.onCmd = bridge_handler
+
             @pyqtSlot(str, result=str)  # type: ignore
-            def cmd(self, str):
+            def cmd(self, str: str) -> Any:
                 return json.dumps(self.onCmd(str))
 
-        self._bridge = Bridge()
-        self._bridge.onCmd = self._onCmd
+        self._bridge = Bridge(self._onCmd)
 
         self._channel = QWebChannel(self)
         self._channel.registerObject("py", self._bridge)
@@ -44,9 +49,9 @@ class AnkiWebPage(QWebEnginePage):
 
         qwebchannel = ":/qtwebchannel/qwebchannel.js"
         jsfile = QFile(qwebchannel)
-        if not jsfile.open(QIODevice.ReadOnly):
+        if not jsfile.open(QIODevice.OpenModeFlag.ReadOnly):
             print(f"Error opening '{qwebchannel}': {jsfile.error()}", file=sys.stderr)
-        jstext = bytes(jsfile.readAll()).decode("utf-8")
+        jstext = bytes(cast(bytes, jsfile.readAll())).decode("utf-8")
         jsfile.close()
 
         script = QWebEngineScript()
@@ -70,27 +75,41 @@ class AnkiWebPage(QWebEnginePage):
             });
         """
         )
-        script.setWorldId(QWebEngineScript.MainWorld)
-        script.setInjectionPoint(QWebEngineScript.DocumentReady)
+        script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
         script.setRunsOnSubFrames(False)
         self.profile().scripts().insert(script)
 
-    def javaScriptConsoleMessage(self, level, msg, line, srcID):
+    def javaScriptConsoleMessage(
+        self,
+        level: QWebEnginePage.JavaScriptConsoleMessageLevel,
+        msg: str,
+        line: int,
+        srcID: str,
+    ) -> None:
         # not translated because console usually not visible,
         # and may only accept ascii text
         if srcID.startswith("data"):
             srcID = ""
         else:
             srcID = serverbaseurl.sub("", srcID[:80], 1)
-        if level == QWebEnginePage.InfoMessageLevel:
-            level = "info"
-        elif level == QWebEnginePage.WarningMessageLevel:
-            level = "warning"
-        elif level == QWebEnginePage.ErrorMessageLevel:
-            level = "error"
+        if level == QWebEnginePage.JavaScriptConsoleMessageLevel.InfoMessageLevel:
+            level_str = "info"
+        elif level == QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel:
+            level_str = "warning"
+        elif level == QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel:
+            level_str = "error"
+        else:
+            level_str = str(level)
         buf = "JS %(t)s %(f)s:%(a)d %(b)s" % dict(
-            t=level, a=line, f=srcID, b=msg + "\n"
+            t=level_str, a=line, f=srcID, b=f"{msg}\n"
         )
+        if "MathJax localStorage" in buf:
+            # silence localStorage noise
+            return
+        elif "link preload" in buf:
+            # silence 'link preload' warning on the first card
+            return
         # ensure we don't try to write characters the terminal can't handle
         buf = buf.encode(sys.stdout.encoding, "backslashreplace").decode(
             sys.stdout.encoding
@@ -99,8 +118,14 @@ class AnkiWebPage(QWebEnginePage):
         # https://github.com/ankitects/anki/pull/560
         sys.stdout.write(buf)
 
-    def acceptNavigationRequest(self, url, navType, isMainFrame):
-        if not self.open_links_externally:
+    def acceptNavigationRequest(
+        self, url: QUrl, navType: Any, isMainFrame: bool
+    ) -> bool:
+        if (
+            not self.open_links_externally
+            or "_anki/pages" in url.path()
+            or url.path() == "/_anki/legacyPageData"
+        ):
             return super().acceptNavigationRequest(url, navType, isMainFrame)
 
         if not isMainFrame:
@@ -111,18 +136,23 @@ class AnkiWebPage(QWebEnginePage):
         # catch buggy <a href='#' onclick='func()'> links
         from aqt import mw
 
-        if url.matches(QUrl(mw.serverURL()), QUrl.RemoveFragment):
+        if url.matches(
+            QUrl(mw.serverURL()), cast(Any, QUrl.UrlFormattingOption.RemoveFragment)
+        ):
             print("onclick handler needs to return false")
             return False
         # load all other links in browser
         openLink(url)
         return False
 
-    def _onCmd(self, str):
+    def _onCmd(self, str: str) -> Any:
         return self._onBridgeCmd(str)
 
-    def javaScriptAlert(self, url: QUrl, text: str):
+    def javaScriptAlert(self, frame: Any, text: str) -> None:
         showInfo(text)
+
+    def javaScriptConfirm(self, frame: Any, text: str) -> bool:
+        return askUser(text)
 
 
 # Add-ons
@@ -148,7 +178,7 @@ class WebContent:
         You should avoid overwriting or interfering with existing data as much
         as possible, instead opting to append your own changes, e.g.:
 
-            def on_webview_will_set_content(web_content: WebContent, context):
+            def on_webview_will_set_content(web_content: WebContent, context) -> None:
                 web_content.body += "<my_html>"
                 web_content.head += "<my_head>"
 
@@ -171,7 +201,7 @@ class WebContent:
           Then append the subpaths to the corresponding web_content fields
           within a function subscribing to gui_hooks.webview_will_set_content:
 
-              def on_webview_will_set_content(web_content: WebContent, context):
+              def on_webview_will_set_content(web_content: WebContent, context) -> None:
                   addon_package = mw.addonManager.addonFromModule(__name__)
                   web_content.css.append(
                       f"/_addons/{addon_package}/web/my-addon.css")
@@ -183,8 +213,8 @@ class WebContent:
 
     body: str = ""
     head: str = ""
-    css: List[str] = dataclasses.field(default_factory=lambda: [])
-    js: List[str] = dataclasses.field(default_factory=lambda: [])
+    css: list[str] = dataclasses.field(default_factory=lambda: [])
+    js: list[str] = dataclasses.field(default_factory=lambda: [])
 
 
 # Main web view
@@ -192,64 +222,69 @@ class WebContent:
 
 
 class AnkiWebView(QWebEngineView):
+    allow_drops = False
+
     def __init__(
-        self, parent: Optional[QWidget] = None, title: str = "default"
+        self,
+        parent: Optional[QWidget] = None,
+        title: str = "default",
     ) -> None:
         QWebEngineView.__init__(self, parent=parent)
-        self.title = title  # type: ignore
+        self.set_title(title)
         self._page = AnkiWebPage(self._onBridgeCmd)
-        self._page.setBackgroundColor(self._getWindowColor())  # reduce flicker
+        # reduce flicker
+        self._page.setBackgroundColor(
+            self.get_window_bg_color(theme_manager.night_mode)
+        )
 
         # in new code, use .set_bridge_command() instead of setting this directly
         self.onBridgeCmd: Callable[[str], Any] = self.defaultOnBridgeCmd
 
         self._domDone = True
-        self._pendingActions: List[Tuple[str, Sequence[Any]]] = []
+        self._pendingActions: list[tuple[str, Sequence[Any]]] = []
         self.requiresCol = True
         self.setPage(self._page)
+        self._disable_zoom = False
 
-        self._page.profile().setHttpCacheType(QWebEngineProfile.NoCache)
         self.resetHandlers()
-        self.allowDrops = False
         self._filterSet = False
         QShortcut(  # type: ignore
             QKeySequence("Esc"),
             self,
-            context=Qt.WidgetWithChildrenShortcut,
+            context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
             activated=self.onEsc,
         )
-        if isMac:
-            for key, fn in [
-                (QKeySequence.Copy, self.onCopy),
-                (QKeySequence.Paste, self.onPaste),
-                (QKeySequence.Cut, self.onCut),
-                (QKeySequence.SelectAll, self.onSelectAll),
-            ]:
-                QShortcut(  # type: ignore
-                    key, self, context=Qt.WidgetWithChildrenShortcut, activated=fn
-                )
-            QShortcut(  # type: ignore
-                QKeySequence("ctrl+shift+v"),
-                self,
-                context=Qt.WidgetWithChildrenShortcut,
-                activated=self.onPaste,
-            )
+        gui_hooks.theme_did_change.append(self.on_theme_did_change)
+
+    def set_title(self, title: str) -> None:
+        self.title = title  # type: ignore[assignment]
+
+    def disable_zoom(self) -> None:
+        self._disable_zoom = True
+
+    def createWindow(self, windowType: QWebEnginePage.WebWindowType) -> QWebEngineView:
+        # intercept opening a new window (hrefs
+        # with target="_blank") and return view
+        return AnkiWebView()
 
     def eventFilter(self, obj: QObject, evt: QEvent) -> bool:
-        # disable pinch to zoom gesture
-        if isinstance(evt, QNativeGestureEvent):
+        if self._disable_zoom and is_gesture_or_zoom_event(evt):
             return True
-        elif evt.type() == QEvent.MouseButtonRelease:
-            if evt.button() == Qt.MidButton and isLin:
+
+        if (
+            isinstance(evt, QMouseEvent)
+            and evt.type() == QEvent.Type.MouseButtonRelease
+        ):
+            if evt.button() == Qt.MouseButton.MiddleButton and is_lin:
                 self.onMiddleClickPaste()
                 return True
-            return False
+
         return False
 
     def set_open_links_externally(self, enable: bool) -> None:
         self._page.open_links_externally = enable
 
-    def onEsc(self):
+    def onEsc(self) -> None:
         w = self.parent()
         while w:
             if isinstance(w, QDialog) or isinstance(w, QMainWindow):
@@ -260,39 +295,37 @@ class AnkiWebView(QWebEngineView):
                     w.close()
                 else:
                     # in the main window, removes focus from type in area
-                    self.parent().setFocus()
+                    parent = self.parent()
+                    assert isinstance(parent, QWidget)
+                    parent.setFocus()
                 break
             w = w.parent()
 
-    def onCopy(self):
-        if not self.selectedText():
-            ctx = self._page.contextMenuData()
-            if ctx and ctx.mediaType() == QWebEngineContextMenuData.MediaTypeImage:
-                self.triggerPageAction(QWebEnginePage.CopyImageToClipboard)
-        else:
-            self.triggerPageAction(QWebEnginePage.Copy)
+    def onCopy(self) -> None:
+        self.triggerPageAction(QWebEnginePage.WebAction.Copy)
 
-    def onCut(self):
-        self.triggerPageAction(QWebEnginePage.Cut)
+    def onCut(self) -> None:
+        self.triggerPageAction(QWebEnginePage.WebAction.Cut)
 
-    def onPaste(self):
-        self.triggerPageAction(QWebEnginePage.Paste)
+    def onPaste(self) -> None:
+        self.triggerPageAction(QWebEnginePage.WebAction.Paste)
 
-    def onMiddleClickPaste(self):
-        self.triggerPageAction(QWebEnginePage.Paste)
+    def onMiddleClickPaste(self) -> None:
+        self.triggerPageAction(QWebEnginePage.WebAction.Paste)
 
-    def onSelectAll(self):
-        self.triggerPageAction(QWebEnginePage.SelectAll)
+    def onSelectAll(self) -> None:
+        self.triggerPageAction(QWebEnginePage.WebAction.SelectAll)
 
     def contextMenuEvent(self, evt: QContextMenuEvent) -> None:
         m = QMenu(self)
-        a = m.addAction(_("Copy"))
+        a = m.addAction(tr.actions_copy())
         qconnect(a.triggered, self.onCopy)
         gui_hooks.webview_will_show_context_menu(self, m)
         m.popup(QCursor.pos())
 
-    def dropEvent(self, evt):
-        pass
+    def dropEvent(self, evt: QDropEvent) -> None:
+        if self.allow_drops:
+            super().dropEvent(evt)
 
     def setHtml(self, html: str) -> None:  #  type: ignore
         # discard any previous pending actions
@@ -300,47 +333,62 @@ class AnkiWebView(QWebEngineView):
         self._domDone = True
         self._queueAction("setHtml", html)
         self.set_open_links_externally(True)
+        self.setZoomFactor(1)
+        self.allow_drops = False
+        self.show()
 
     def _setHtml(self, html: str) -> None:
-        app = QApplication.instance()
-        oldFocus = app.focusWidget()
+        """Send page data to media server, then surf to it.
+
+        This function used to be implemented by QWebEngine's
+        .setHtml() call. It is no longer used, as it has a
+        maximum size limit, and due to security changes, it
+        will stop working in the future."""
+        from aqt import mw
+
+        oldFocus = mw.app.focusWidget()
         self._domDone = False
-        self._page.setHtml(html)
+
+        webview_id = id(self)
+        mw.mediaServer.set_page_html(webview_id, html)
+        self.load_url(QUrl(f"{mw.serverURL()}_anki/legacyPageData?id={webview_id}"))
+
         # work around webengine stealing focus on setHtml()
+        # fixme: check which if any qt versions this is still required on
         if oldFocus:
             oldFocus.setFocus()
 
-    def load(self, url: QUrl):
+    def load_url(self, url: QUrl) -> None:
         # allow queuing actions when loading url directly
         self._domDone = False
+        self.allow_drops = False
         super().load(url)
 
-    def zoomFactor(self) -> float:
+    def app_zoom_factor(self) -> float:
         # overridden scale factor?
         webscale = os.environ.get("ANKI_WEBSCALE")
         if webscale:
             return float(webscale)
 
-        if isMac:
+        if qtmajor > 5 or is_mac:
             return 1
-        screen = QApplication.desktop().screen()
+        screen = QApplication.desktop().screen()  # type: ignore
         if screen is None:
             return 1
 
         dpi = screen.logicalDpiX()
         factor = dpi / 96.0
-        if isLin:
+        if is_lin:
             factor = max(1, factor)
             return factor
-        # compensate for qt's integer scaling on windows?
-        if qtminor >= 14:
-            return 1
-        qtIntScale = self._getQtIntScale(screen)
-        desiredScale = factor * qtIntScale
-        newFactor = desiredScale / qtIntScale
-        return max(1, newFactor)
+        return 1
 
-    def _getQtIntScale(self, screen) -> int:
+    def setPlaybackRequiresGesture(self, value: bool) -> None:
+        self.settings().setAttribute(
+            QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, value
+        )
+
+    def _getQtIntScale(self, screen: QWidget) -> int:
         # try to detect if Qt has scaled the screen
         # - qt will round the scale factor to a whole number, so a dpi of 125% = 1x,
         #   and a dpi of 150% = 2x
@@ -356,94 +404,100 @@ class AnkiWebView(QWebEngineView):
         else:
             return 3
 
-    def _getWindowColor(self):
-        if theme_manager.night_mode:
-            return theme_manager.qcolor("window-bg")
-        if isMac:
+    def get_window_bg_color(self, night_mode: bool) -> QColor:
+        if night_mode:
+            return QColor(colors.WINDOW_BG[1])
+        elif is_mac:
             # standard palette does not return correct window color on macOS
             return QColor("#ececec")
-        return self.style().standardPalette().color(QPalette.Window)
+        else:
+            return theme_manager.default_palette.color(QPalette.ColorRole.Window)
 
     def standard_css(self) -> str:
-        palette = self.style().standardPalette()
-        color_hl = palette.color(QPalette.Highlight).name()
+        palette = theme_manager.default_palette
+        color_hl = palette.color(QPalette.ColorRole.Highlight).name()
 
-        if isWin:
+        if is_win:
             # T: include a font for your language on Windows, eg: "Segoe UI", "MS Mincho"
-            family = _('"Segoe UI"')
-            button_style = "button { font-family:%s; }" % family
-            button_style += "\n:focus { outline: 1px solid %s; }" % color_hl
-            font = "font-size:12px;font-family:%s;" % family
-        elif isMac:
+            family = tr.qt_misc_segoe_ui()
+            button_style = f"""
+button {{ font-family: {family}; }}
+button:focus {{ outline: 5px auto {color_hl}; }}"""
+            font = f"font-size:12px;font-family:{family};"
+        elif is_mac:
             family = "Helvetica"
-            font = 'font-size:15px;font-family:"%s";' % family
-            button_style = """
-button { -webkit-appearance: none; background: #fff; border: 1px solid #ccc;
+            font = f'font-size:15px;font-family:"{family}";'
+            color = ""
+            if not theme_manager.night_mode:
+                color = "background: #fff; border: 1px solid #ccc;"
+            button_style = (
+                """
+button { -webkit-appearance: none; %s
 border-radius:5px; font-family: Helvetica }"""
+                % color
+            )
         else:
             family = self.font().family()
-            color_hl_txt = palette.color(QPalette.HighlightedText).name()
-            color_btn = palette.color(QPalette.Button).name()
-            font = 'font-size:14px;font-family:"%s";' % family
+            color_hl_txt = palette.color(QPalette.ColorRole.HighlightedText).name()
+            font = f'font-size:14px;font-family:"{family}", sans-serif;'
             button_style = """
 /* Buttons */
-button{ 
-        background-color: %(color_btn)s;
-        font-family:"%(family)s"; }
-button:focus{ border-color: %(color_hl)s }
-button:active, button:active:hover { background-color: %(color_hl)s; color: %(color_hl_txt)s;}
+button{{ 
+        font-family:"{family}", sans-serif; }}
+button:focus{{ border-color: {color_hl} }}
+button:active, button:active:hover {{ background-color: {color_hl}; color: {color_hl_txt};}}
 /* Input field focus outline */
 textarea:focus, input:focus, input[type]:focus, .uneditable-input:focus,
-div[contenteditable="true"]:focus {   
+div[contenteditable="true"]:focus {{   
     outline: 0 none;
-    border-color: %(color_hl)s;
-}""" % {
-                "family": family,
-                "color_btn": color_btn,
-                "color_hl": color_hl,
-                "color_hl_txt": color_hl_txt,
-            }
+    border-color: {color_hl};
+}}""".format(
+                family=family,
+                color_hl=color_hl,
+                color_hl_txt=color_hl_txt,
+            )
 
-        zoom = self.zoomFactor()
-        background = self._getWindowColor().name()
+        zoom = self.app_zoom_factor()
 
-        if is_rtl(anki.lang.currentLang):
-            lang_dir = "rtl"
-        else:
-            lang_dir = "ltr"
+        window_bg_day = self.get_window_bg_color(False).name()
+        window_bg_night = self.get_window_bg_color(True).name()
 
         return f"""
-body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
+body {{ zoom: {zoom}; background-color: var(--window-bg); }}
+html {{ {font} }}
 {button_style}
-:root {{ --window-bg: {background} }}
-:root[class*=night-mode] {{ --window-bg: {background} }}
+:root {{ --window-bg: {window_bg_day} }}
+:root[class*=night-mode] {{ --window-bg: {window_bg_night} }}
 """
 
     def stdHtml(
         self,
         body: str,
-        css: Optional[List[str]] = None,
-        js: Optional[List[str]] = None,
+        css: Optional[list[str]] = None,
+        js: Optional[list[str]] = None,
         head: str = "",
         context: Optional[Any] = None,
-    ):
-
+        default_css: bool = True,
+    ) -> None:
+        css = (["css/webview.css"] if default_css else []) + (
+            [] if css is None else css
+        )
         web_content = WebContent(
             body=body,
             head=head,
-            js=["webview.js"] + (["jquery.js"] if js is None else js),
-            css=["webview.css"] + ([] if css is None else css),
+            js=["js/webview.js"] + (["js/vendor/jquery.min.js"] if js is None else js),
+            css=css,
         )
 
         gui_hooks.webview_will_set_content(web_content, context)
 
         csstxt = ""
-        if "webview.css" in web_content.css:
+        if "css/webview.css" in css:
             # we want our dynamic styling to override the defaults in
-            # webview.css, but come before user-provided stylesheets so that
+            # css/webview.css, but come before user-provided stylesheets so that
             # they can override us if necessary
-            web_content.css.remove("webview.css")
-            csstxt = self.bundledCSS("webview.css")
+            web_content.css.remove("css/webview.css")
+            csstxt = self.bundledCSS("css/webview.css")
             csstxt += f"<style>{self.standard_css()}</style>"
 
         csstxt += "\n".join(self.bundledCSS(fname) for fname in web_content.css)
@@ -451,7 +505,7 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
 
         from aqt import mw
 
-        head = mw.baseHTML() + csstxt + jstxt + web_content.head
+        head = mw.baseHTML() + csstxt + web_content.head
         body_class = theme_manager.body_class()
 
         if theme_manager.night_mode:
@@ -459,15 +513,22 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         else:
             doc_class = ""
 
+        if is_rtl(anki.lang.current_lang):
+            lang_dir = "rtl"
+        else:
+            lang_dir = "ltr"
+
         html = f"""
 <!doctype html>
-<html class="{doc_class}">
+<html class="{doc_class}" dir="{lang_dir}">
 <head>
     <title>{self.title}</title>
 {head}
 </head>
 
-<body class="{body_class}">{web_content.body}</body>
+<body class="{body_class}">
+{jstxt}
+{web_content.body}</body>
 </html>"""
         # print(html)
         self.setHtml(html)
@@ -484,7 +545,7 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         return f"http://127.0.0.1:{mw.mediaServer.getPort()}{subpath}{path}"
 
     def bundledScript(self, fname: str) -> str:
-        return '<script src="%s"></script>' % self.webBundlePath(fname)
+        return f'<script src="{self.webBundlePath(fname)}"></script>'
 
     def bundledCSS(self, fname: str) -> str:
         return '<link rel="stylesheet" type="text/css" href="%s">' % self.webBundlePath(
@@ -500,7 +561,7 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
     def _evalWithCallback(self, js: str, cb: Callable[[Any], Any]) -> None:
         if cb:
 
-            def handler(val):
+            def handler(val: Any) -> None:
                 if self._shouldIgnoreWebEvent():
                     print("ignored late js callback", cb)
                     return
@@ -515,6 +576,8 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         self._maybeRunActions()
 
     def _maybeRunActions(self) -> None:
+        if sip.isdeleted(self):
+            return
         while self._pendingActions and self._domDone:
             name, args = self._pendingActions.pop(0)
 
@@ -523,7 +586,7 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
             elif name == "setHtml":
                 self._setHtml(*args)
             else:
-                raise Exception("unknown action: {}".format(name))
+                raise Exception(f"unknown action: {name}")
 
     def _openLinksExternally(self, url: str) -> None:
         openLink(url)
@@ -569,17 +632,17 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         self._bridge_context = None
 
     def adjustHeightToFit(self) -> None:
-        self.evalWithCallback("$(document.body).height()", self._onHeight)
+        self.evalWithCallback("document.documentElement.offsetHeight", self._onHeight)
 
     def _onHeight(self, qvar: Optional[int]) -> None:
         from aqt import mw
 
         if qvar is None:
 
-            mw.progress.timer(1000, mw.reset, False)
+            mw.progress.single_shot(1000, mw.reset)
             return
 
-        self.setFixedHeight(qvar)
+        self.setFixedHeight(int(qvar))
 
     def set_bridge_command(self, func: Callable[[str], Any], context: Any) -> None:
         """Set a handler for pycmd() messages received from Javascript.
@@ -589,26 +652,28 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         self.onBridgeCmd = func
         self._bridge_context = context
 
-    def hide_while_preserving_layout(self):
+    def hide_while_preserving_layout(self) -> None:
         "Hide but keep existing size."
         sp = self.sizePolicy()
         sp.setRetainSizeWhenHidden(True)
         self.setSizePolicy(sp)
         self.hide()
 
-    def inject_dynamic_style_and_show(self):
+    def inject_dynamic_style_and_show(self) -> None:
         "Add dynamic styling, and reveal."
         css = self.standard_css()
 
-        def after_style(arg):
+        def after_style(arg: Any) -> None:
             gui_hooks.webview_did_inject_style_into_page(self)
             self.show()
 
         self.evalWithCallback(
             f"""
-const style = document.createElement('style');
-style.innerHTML = `{css}`;
-document.head.appendChild(style);
+(function(){{
+    const style = document.createElement('style');
+    style.innerHTML = `{css}`;
+    document.head.appendChild(style);
+}})();
 """,
             after_style,
         )
@@ -616,11 +681,81 @@ document.head.appendChild(style);
     def load_ts_page(self, name: str) -> None:
         from aqt import mw
 
-        self.set_open_links_externally(False)
+        self.set_open_links_externally(True)
         if theme_manager.night_mode:
             extra = "#night"
         else:
             extra = ""
         self.hide_while_preserving_layout()
-        self.load(QUrl(f"{mw.serverURL()}_anki/{name}.html" + extra))
+        self.setZoomFactor(1)
+        self.load_url(QUrl(f"{mw.serverURL()}_anki/pages/{name}.html{extra}"))
         self.inject_dynamic_style_and_show()
+
+    def force_load_hack(self) -> None:
+        """Force process to initialize.
+        Must be done on Windows prior to changing current working directory."""
+        self.requiresCol = False
+        self._domReady = False
+        self._page.setContent(cast(QByteArray, bytes("", "ascii")))
+
+    def cleanup(self) -> None:
+        try:
+            from aqt import mw
+        except ImportError:
+            # this will fail when __del__ is called during app shutdown
+            return
+
+        gui_hooks.theme_did_change.remove(self.on_theme_did_change)
+        mw.mediaServer.clear_page_html(id(self))
+        self._page.deleteLater()
+
+    def on_theme_did_change(self) -> None:
+        # avoid flashes if page reloaded
+        self._page.setBackgroundColor(
+            self.get_window_bg_color(theme_manager.night_mode)
+        )
+        # update night-mode class, and legacy nightMode/night-mode body classes
+        self.eval(
+            f"""
+(function() {{
+    const doc = document.documentElement.classList;
+    const body = document.body.classList;
+    if ({1 if theme_manager.night_mode else 0}) {{
+        doc.add("night-mode");
+        body.add("night-mode");
+        body.add("nightMode");
+    }} else {{
+        doc.remove("night-mode");
+        body.remove("night-mode");
+        body.remove("nightMode");
+    }}
+}})();
+"""
+        )
+
+    def _fix_editor_background_color_and_show(self) -> None:
+        # The editor does not use our standard CSS, which takes care of matching the background
+        # colour of the webview to the window we're showing it in. This causes a difference in
+        # shades on Windows/Linux in day mode, that we need to work around. This is a temporary
+        # fix before the 2.1.50 release; with more time there may be a better way to do this.
+
+        if theme_manager.night_mode:
+            # The styling changes are not required for night mode, and hiding+showing the
+            # webview causes a flash of black.
+            return
+
+        self.hide()
+
+        window_bg_day = self.get_window_bg_color(False).name()
+        css = f":root {{ --window-bg: {window_bg_day} }}"
+        self.evalWithCallback(
+            f"""
+(function(){{
+    const style = document.createElement('style');
+    style.innerHTML = `{css}`;
+    document.head.appendChild(style);
+}})();
+""",
+            # avoids FOUC
+            lambda _: self.show(),
+        )

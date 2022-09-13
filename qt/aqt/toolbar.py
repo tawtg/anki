@@ -1,17 +1,15 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
-
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import aqt
-from anki.lang import _
-from anki.rsbackend import SyncStatus
+from anki.sync import SyncStatus
 from aqt import gui_hooks
 from aqt.qt import *
 from aqt.sync import get_sync_status
+from aqt.utils import tr
 from aqt.webview import AnkiWebView
 
 
@@ -31,7 +29,7 @@ class Toolbar:
     def __init__(self, mw: aqt.AnkiQt, web: AnkiWebView) -> None:
         self.mw = mw
         self.web = web
-        self.link_handlers: Dict[str, Callable] = {
+        self.link_handlers: dict[str, Callable] = {
             "study": self._studyLinkHandler,
         }
         self.web.setFixedHeight(30)
@@ -40,16 +38,16 @@ class Toolbar:
     def draw(
         self,
         buf: str = "",
-        web_context: Optional[Any] = None,
-        link_handler: Optional[Callable[[str], Any]] = None,
+        web_context: Any | None = None,
+        link_handler: Callable[[str], Any] | None = None,
     ) -> None:
         web_context = web_context or TopToolbar(self)
         link_handler = link_handler or self._linkHandler
         self.web.set_bridge_command(link_handler, web_context)
         self.web.stdHtml(
             self._body % self._centerLinks(),
-            css=["toolbar.css"],
-            js=["webview.js", "jquery.js", "toolbar.js"],
+            css=["css/toolbar.css"],
+            js=["js/vendor/jquery.min.js", "js/toolbar.js"],
             context=web_context,
         )
         self.web.adjustHeightToFit()
@@ -67,8 +65,8 @@ class Toolbar:
         cmd: str,
         label: str,
         func: Callable,
-        tip: Optional[str] = None,
-        id: Optional[str] = None,
+        tip: str | None = None,
+        id: str | None = None,
     ) -> str:
         """Generates HTML link element and registers link handler
 
@@ -102,30 +100,30 @@ class Toolbar:
         links = [
             self.create_link(
                 "decks",
-                _("Decks"),
+                tr.actions_decks(),
                 self._deckLinkHandler,
-                tip=_("Shortcut key: %s") % "D",
+                tip=tr.actions_shortcut_key(val="D"),
                 id="decks",
             ),
             self.create_link(
                 "add",
-                _("Add"),
+                tr.actions_add(),
                 self._addLinkHandler,
-                tip=_("Shortcut key: %s") % "A",
+                tip=tr.actions_shortcut_key(val="A"),
                 id="add",
             ),
             self.create_link(
                 "browse",
-                _("Browse"),
+                tr.qt_misc_browse(),
                 self._browseLinkHandler,
-                tip=_("Shortcut key: %s") % "B",
+                tip=tr.actions_shortcut_key(val="B"),
                 id="browse",
             ),
             self.create_link(
                 "stats",
-                _("Stats"),
+                tr.qt_misc_stats(),
                 self._statsLinkHandler,
-                tip=_("Shortcut key: %s") % "T",
+                tip=tr.actions_shortcut_key(val="T"),
                 id="stats",
             ),
         ]
@@ -140,22 +138,21 @@ class Toolbar:
     ######################################################################
 
     def _create_sync_link(self) -> str:
-        name = _("Sync")
-        title = _("Shortcut key: %s") % "Y"
+        name = tr.qt_misc_sync()
+        title = tr.actions_shortcut_key(val="Y")
         label = "sync"
         self.link_handlers[label] = self._syncLinkHandler
 
         return f"""
-<a class=hitem tabindex="-1" aria-label="{name}" title="{title}" id="{label}" href=# onclick="return pycmd('{label}')">{name}
-<img id=sync-spinner src='/_anki/imgs/refresh.svg'>        
+<a class=hitem tabindex="-1" aria-label="{name}" title="{title}" id="{label}" href=# onclick="return pycmd('{label}')"
+>{name}<img id=sync-spinner src='/_anki/imgs/refresh.svg'>
 </a>"""
 
     def set_sync_active(self, active: bool) -> None:
-        if active:
-            meth = "addClass"
-        else:
-            meth = "removeClass"
-        self.web.eval(f"$('#sync-spinner').{meth}('spin')")
+        method = "add" if active else "remove"
+        self.web.eval(
+            f"document.getElementById('sync-spinner').classList.{method}('spin')"
+        )
 
     def set_sync_status(self, status: SyncStatus) -> None:
         self.web.eval(f"updateSyncColor({status.required})")
@@ -221,8 +218,8 @@ class BottomBar(Toolbar):
     def draw(
         self,
         buf: str = "",
-        web_context: Optional[Any] = None,
-        link_handler: Optional[Callable[[str], Any]] = None,
+        web_context: Any | None = None,
+        link_handler: Callable[[str], Any] | None = None,
     ) -> None:
         # note: some screens may override this
         web_context = web_context or BottomToolbar(self)
@@ -230,7 +227,7 @@ class BottomBar(Toolbar):
         self.web.set_bridge_command(link_handler, web_context)
         self.web.stdHtml(
             self._centerBody % buf,
-            css=["toolbar.css", "toolbar-bottom.css"],
+            css=["css/toolbar.css", "css/toolbar-bottom.css"],
             context=web_context,
         )
         self.web.adjustHeightToFit()

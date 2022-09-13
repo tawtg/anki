@@ -1,37 +1,34 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::NoteType;
-use crate::{
-    card::{Card, CardID},
-    cloze::add_cloze_numbers_in_string,
-    collection::Collection,
-    deckconf::{DeckConf, DeckConfID},
-    decks::DeckID,
-    err::{AnkiError, Result},
-    notes::{Note, NoteID},
-    notetype::NoteTypeKind,
-    template::ParsedTemplate,
-    types::Usn,
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
 };
+
 use itertools::Itertools;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::collections::{HashMap, HashSet};
+
+use super::Notetype;
+use crate::{
+    cloze::add_cloze_numbers_in_string, notetype::NotetypeKind, prelude::*,
+    template::ParsedTemplate,
+};
 
 /// Info about an existing card required when generating new cards
 #[derive(Debug, PartialEq)]
 pub(crate) struct AlreadyGeneratedCardInfo {
-    pub id: CardID,
-    pub nid: NoteID,
+    pub id: CardId,
+    pub nid: NoteId,
     pub ord: u32,
-    pub original_deck_id: DeckID,
+    pub original_deck_id: DeckId,
     pub position_if_new: Option<u32>,
 }
 
 #[derive(Debug)]
 pub(crate) struct CardToGenerate {
     pub ord: u32,
-    pub did: Option<DeckID>,
+    pub did: Option<DeckId>,
     pub due: Option<u32>,
 }
 
@@ -39,14 +36,16 @@ pub(crate) struct CardToGenerate {
 /// and which deck it should be placed in.
 pub(crate) struct SingleCardGenContext {
     template: Option<ParsedTemplate>,
-    target_deck_id: Option<DeckID>,
+    target_deck_id: Option<DeckId>,
 }
 
 /// Info required to determine which cards should be generated when note added/updated,
 /// and where they should be placed.
-pub(crate) struct CardGenContext<'a> {
+pub(crate) struct CardGenContext<N: Deref<Target = Notetype>> {
     pub usn: Usn,
-    pub notetype: &'a NoteType,
+    pub notetype: N,
+    /// The last deck that was added to with this note type
+    pub last_deck: Option<DeckId>,
     cards: Vec<SingleCardGenContext>,
 }
 
@@ -54,22 +53,24 @@ pub(crate) struct CardGenContext<'a> {
 #[derive(Default)]
 pub(crate) struct CardGenCache {
     next_position: Option<u32>,
-    deck_configs: HashMap<DeckID, DeckConf>,
+    deck_configs: HashMap<DeckId, DeckConfig>,
 }
 
-impl CardGenContext<'_> {
-    pub(crate) fn new(nt: &NoteType, usn: Usn) -> CardGenContext<'_> {
+impl<N: Deref<Target = Notetype>> CardGenContext<N> {
+    pub(crate) fn new(nt: N, last_deck: Option<DeckId>, usn: Usn) -> CardGenContext<N> {
+        let cards = nt
+            .templates
+            .iter()
+            .map(|tmpl| SingleCardGenContext {
+                template: tmpl.parsed_question(),
+                target_deck_id: tmpl.target_deck_id(),
+            })
+            .collect();
         CardGenContext {
             usn,
-            notetype: &nt,
-            cards: nt
-                .templates
-                .iter()
-                .map(|tmpl| SingleCardGenContext {
-                    template: tmpl.parsed_question(),
-                    target_deck_id: tmpl.target_deck_id(),
-                })
-                .collect(),
+            last_deck,
+            notetype: nt,
+            cards,
         }
     }
 
@@ -85,7 +86,7 @@ impl CardGenContext<'_> {
             }
         };
 
-        template.renders_with_fields(&nonempty_fields)
+        template.renders_with_fields(nonempty_fields)
     }
 
     /// Returns the cards that need to be generated for the provided note.
@@ -97,8 +98,8 @@ impl CardGenContext<'_> {
     ) -> Vec<CardToGenerate> {
         let extracted = extract_data_from_existing_cards(existing);
         let cards = match self.notetype.config.kind() {
-            NoteTypeKind::Normal => self.new_cards_required_normal(note, &extracted),
-            NoteTypeKind::Cloze => self.new_cards_required_cloze(note, &extracted),
+            NotetypeKind::Normal => self.new_cards_required_normal(note, &extracted),
+            NotetypeKind::Cloze => self.new_cards_required_cloze(note, &extracted),
         };
         if extracted.existing_ords.is_empty() && cards.is_empty() && ensure_not_empty {
             // if there are no existing cards and no cards will be generated,
@@ -169,7 +170,7 @@ impl CardGenContext<'_> {
 // this could be reworked in the future to avoid the extra vec allocation
 pub(super) fn group_generated_cards_by_note(
     items: Vec<AlreadyGeneratedCardInfo>,
-) -> Vec<(NoteID, Vec<AlreadyGeneratedCardInfo>)> {
+) -> Vec<(NoteId, Vec<AlreadyGeneratedCardInfo>)> {
     let mut out = vec![];
     for (key, group) in &items.into_iter().group_by(|c| c.nid) {
         out.push((key, group.collect()));
@@ -182,7 +183,7 @@ pub(crate) struct ExtractedCardInfo {
     // if set, the due position new cards should be given
     pub due: Option<u32>,
     // if set, the deck all current cards are in
-    pub deck_id: Option<DeckID>,
+    pub deck_id: Option<DeckId>,
     pub existing_ords: HashSet<u32>,
 }
 
@@ -212,9 +213,9 @@ pub(crate) fn extract_data_from_existing_cards(
 impl Collection {
     pub(crate) fn generate_cards_for_new_note(
         &mut self,
-        ctx: &CardGenContext,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
         note: &Note,
-        target_deck_id: DeckID,
+        target_deck_id: DeckId,
     ) -> Result<()> {
         self.generate_cards_for_note(
             ctx,
@@ -227,40 +228,37 @@ impl Collection {
 
     pub(crate) fn generate_cards_for_existing_note(
         &mut self,
-        ctx: &CardGenContext,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
         note: &Note,
     ) -> Result<()> {
         let existing = self.storage.existing_cards_for_note(note.id)?;
-        self.generate_cards_for_note(
-            ctx,
-            note,
-            &existing,
-            Some(ctx.notetype.target_deck_id()),
-            &mut Default::default(),
-        )
+        self.generate_cards_for_note(ctx, note, &existing, ctx.last_deck, &mut Default::default())
     }
 
     fn generate_cards_for_note(
         &mut self,
-        ctx: &CardGenContext,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
         note: &Note,
         existing: &[AlreadyGeneratedCardInfo],
-        target_deck_id: Option<DeckID>,
+        target_deck_id: Option<DeckId>,
         cache: &mut CardGenCache,
     ) -> Result<()> {
-        let cards = ctx.new_cards_required(note, &existing, true);
+        let cards = ctx.new_cards_required(note, existing, true);
         if cards.is_empty() {
             return Ok(());
         }
         self.add_generated_cards(note.id, &cards, target_deck_id, cache)
     }
 
-    pub(crate) fn generate_cards_for_notetype(&mut self, ctx: &CardGenContext) -> Result<()> {
+    pub(crate) fn generate_cards_for_notetype(
+        &mut self,
+        ctx: &CardGenContext<impl Deref<Target = Notetype>>,
+    ) -> Result<()> {
         let existing_cards = self.storage.existing_cards_for_notetype(ctx.notetype.id)?;
         let by_note = group_generated_cards_by_note(existing_cards);
         let mut cache = CardGenCache::default();
         for (nid, existing_cards) in by_note {
-            if ctx.notetype.config.kind() == NoteTypeKind::Normal
+            if ctx.notetype.config.kind() == NotetypeKind::Normal
                 && existing_cards.len() == ctx.notetype.templates.len()
             {
                 // in a normal note type, if card count matches template count, we don't need
@@ -277,9 +275,9 @@ impl Collection {
 
     pub(crate) fn add_generated_cards(
         &mut self,
-        nid: NoteID,
+        nid: NoteId,
         cards: &[CardToGenerate],
-        target_deck_id: Option<DeckID>,
+        target_deck_id: Option<DeckId>,
         cache: &mut CardGenCache,
     ) -> Result<()> {
         for c in cards {
@@ -299,7 +297,12 @@ impl Collection {
 
     // not sure if entry() can be used due to get_deck_config() returning a result
     #[allow(clippy::map_entry)]
-    fn due_for_deck(&self, did: DeckID, dcid: DeckConfID, cache: &mut CardGenCache) -> Result<u32> {
+    fn due_for_deck(
+        &mut self,
+        did: DeckId,
+        dcid: DeckConfigId,
+        cache: &mut CardGenCache,
+    ) -> Result<u32> {
         if !cache.deck_configs.contains_key(&did) {
             let conf = self.get_deck_config(dcid, true)?.unwrap();
             cache.deck_configs.insert(did, conf);
@@ -310,14 +313,20 @@ impl Collection {
         }
         let next_pos = cache.next_position.unwrap();
 
-        match cache.deck_configs.get(&did).unwrap().inner.new_card_order() {
-            crate::deckconf::NewCardOrder::Random => Ok(random_position(next_pos)),
-            crate::deckconf::NewCardOrder::Due => Ok(next_pos),
+        match cache
+            .deck_configs
+            .get(&did)
+            .unwrap()
+            .inner
+            .new_card_insert_order()
+        {
+            crate::deckconfig::NewCardInsertOrder::Random => Ok(random_position(next_pos)),
+            crate::deckconfig::NewCardInsertOrder::Due => Ok(next_pos),
         }
     }
 
     /// If deck ID does not exist or points to a filtered deck, fall back on default.
-    fn deck_for_adding(&mut self, did: Option<DeckID>) -> Result<(DeckID, DeckConfID)> {
+    fn deck_for_adding(&mut self, did: Option<DeckId>) -> Result<(DeckId, DeckConfigId)> {
         if let Some(did) = did {
             if let Some(deck) = self.deck_conf_if_normal(did)? {
                 return Ok(deck);
@@ -327,28 +336,23 @@ impl Collection {
         self.default_deck_conf()
     }
 
-    fn default_deck_conf(&mut self) -> Result<(DeckID, DeckConfID)> {
+    fn default_deck_conf(&mut self) -> Result<(DeckId, DeckConfigId)> {
         // currently hard-coded to 1, we could create this as needed in the future
-        Ok(self
-            .deck_conf_if_normal(DeckID(1))?
-            .ok_or_else(|| AnkiError::invalid_input("invalid default deck"))?)
+        self.deck_conf_if_normal(DeckId(1))?
+            .ok_or_else(|| AnkiError::invalid_input("invalid default deck"))
     }
 
     /// If deck exists and and is a normal deck, return its ID and config
-    fn deck_conf_if_normal(&mut self, did: DeckID) -> Result<Option<(DeckID, DeckConfID)>> {
-        Ok(self.get_deck(did)?.and_then(|d| {
-            if let Some(conf_id) = d.config_id() {
-                Some((did, conf_id))
-            } else {
-                None
-            }
-        }))
+    fn deck_conf_if_normal(&mut self, did: DeckId) -> Result<Option<(DeckId, DeckConfigId)>> {
+        Ok(self
+            .get_deck(did)?
+            .and_then(|d| d.config_id().map(|conf_id| (did, conf_id))))
     }
 }
 
 fn random_position(highest_position: u32) -> u32 {
     let mut rng = StdRng::seed_from_u64(highest_position as u64);
-    rng.gen_range(0, highest_position.max(1000))
+    rng.gen_range(1..highest_position.max(1000))
 }
 
 #[cfg(test)]
@@ -358,8 +362,8 @@ mod test {
     #[test]
     fn random() {
         // predictable output and a minimum range of 1000
-        assert_eq!(random_position(5), 626);
-        assert_eq!(random_position(500), 898);
-        assert_eq!(random_position(5001), 2282);
+        assert_eq!(random_position(5), 180);
+        assert_eq!(random_position(500), 13);
+        assert_eq!(random_position(5001), 3731);
     }
 }

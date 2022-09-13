@@ -1,45 +1,46 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use std::collections::HashMap;
+
+use serde_derive::{Deserialize, Serialize};
+use serde_json::Value;
+use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde_tuple::Serialize_tuple;
+
+use super::{CardRequirementKind, NotetypeId};
 use crate::{
-    decks::DeckID,
+    decks::DeckId,
     notetype::{
-        CardRequirement, CardTemplate, CardTemplateConfig, NoteField, NoteFieldConfig, NoteType,
-        NoteTypeConfig,
+        CardRequirement, CardTemplate, CardTemplateConfig, NoteField, NoteFieldConfig, Notetype,
+        NotetypeConfig,
     },
     serde::{default_on_invalid, deserialize_bool_from_anything, deserialize_number_from_string},
     timestamp::TimestampSecs,
     types::Usn,
 };
-use serde_derive::{Deserialize, Serialize};
-use serde_json::Value;
-use serde_repr::{Deserialize_repr, Serialize_repr};
-use serde_tuple::Serialize_tuple;
-use std::collections::HashMap;
-
-use super::{CardRequirementKind, NoteTypeID};
 
 #[derive(Serialize_repr, Deserialize_repr, PartialEq, Debug, Clone)]
 #[repr(u8)]
-pub enum NoteTypeKind {
+pub enum NotetypeKind {
     Standard = 0,
     Cloze = 1,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteTypeSchema11 {
+pub struct NotetypeSchema11 {
     #[serde(deserialize_with = "deserialize_number_from_string")]
-    pub(crate) id: NoteTypeID,
+    pub(crate) id: NotetypeId,
     pub(crate) name: String,
     #[serde(rename = "type")]
-    pub(crate) kind: NoteTypeKind,
+    pub(crate) kind: NotetypeKind,
     #[serde(rename = "mod")]
     pub(crate) mtime: TimestampSecs,
     pub(crate) usn: Usn,
     pub(crate) sortf: u16,
     #[serde(deserialize_with = "default_on_invalid")]
-    pub(crate) did: Option<DeckID>,
+    pub(crate) did: Option<DeckId>,
     pub(crate) tmpls: Vec<CardTemplateSchema11>,
     pub(crate) flds: Vec<NoteFieldSchema11>,
     #[serde(deserialize_with = "default_on_invalid")]
@@ -48,7 +49,7 @@ pub struct NoteTypeSchema11 {
     pub(crate) latex_pre: String,
     #[serde(default)]
     pub(crate) latex_post: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "default_on_invalid")]
     pub latexsvg: bool,
     #[serde(default, deserialize_with = "default_on_invalid")]
     pub(crate) req: CardRequirementsSchema11,
@@ -56,14 +57,8 @@ pub struct NoteTypeSchema11 {
     pub(crate) other: HashMap<String, Value>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub(crate) struct CardRequirementsSchema11(pub(crate) Vec<CardRequirementSchema11>);
-
-impl Default for CardRequirementsSchema11 {
-    fn default() -> Self {
-        CardRequirementsSchema11(vec![])
-    }
-}
 
 #[derive(Serialize_tuple, Deserialize, Debug, Clone)]
 pub(crate) struct CardRequirementSchema11 {
@@ -80,24 +75,24 @@ pub enum FieldRequirementKindSchema11 {
     None,
 }
 
-impl NoteTypeSchema11 {
+impl NotetypeSchema11 {
     pub fn latex_uses_svg(&self) -> bool {
         self.latexsvg
     }
 }
 
-impl From<NoteTypeSchema11> for NoteType {
-    fn from(nt: NoteTypeSchema11) -> Self {
-        NoteType {
+impl From<NotetypeSchema11> for Notetype {
+    fn from(nt: NotetypeSchema11) -> Self {
+        Notetype {
             id: nt.id,
             name: nt.name,
             mtime_secs: nt.mtime,
             usn: nt.usn,
-            config: NoteTypeConfig {
+            config: NotetypeConfig {
                 kind: nt.kind as i32,
                 sort_field_idx: nt.sortf as u32,
                 css: nt.css,
-                target_deck_id: nt.did.unwrap_or(DeckID(0)).0,
+                target_deck_id_unused: nt.did.unwrap_or(DeckId(0)).0,
                 latex_pre: nt.latex_pre,
                 latex_post: nt.latex_post,
                 latex_svg: nt.latexsvg,
@@ -133,24 +128,24 @@ fn bytes_to_other(bytes: &[u8]) -> HashMap<String, Value> {
     }
 }
 
-impl From<NoteType> for NoteTypeSchema11 {
-    fn from(p: NoteType) -> Self {
+impl From<Notetype> for NotetypeSchema11 {
+    fn from(p: Notetype) -> Self {
         let c = p.config;
-        NoteTypeSchema11 {
+        NotetypeSchema11 {
             id: p.id,
             name: p.name,
             kind: if c.kind == 1 {
-                NoteTypeKind::Cloze
+                NotetypeKind::Cloze
             } else {
-                NoteTypeKind::Standard
+                NotetypeKind::Standard
             },
             mtime: p.mtime_secs,
             usn: p.usn,
             sortf: c.sort_field_idx as u16,
-            did: if c.target_deck_id == 0 {
+            did: if c.target_deck_id_unused == 0 {
                 None
             } else {
-                Some(DeckID(c.target_deck_id))
+                Some(DeckId(c.target_deck_id_unused))
             },
             tmpls: p.templates.into_iter().map(Into::into).collect(),
             flds: p.fields.into_iter().map(Into::into).collect(),
@@ -161,6 +156,13 @@ impl From<NoteType> for NoteTypeSchema11 {
             req: CardRequirementsSchema11(c.reqs.into_iter().map(Into::into).collect()),
             other: bytes_to_other(&c.other),
         }
+    }
+}
+
+/// See [crate::deckconfig::schema11::clear_other_duplicates()].
+fn clear_other_field_duplicates(other: &mut HashMap<String, Value>) {
+    for key in &["description", "plainText", "collapsed"] {
+        other.remove(*key);
     }
 }
 
@@ -193,6 +195,7 @@ impl From<CardRequirement> for CardRequirementSchema11 {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct NoteFieldSchema11 {
     pub(crate) name: String,
     pub(crate) ord: Option<u16>,
@@ -202,6 +205,19 @@ pub struct NoteFieldSchema11 {
     pub(crate) rtl: bool,
     pub(crate) font: String,
     pub(crate) size: u16,
+
+    // This was not in schema 11, but needs to be listed here so that the setting is not lost
+    // on downgrade/upgrade.
+    // NOTE: if adding new ones, make sure to update clear_other_field_duplicates()
+    #[serde(default, deserialize_with = "default_on_invalid")]
+    pub(crate) description: String,
+
+    #[serde(default, deserialize_with = "default_on_invalid")]
+    pub(crate) plain_text: bool,
+
+    #[serde(default, deserialize_with = "default_on_invalid")]
+    pub(crate) collapsed: bool,
+
     #[serde(flatten)]
     pub(crate) other: HashMap<String, Value>,
 }
@@ -213,8 +229,11 @@ impl Default for NoteFieldSchema11 {
             ord: None,
             sticky: false,
             rtl: false,
+            plain_text: false,
             font: "Arial".to_string(),
             size: 20,
+            description: String::new(),
+            collapsed: false,
             other: Default::default(),
         }
     }
@@ -228,8 +247,11 @@ impl From<NoteFieldSchema11> for NoteField {
             config: NoteFieldConfig {
                 sticky: f.sticky,
                 rtl: f.rtl,
+                plain_text: f.plain_text,
                 font_name: f.font,
                 font_size: f.size as u32,
+                description: f.description,
+                collapsed: f.collapsed,
                 other: other_to_bytes(&f.other),
             },
         }
@@ -241,14 +263,19 @@ impl From<NoteFieldSchema11> for NoteField {
 impl From<NoteField> for NoteFieldSchema11 {
     fn from(p: NoteField) -> Self {
         let conf = p.config;
+        let mut other = bytes_to_other(&conf.other);
+        clear_other_field_duplicates(&mut other);
         NoteFieldSchema11 {
             name: p.name,
             ord: p.ord.map(|o| o as u16),
             sticky: conf.sticky,
             rtl: conf.rtl,
+            plain_text: conf.plain_text,
             font: conf.font_name,
             size: conf.font_size as u16,
-            other: bytes_to_other(&conf.other),
+            description: conf.description,
+            collapsed: conf.collapsed,
+            other,
         }
     }
 }
@@ -264,8 +291,8 @@ pub struct CardTemplateSchema11 {
     pub(crate) bqfmt: String,
     #[serde(default)]
     pub(crate) bafmt: String,
-    #[serde(deserialize_with = "default_on_invalid")]
-    pub(crate) did: Option<DeckID>,
+    #[serde(deserialize_with = "default_on_invalid", default)]
+    pub(crate) did: Option<DeckId>,
     #[serde(default, deserialize_with = "default_on_invalid")]
     pub(crate) bfont: String,
     #[serde(default, deserialize_with = "default_on_invalid")]
@@ -286,7 +313,7 @@ impl From<CardTemplateSchema11> for CardTemplate {
                 a_format: t.afmt,
                 q_format_browser: t.bqfmt,
                 a_format_browser: t.bafmt,
-                target_deck_id: t.did.unwrap_or(DeckID(0)).0,
+                target_deck_id: t.did.unwrap_or(DeckId(0)).0,
                 browser_font_name: t.bfont,
                 browser_font_size: t.bsize as u32,
                 other: other_to_bytes(&t.other),
@@ -308,7 +335,7 @@ impl From<CardTemplate> for CardTemplateSchema11 {
             bqfmt: conf.q_format_browser,
             bafmt: conf.a_format_browser,
             did: if conf.target_deck_id > 0 {
-                Some(DeckID(conf.target_deck_id))
+                Some(DeckId(conf.target_deck_id))
             } else {
                 None
             },

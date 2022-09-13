@@ -1,22 +1,29 @@
-# -*- coding: utf-8 -*-
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Callable
 
 import aqt
-from anki.lang import _
+import aqt.operations
+from anki.collection import OpChanges
+from anki.scheduler import UnburyDeck
 from aqt import gui_hooks
+from aqt.deckdescription import DeckDescriptionDialog
+from aqt.deckoptions import display_options_for_deck
+from aqt.operations.scheduling import (
+    empty_filtered_deck,
+    rebuild_filtered_deck,
+    unbury_deck,
+)
 from aqt.sound import av_player
 from aqt.toolbar import BottomBar
-from aqt.utils import askUserDialog, openLink, shortcut, tooltip
+from aqt.utils import askUserDialog, openLink, shortcut, tooltip, tr
 
 
 class OverviewBottomBar:
-    def __init__(self, overview: Overview):
+    def __init__(self, overview: Overview) -> None:
         self.overview = overview
 
 
@@ -45,113 +52,128 @@ class Overview:
         self.mw = mw
         self.web = mw.web
         self.bottom = BottomBar(mw, mw.bottomWeb)
+        self._refresh_needed = False
 
-    def show(self):
+    def show(self) -> None:
         av_player.stop_and_clear_queue()
         self.web.set_bridge_command(self._linkHandler, self)
         self.mw.setStateShortcuts(self._shortcutKeys())
         self.refresh()
 
-    def refresh(self):
+    def refresh(self) -> None:
+        self._refresh_needed = False
         self.mw.col.reset()
         self._renderPage()
         self._renderBottom()
         self.mw.web.setFocus()
         gui_hooks.overview_did_refresh(self)
 
+    def refresh_if_needed(self) -> None:
+        if self._refresh_needed:
+            self.refresh()
+
+    def op_executed(
+        self, changes: OpChanges, handler: object | None, focused: bool
+    ) -> bool:
+        if changes.study_queues:
+            self._refresh_needed = True
+
+        if focused:
+            self.refresh_if_needed()
+
+        return self._refresh_needed
+
     # Handlers
     ############################################################
 
-    def _linkHandler(self, url):
+    def _linkHandler(self, url: str) -> bool:
         if url == "study":
             self.mw.col.startTimebox()
             self.mw.moveToState("review")
             if self.mw.state == "overview":
-                tooltip(_("No cards are due yet."))
+                tooltip(tr.studying_no_cards_are_due_yet())
         elif url == "anki":
             print("anki menu")
         elif url == "opts":
-            self.mw.onDeckConf()
+            display_options_for_deck(self.mw.col.decks.current())
         elif url == "cram":
-            deck = self.mw.col.decks.current()
-            self.mw.onCram("'deck:%s'" % deck["name"])
+            aqt.dialogs.open("FilteredDeckConfigDialog", self.mw)
         elif url == "refresh":
-            self.mw.col.sched.rebuild_filtered_deck(self.mw.col.decks.selected())
-            self.mw.reset()
+            self.rebuild_current_filtered_deck()
         elif url == "empty":
-            self.mw.col.sched.empty_filtered_deck(self.mw.col.decks.selected())
-            self.mw.reset()
+            self.empty_current_filtered_deck()
         elif url == "decks":
             self.mw.moveToState("deckBrowser")
         elif url == "review":
-            openLink(aqt.appShared + "info/%s?v=%s" % (self.sid, self.sidVer))
+            openLink(f"{aqt.appShared}info/{self.sid}?v={self.sidVer}")
         elif url == "studymore" or url == "customStudy":
             self.onStudyMore()
         elif url == "unbury":
-            self.onUnbury()
+            self.on_unbury()
+        elif url == "description":
+            self.edit_description()
         elif url.lower().startswith("http"):
             openLink(url)
         return False
 
-    def _shortcutKeys(self):
+    def _shortcutKeys(self) -> list[tuple[str, Callable]]:
         return [
-            ("o", self.mw.onDeckConf),
-            ("r", self.onRebuildKey),
-            ("e", self.onEmptyKey),
+            ("o", lambda: display_options_for_deck(self.mw.col.decks.current())),
+            ("r", self.rebuild_current_filtered_deck),
+            ("e", self.empty_current_filtered_deck),
             ("c", self.onCustomStudyKey),
-            ("u", self.onUnbury),
+            ("u", self.on_unbury),
         ]
 
-    def _filteredDeck(self):
+    def _current_deck_is_filtered(self) -> int:
         return self.mw.col.decks.current()["dyn"]
 
-    def onRebuildKey(self):
-        if self._filteredDeck():
-            self.mw.col.sched.rebuild_filtered_deck(self.mw.col.decks.selected())
-            self.mw.reset()
+    def rebuild_current_filtered_deck(self) -> None:
+        rebuild_filtered_deck(
+            parent=self.mw, deck_id=self.mw.col.decks.selected()
+        ).run_in_background()
 
-    def onEmptyKey(self):
-        if self._filteredDeck():
-            self.mw.col.sched.empty_filtered_deck(self.mw.col.decks.selected())
-            self.mw.reset()
+    def empty_current_filtered_deck(self) -> None:
+        empty_filtered_deck(
+            parent=self.mw, deck_id=self.mw.col.decks.selected()
+        ).run_in_background()
 
-    def onCustomStudyKey(self):
-        if not self._filteredDeck():
+    def onCustomStudyKey(self) -> None:
+        if not self._current_deck_is_filtered():
             self.onStudyMore()
 
-    def onUnbury(self):
-        if self.mw.col.schedVer() == 1:
-            self.mw.col.sched.unburyCardsForDeck()
-            self.mw.reset()
-            return
+    def on_unbury(self) -> None:
+        mode = UnburyDeck.Mode.ALL
+        if self.mw.col.sched_ver() != 1:
+            info = self.mw.col.sched.congratulations_info()
+            if info.have_sched_buried and info.have_user_buried:
+                opts = [
+                    tr.studying_manually_buried_cards(),
+                    tr.studying_buried_siblings(),
+                    tr.studying_all_buried_cards(),
+                    tr.actions_cancel(),
+                ]
 
-        info = self.mw.col.sched.congratulations_info()
-        if info.have_sched_buried and info.have_user_buried:
-            opts = [
-                _("Manually Buried Cards"),
-                _("Buried Siblings"),
-                _("All Buried Cards"),
-                _("Cancel"),
-            ]
+                diag = askUserDialog(tr.studying_what_would_you_like_to_unbury(), opts)
+                diag.setDefault(0)
+                ret = diag.run()
+                if ret == opts[0]:
+                    mode = UnburyDeck.Mode.USER_ONLY
+                elif ret == opts[1]:
+                    mode = UnburyDeck.Mode.SCHED_ONLY
+                elif ret == opts[3]:
+                    return
 
-            diag = askUserDialog(_("What would you like to unbury?"), opts)
-            diag.setDefault(0)
-            ret = diag.run()
-            if ret == opts[0]:
-                self.mw.col.sched.unburyCardsForDeck(type="manual")
-            elif ret == opts[1]:
-                self.mw.col.sched.unburyCardsForDeck(type="siblings")
-            elif ret == opts[2]:
-                self.mw.col.sched.unburyCardsForDeck(type="all")
-        else:
-            self.mw.col.sched.unburyCardsForDeck(type="all")
+        unbury_deck(
+            parent=self.mw, deck_id=self.mw.col.decks.get_current_id(), mode=mode
+        ).run_in_background()
 
-        self.mw.reset()
+    onUnbury = on_unbury
 
     # HTML
     ############################################################
 
-    def _renderPage(self):
+    def _renderPage(self) -> None:
         but = self.mw.button
         deck = self.mw.col.decks.current()
         self.sid = deck.get("sharedFrom")
@@ -160,9 +182,7 @@ class Overview:
             shareLink = '<a class=smallLink href="review">Reviews and Updates</a>'
         else:
             shareLink = ""
-        table_text = self._table()
-        if not table_text:
-            # deck is finished
+        if self.mw.col.sched._is_finished():
             self._show_finished_screen()
             return
         content = OverviewContent(
@@ -174,66 +194,69 @@ class Overview:
         gui_hooks.overview_will_render_content(self, content)
         self.web.stdHtml(
             self._body % content.__dict__,
-            css=["overview.css"],
-            js=["jquery.js", "overview.js"],
+            css=["css/overview.css"],
+            js=["js/vendor/jquery.min.js"],
             context=self,
         )
 
-    def _show_finished_screen(self):
+    def _show_finished_screen(self) -> None:
         self.web.load_ts_page("congrats")
 
-    def _desc(self, deck):
+    def _desc(self, deck: dict[str, Any]) -> str:
         if deck["dyn"]:
-            desc = _(
-                """\
-This is a special deck for studying outside of the normal schedule."""
-            )
-            desc += " " + _(
-                """\
-Cards will be automatically returned to their original decks after you review \
-them."""
-            )
-            desc += " " + _(
-                """\
-Deleting this deck from the deck list will return all remaining cards \
-to their original deck."""
-            )
+            desc = tr.studying_this_is_a_special_deck_for()
+            desc += f" {tr.studying_cards_will_be_automatically_returned_to()}"
+            desc += f" {tr.studying_deleting_this_deck_from_the_deck()}"
         else:
             desc = deck.get("desc", "")
+            if deck.get("md", False):
+                desc = self.mw.col.render_markdown(desc)
         if not desc:
             return "<p>"
         if deck["dyn"]:
             dyn = "dyn"
         else:
             dyn = ""
-        return '<div class="descfont descmid description %s">%s</div>' % (dyn, desc)
+        return f'<div class="descfont descmid description {dyn}">{desc}</div>'
 
-    def _table(self) -> Optional[str]:
-        "Return table text if deck is not finished."
+    def _table(self) -> str | None:
         counts = list(self.mw.col.sched.counts())
-        finished = not sum(counts)
+        current_did = self.mw.col.decks.get_current_id()
+        deck_node = self.mw.col.sched.deck_due_tree(current_did)
+
         but = self.mw.button
-        if finished:
-            return None
+        if self.mw.col.v3_scheduler():
+            buried_new = deck_node.new_count - counts[0]
+            buried_learning = deck_node.learn_count - counts[1]
+            buried_review = deck_node.review_count - counts[2]
         else:
-            return """
+            buried_new = buried_learning = buried_review = 0
+        buried_label = tr.studying_counts_differ()
+
+        def number_row(title: str, klass: str, count: int, buried_count: int) -> str:
+            buried = f"{buried_count:+}" if buried_count else ""
+            return f"""
+<tr>
+    <td>{title}:</td>
+    <td>
+        <b>
+            <span class={klass}>{count}</span>
+            <span class=bury-count title="{buried_label}">{buried}</span>
+        </b>
+    </td>
+</tr>
+"""
+
+        return f"""
 <table width=400 cellpadding=5>
 <tr><td align=center valign=top>
 <table cellspacing=5>
-<tr><td>%s:</td><td><b><span class=new-count>%s</span></b></td></tr>
-<tr><td>%s:</td><td><b><span class=learn-count>%s</span></b></td></tr>
-<tr><td>%s:</td><td><b><span class=review-count>%s</span></b></td></tr>
+{number_row(tr.actions_new(), "new-count", counts[0], buried_new)}
+{number_row(tr.scheduling_learning(), "learn-count", counts[1], buried_learning)}
+{number_row(tr.studying_to_review(), "review-count", counts[2], buried_review)}
 </table>
 </td><td align=center>
-%s</td></tr></table>""" % (
-                _("New"),
-                counts[0],
-                _("Learning"),
-                counts[1],
-                _("To Review"),
-                counts[2],
-                but("study", _("Study Now"), id="study", extra=" autofocus"),
-            )
+{but("study", tr.studying_study_now(), id="study", extra=" autofocus")}</td></tr></table>"""
 
     _body = """
 <center>
@@ -244,37 +267,49 @@ to their original deck."""
 </center>
 """
 
+    def edit_description(self) -> None:
+        DeckDescriptionDialog(self.mw)
+
     # Bottom area
     ######################################################################
 
-    def _renderBottom(self):
+    def _renderBottom(self) -> None:
         links = [
-            ["O", "opts", _("Options")],
+            ["O", "opts", tr.actions_options()],
         ]
         if self.mw.col.decks.current()["dyn"]:
-            links.append(["R", "refresh", _("Rebuild")])
-            links.append(["E", "empty", _("Empty")])
+            links.append(["R", "refresh", tr.actions_rebuild()])
+            links.append(["E", "empty", tr.studying_empty()])
         else:
-            links.append(["C", "studymore", _("Custom Study")])
+            links.append(["C", "studymore", tr.actions_custom_study()])
             # links.append(["F", "cram", _("Filter/Cram")])
-        if self.mw.col.sched.haveBuried():
-            links.append(["U", "unbury", _("Unbury")])
+        if self.mw.col.sched.have_buried():
+            links.append(["U", "unbury", tr.studying_unbury()])
+        links.append(["", "description", tr.scheduling_description()])
+        link_handler = gui_hooks.overview_will_render_bottom(
+            self._linkHandler,
+            links,
+        )
+        if not callable(link_handler):
+            link_handler = self._linkHandler
         buf = ""
         for b in links:
             if b[0]:
-                b[0] = _("Shortcut key: %s") % shortcut(b[0])
+                b[0] = tr.actions_shortcut_key(val=shortcut(b[0]))
             buf += """
 <button title="%s" onclick='pycmd("%s")'>%s</button>""" % tuple(
                 b
             )
         self.bottom.draw(
-            buf=buf, link_handler=self._linkHandler, web_context=OverviewBottomBar(self)
+            buf=buf,
+            link_handler=link_handler,
+            web_context=OverviewBottomBar(self),
         )
 
     # Studying more
     ######################################################################
 
-    def onStudyMore(self):
+    def onStudyMore(self) -> None:
         import aqt.customstudy
 
-        aqt.customstudy.CustomStudy(self.mw)
+        aqt.customstudy.CustomStudy.fetch_data_and_show(self.mw)

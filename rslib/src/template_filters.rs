@@ -1,13 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::cloze::{cloze_filter, cloze_only_filter};
-use crate::template::RenderContext;
-use crate::text::strip_html;
+use std::borrow::Cow;
+
 use blake3::Hasher;
 use lazy_static::lazy_static;
 use regex::{Captures, Regex};
-use std::borrow::Cow;
+
+use crate::{
+    cloze::{cloze_filter, cloze_only_filter},
+    template::RenderContext,
+    text::strip_html,
+};
 
 // Filtering
 //----------------------------------------
@@ -77,8 +81,8 @@ fn apply_filter<'a>(
         // an empty filter name (caused by using two colons) is ignored
         "" => text.into(),
         _ => {
-            if filter_name.starts_with("tts ") {
-                tts_filter(filter_name, text)
+            if let Some(options) = filter_name.strip_prefix("tts ") {
+                tts_filter(options, text).into()
             } else {
                 // unrecognized filter
                 return (false, None);
@@ -187,22 +191,16 @@ return false;">
     .into()
 }
 
-fn tts_filter(filter_name: &str, text: &str) -> Cow<'static, str> {
-    let args = filter_name.splitn(2, ' ').nth(1).unwrap_or("");
-
-    format!("[anki:tts][{}]{}[/anki:tts]", args, text).into()
+fn tts_filter(options: &str, text: &str) -> String {
+    format!("[anki:tts lang={}]{}[/anki:tts]", options, text)
 }
+
 // Tests
 //----------------------------------------
 
 #[cfg(test)]
 mod test {
-    use crate::template::RenderContext;
-    use crate::template_filters::{
-        apply_filters, cloze_filter, furigana_filter, hint_filter, kana_filter, kanji_filter,
-        tts_filter, type_cloze_filter, type_filter,
-    };
-    use crate::text::strip_html;
+    use super::*;
 
     #[test]
     fn furigana() {
@@ -258,7 +256,7 @@ field</a>
         assert_eq!(strip_html(&cloze_filter(text, &ctx)).as_ref(), "[...] two");
         assert_eq!(
             cloze_filter(text, &ctx),
-            "<span class=cloze>[...]</span> two"
+            r#"<span class="cloze" data-cloze="one">[...]</span> two"#
         );
 
         ctx.card_ord = 1;
@@ -277,8 +275,8 @@ field</a>
     #[test]
     fn tts() {
         assert_eq!(
-            tts_filter("tts en_US voices=Bob,Jane", "foo"),
-            "[anki:tts][en_US voices=Bob,Jane]foo[/anki:tts]"
+            tts_filter("en_US voices=Bob,Jane", "foo"),
+            "[anki:tts lang=en_US voices=Bob,Jane]foo[/anki:tts]"
         );
     }
 }

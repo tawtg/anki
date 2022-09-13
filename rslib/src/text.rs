@@ -1,17 +1,63 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use lazy_static::lazy_static;
-use regex::{Captures, Regex};
 use std::borrow::Cow;
-use std::ptr;
+
+use lazy_static::lazy_static;
+use pct_str::{IriReserved, PctStr, PctString};
+use regex::{Captures, Regex};
 use unicase::eq as uni_eq;
 use unicode_normalization::{
     char::is_combining_mark, is_nfc, is_nfkd_quick, IsNormalized, UnicodeNormalization,
 };
 
+pub trait Trimming {
+    fn trim(self) -> Self;
+}
+
+impl Trimming for Cow<'_, str> {
+    fn trim(self) -> Self {
+        match self {
+            Cow::Borrowed(text) => text.trim().into(),
+            Cow::Owned(text) => {
+                let trimmed = text.as_str().trim();
+                if trimmed.len() == text.len() {
+                    text.into()
+                } else {
+                    trimmed.to_string().into()
+                }
+            }
+        }
+    }
+}
+
+pub(crate) trait CowMapping<'a, B: ?Sized + 'a + ToOwned> {
+    /// Returns [self]
+    /// - unchanged, if the given function returns [Cow::Borrowed]
+    /// - with the new value, if the given function returns [Cow::Owned]
+    fn map_cow(self, f: impl FnOnce(&B) -> Cow<B>) -> Self;
+    fn get_owned(self) -> Option<B::Owned>;
+}
+
+impl<'a, B: ?Sized + 'a + ToOwned> CowMapping<'a, B> for Cow<'a, B> {
+    fn map_cow(self, f: impl FnOnce(&B) -> Cow<B>) -> Self {
+        if let Cow::Owned(o) = f(&self) {
+            Cow::Owned(o)
+        } else {
+            self
+        }
+    }
+
+    fn get_owned(self) -> Option<B::Owned> {
+        match self {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(s) => Some(s),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
-pub enum AVTag {
+pub enum AvTag {
     SoundOrVideo(String),
     TextToSpeech {
         field_text: String,
@@ -32,10 +78,23 @@ lazy_static! {
     ))
     .unwrap();
 
-    static ref IMG_TAG: Regex = Regex::new(
+    static ref HTML_LINEBREAK_TAGS: Regex = Regex::new(
         r#"(?xsi)
-            # the start of the image tag
-            <img[^>]+src=
+            </?
+            (?:
+                br|address|article|aside|blockquote|canvas|dd|div
+                |dl|dt|fieldset|figcaption|figure|footer|form
+                |h[1-6]|header|hr|li|main|nav|noscript|ol
+                |output|p|pre|section|table|tfoot|ul|video
+            )
+            >
+        "#
+    ).unwrap();
+
+    pub(crate) static ref HTML_MEDIA_TAGS: Regex = Regex::new(
+        r#"(?xsi)
+            # the start of the image, audio, or object tag
+            <\b(?:img|audio|object)\b[^>]+\b(?:src|data)\b=
             (?:
                     # 1: double-quoted filename
                     "
@@ -72,20 +131,63 @@ lazy_static! {
                 (.*?)           # 3 - field text
             \[/anki:tts\]
             "#).unwrap();
+
+    static ref PERSISTENT_HTML_SPACERS: Regex = Regex::new(r#"(?i)<br\s*/?>|<div>|\n"#).unwrap();
+
+    static ref TYPE_TAG: Regex = Regex::new(r"\[\[type:[^]]+\]\]").unwrap();
+    pub(crate) static ref SOUND_TAG: Regex = Regex::new(r"\[sound:([^]]+)\]").unwrap();
+
+    /// Files included in CSS with a leading underscore.
+    static ref UNDERSCORED_CSS_IMPORTS: Regex = Regex::new(
+        r#"(?xi)
+            (?:@import\s+           # import statement with a bare
+                "(_[^"]*.css)"      # double quoted
+                |                   # or
+                '(_[^']*.css)'      # single quoted css filename
+            )
+            |                       # or
+            (?:url\(\s*             # a url function with a
+                "(_[^"]+)"          # double quoted
+                |                   # or
+                '(_[^']+)'          # single quoted
+                |                   # or
+                (_.+)               # unquoted filename
+            \s*\))
+    "#).unwrap();
+
+    /// Strings, src and data attributes with a leading underscore.
+    static ref UNDERSCORED_REFERENCES: Regex = Regex::new(
+        r#"(?x)
+                "(_[^"]+)"        # double quoted
+            |                     # or
+                '(_[^']+)'        # single quoted string
+            |                     # or
+                \b(?:src|data)    # a 'src' or 'data' attribute
+                =                 # followed by
+                (_[^ >]+)         # an unquoted value
+    "#).unwrap();
+}
+
+pub fn is_html(text: impl AsRef<str>) -> bool {
+    HTML.is_match(text.as_ref())
+}
+
+pub fn html_to_text_line(html: &str, preserve_media_filenames: bool) -> Cow<str> {
+    let (html_stripper, sound_rep): (fn(&str) -> Cow<str>, _) = if preserve_media_filenames {
+        (strip_html_preserving_media_filenames, "$1")
+    } else {
+        (strip_html, "")
+    };
+    PERSISTENT_HTML_SPACERS
+        .replace_all(html, " ")
+        .map_cow(|s| TYPE_TAG.replace_all(s, ""))
+        .map_cow(|s| SOUND_TAG.replace_all(s, sound_rep))
+        .map_cow(html_stripper)
+        .trim()
 }
 
 pub fn strip_html(html: &str) -> Cow<str> {
-    let mut out: Cow<str> = html.into();
-
-    if let Cow::Owned(o) = strip_html_preserving_entities(html) {
-        out = o.into();
-    }
-
-    if let Cow::Owned(o) = decode_entities(out.as_ref()) {
-        out = o.into();
-    }
-
-    out
+    strip_html_preserving_entities(html).map_cow(decode_entities)
 }
 
 pub fn strip_html_preserving_entities(html: &str) -> Cow<str> {
@@ -95,47 +197,38 @@ pub fn strip_html_preserving_entities(html: &str) -> Cow<str> {
 pub fn decode_entities(html: &str) -> Cow<str> {
     if html.contains('&') {
         match htmlescape::decode_html(html) {
-            Ok(text) => text.replace('\u{a0}', " "),
-            Err(e) => format!("{:?}", e),
+            Ok(text) => text.replace('\u{a0}', " ").into(),
+            Err(_) => html.into(),
         }
-        .into()
     } else {
         // nothing to do
         html.into()
     }
 }
 
-pub fn strip_html_for_tts(html: &str) -> Cow<str> {
-    match HTML.replace_all(html, " ") {
-        Cow::Borrowed(_) => decode_entities(html),
-        Cow::Owned(s) => decode_entities(&s).to_string().into(),
+pub(crate) fn newlines_to_spaces(text: &str) -> Cow<str> {
+    if text.contains('\n') {
+        text.replace('\n', " ").into()
+    } else {
+        text.into()
     }
 }
 
-pub fn strip_av_tags(text: &str) -> Cow<str> {
-    AV_TAGS.replace_all(text, "")
+pub fn strip_html_for_tts(html: &str) -> Cow<str> {
+    HTML_LINEBREAK_TAGS
+        .replace_all(html, " ")
+        .map_cow(strip_html)
 }
 
-/// Extract audio tags from string, replacing them with [anki:play] refs
-pub fn extract_av_tags<'a>(text: &'a str, question_side: bool) -> (Cow<'a, str>, Vec<AVTag>) {
-    let mut tags = vec![];
-    let context = if question_side { 'q' } else { 'a' };
-    let replaced_text = AV_TAGS.replace_all(text, |caps: &Captures| {
-        // extract
-        let tag = if let Some(av_file) = caps.get(1) {
-            AVTag::SoundOrVideo(decode_entities(av_file.as_str()).into())
-        } else {
-            let args = caps.get(2).unwrap();
-            let field_text = caps.get(3).unwrap();
-            tts_tag_from_string(field_text.as_str(), args.as_str())
-        };
-        tags.push(tag);
-
-        // and replace with reference
-        format!("[anki:play:{}:{}]", context, tags.len() - 1)
-    });
-
-    (replaced_text, tags)
+/// Truncate a String on a valid UTF8 boundary.
+pub(crate) fn truncate_to_char_boundary(s: &mut String, mut max: usize) {
+    if max >= s.len() {
+        return;
+    }
+    while !s.is_char_boundary(max) {
+        max -= 1;
+    }
+    s.truncate(max);
 }
 
 #[derive(Debug)]
@@ -149,14 +242,14 @@ pub(crate) struct MediaRef<'a> {
 pub(crate) fn extract_media_refs(text: &str) -> Vec<MediaRef> {
     let mut out = vec![];
 
-    for caps in IMG_TAG.captures_iter(text) {
+    for caps in HTML_MEDIA_TAGS.captures_iter(text) {
         let fname = caps
             .get(1)
             .or_else(|| caps.get(2))
             .or_else(|| caps.get(3))
             .unwrap()
             .as_str();
-        let fname_decoded = fname.into();
+        let fname_decoded = decode_entities(fname);
         out.push(MediaRef {
             full_ref: caps.get(0).unwrap().as_str(),
             fname,
@@ -179,51 +272,81 @@ pub(crate) fn extract_media_refs(text: &str) -> Vec<MediaRef> {
     out
 }
 
-fn tts_tag_from_string<'a>(field_text: &'a str, args: &'a str) -> AVTag {
-    let mut other_args = vec![];
-    let mut split_args = args.split_ascii_whitespace();
-    let lang = split_args.next().unwrap_or("");
-    let mut voices = None;
-    let mut speed = 1.0;
+/// Calls `replacer` for every media reference in `text`, and optionally
+/// replaces it with something else. [None] if no reference was found.
+pub(crate) fn replace_media_refs(
+    text: &str,
+    mut replacer: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    let mut rep = |caps: &Captures| {
+        let whole_match = caps.get(0).unwrap().as_str();
+        let old_name = caps.iter().skip(1).find_map(|g| g).unwrap().as_str();
+        let old_name_decoded = decode_entities(old_name);
 
-    for remaining_arg in split_args {
-        if remaining_arg.starts_with("voices=") {
-            voices = remaining_arg
-                .split('=')
-                .nth(1)
-                .map(|voices| voices.split(',').map(ToOwned::to_owned).collect());
-        } else if remaining_arg.starts_with("speed=") {
-            speed = remaining_arg
-                .split('=')
-                .nth(1)
-                .unwrap()
-                .parse()
-                .unwrap_or(1.0);
+        if let Some(mut new_name) = replacer(&old_name_decoded) {
+            if matches!(old_name_decoded, Cow::Owned(_)) {
+                new_name = htmlescape::encode_minimal(&new_name);
+            }
+            whole_match.replace(old_name, &new_name)
         } else {
-            other_args.push(remaining_arg.to_owned());
+            whole_match.to_owned()
         }
-    }
+    };
 
-    AVTag::TextToSpeech {
-        field_text: strip_html_for_tts(field_text).into(),
-        lang: lang.into(),
-        voices: voices.unwrap_or_else(Vec::new),
-        speed,
-        other_args,
-    }
+    HTML_MEDIA_TAGS
+        .replace_all(text, &mut rep)
+        .map_cow(|s| AV_TAGS.replace_all(s, &mut rep))
+        .get_owned()
 }
 
-pub fn strip_html_preserving_image_filenames(html: &str) -> Cow<str> {
-    let without_fnames = IMG_TAG.replace_all(html, r" ${1}${2}${3} ");
-    let without_html = HTML.replace_all(&without_fnames, "");
-    // no changes?
-    if let Cow::Borrowed(b) = without_html {
-        if ptr::eq(b, html) {
-            return Cow::Borrowed(html);
-        }
-    }
-    // make borrow checker happy
-    without_html.into_owned().into()
+pub(crate) fn extract_underscored_css_imports(text: &str) -> Vec<&str> {
+    UNDERSCORED_CSS_IMPORTS
+        .captures_iter(text)
+        .map(|caps| {
+            caps.get(1)
+                .or_else(|| caps.get(2))
+                .or_else(|| caps.get(3))
+                .or_else(|| caps.get(4))
+                .or_else(|| caps.get(5))
+                .unwrap()
+                .as_str()
+        })
+        .collect()
+}
+
+pub(crate) fn extract_underscored_references(text: &str) -> Vec<&str> {
+    UNDERSCORED_REFERENCES
+        .captures_iter(text)
+        .map(|caps| {
+            caps.get(1)
+                .or_else(|| caps.get(2))
+                .or_else(|| caps.get(3))
+                .unwrap()
+                .as_str()
+        })
+        .collect()
+}
+
+pub fn strip_html_preserving_media_filenames(html: &str) -> Cow<str> {
+    HTML_MEDIA_TAGS
+        .replace_all(html, r" ${1}${2}${3} ")
+        .map_cow(strip_html)
+}
+
+pub fn contains_media_tag(html: &str) -> bool {
+    HTML_MEDIA_TAGS.is_match(html)
+}
+
+#[allow(dead_code)]
+pub(crate) fn sanitize_html(html: &str) -> String {
+    ammonia::clean(html)
+}
+
+pub(crate) fn sanitize_html_no_images(html: &str) -> String {
+    ammonia::Builder::default()
+        .rm_tags(&["img"])
+        .clean(html)
+        .to_string()
 }
 
 pub(crate) fn normalize_to_nfc(s: &str) -> Cow<str> {
@@ -237,17 +360,6 @@ pub(crate) fn normalize_to_nfc(s: &str) -> Cow<str> {
 pub(crate) fn ensure_string_in_nfc(s: &mut String) {
     if !is_nfc(s) {
         *s = s.chars().nfc().collect()
-    }
-}
-
-/// True if search is equal to text, folding case.
-/// Supports '*' to match 0 or more characters.
-pub(crate) fn matches_wildcard(text: &str, search: &str) -> bool {
-    if search.contains('*') {
-        let search = format!("^(?i){}$", regex::escape(search).replace(r"\*", ".*"));
-        Regex::new(&search).unwrap().is_match(text)
-    } else {
-        uni_eq(text, search)
     }
 }
 
@@ -269,46 +381,162 @@ pub(crate) fn without_combining(s: &str) -> Cow<str> {
         .into()
 }
 
-/// Escape text, converting glob characters to regex syntax, then return.
-pub(crate) fn text_to_re(glob: &str) -> String {
+/// Check if string contains an unescaped wildcard.
+pub(crate) fn is_glob(txt: &str) -> bool {
+    // even number of \s followed by a wildcard
     lazy_static! {
-        static ref ESCAPED: Regex = Regex::new(r"(\\\\)?\\\*").unwrap();
-        static ref GLOB: Regex = Regex::new(r"(\\\\)?[_%]").unwrap();
+        static ref RE: Regex = Regex::new(
+            r#"(?x)
+            (?:^|[^\\])     # not a backslash
+            (?:\\\\)*       # even number of backslashes
+            [*_]            # wildcard
+            "#
+        )
+        .unwrap();
     }
 
-    let escaped = regex::escape(glob);
+    RE.is_match(txt)
+}
 
-    let text = ESCAPED.replace_all(&escaped, |caps: &Captures| {
-        if caps.get(0).unwrap().as_str().len() == 2 {
-            ".*"
-        } else {
-            r"\*"
+/// Convert to a RegEx respecting Anki wildcards.
+pub(crate) fn to_re(txt: &str) -> Cow<str> {
+    to_custom_re(txt, ".")
+}
+
+/// Convert Anki style to RegEx using the provided wildcard.
+pub(crate) fn to_custom_re<'a>(txt: &'a str, wildcard: &str) -> Cow<'a, str> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"\\?.").unwrap();
+    }
+    RE.replace_all(txt, |caps: &Captures| {
+        let s = &caps[0];
+        match s {
+            r"\\" | r"\*" => s.to_string(),
+            r"\_" => "_".to_string(),
+            "*" => format!("{}*", wildcard),
+            "_" => wildcard.to_string(),
+            s => regex::escape(s),
         }
-    });
+    })
+}
 
-    let text2 = GLOB.replace_all(&text, |caps: &Captures| {
-        match caps.get(0).unwrap().as_str() {
-            "_" => ".",
-            "%" => ".*",
-            other => {
-                // strip off the escaping char
-                &other[2..]
+/// Convert to SQL respecting Anki wildcards.
+pub(crate) fn to_sql(txt: &str) -> Cow<str> {
+    // escape sequences and unescaped special characters which need conversion
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"\\[\\*]|[*%]").unwrap();
+    }
+    RE.replace_all(txt, |caps: &Captures| {
+        let s = &caps[0];
+        match s {
+            r"\\" => r"\\",
+            r"\*" => "*",
+            "*" => "%",
+            "%" => r"\%",
+            _ => unreachable!(),
+        }
+    })
+}
+
+/// Unescape everything.
+pub(crate) fn to_text(txt: &str) -> Cow<str> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"\\(.)").unwrap();
+    }
+    RE.replace_all(txt, "$1")
+}
+
+/// Escape Anki wildcards and the backslash for escaping them: \*_
+pub(crate) fn escape_anki_wildcards(txt: &str) -> String {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"[\\*_]").unwrap();
+    }
+    RE.replace_all(txt, r"\$0").into()
+}
+
+/// Escape Anki wildcards unless it's _*
+pub(crate) fn escape_anki_wildcards_for_search_node(txt: &str) -> String {
+    if txt == "_*" {
+        txt.to_string()
+    } else {
+        escape_anki_wildcards(txt)
+    }
+}
+
+/// Return a function to match input against `search`,
+/// which may contain wildcards.
+pub(crate) fn glob_matcher(search: &str) -> impl Fn(&str) -> bool + '_ {
+    let mut regex = None;
+    let mut cow = None;
+    if is_glob(search) {
+        regex = Some(Regex::new(&format!("^(?i){}$", to_re(search))).unwrap());
+    } else {
+        cow = Some(to_text(search));
+    }
+
+    move |text| {
+        if let Some(r) = &regex {
+            r.is_match(text)
+        } else {
+            uni_eq(text, cow.as_ref().unwrap())
+        }
+    }
+}
+
+lazy_static! {
+    pub(crate) static ref REMOTE_FILENAME: Regex = Regex::new("(?i)^https?://").unwrap();
+}
+
+/// IRI-encode unescaped local paths in HTML fragment.
+pub(crate) fn encode_iri_paths(unescaped_html: &str) -> Cow<str> {
+    transform_html_paths(unescaped_html, |fname| {
+        PctString::encode(fname.chars(), IriReserved::Segment)
+            .into_string()
+            .into()
+    })
+}
+
+/// URI-decode escaped local paths in HTML fragment.
+pub(crate) fn decode_iri_paths(escaped_html: &str) -> Cow<str> {
+    transform_html_paths(escaped_html, |fname| {
+        match PctStr::new(fname) {
+            Ok(s) => s.decode().into(),
+            Err(_e) => {
+                // invalid percent encoding; return unchanged
+                fname.into()
             }
         }
-        .to_string()
-    });
+    })
+}
 
-    text2.into()
+/// Apply a transform to local filename references in tags like IMG.
+/// Required at display time, as Anki unfortunately stores the references
+/// in unencoded form in the database.
+fn transform_html_paths<F>(html: &str, transform: F) -> Cow<str>
+where
+    F: Fn(&str) -> Cow<str>,
+{
+    HTML_MEDIA_TAGS.replace_all(html, |caps: &Captures| {
+        let fname = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .or_else(|| caps.get(3))
+            .unwrap()
+            .as_str();
+        let full = caps.get(0).unwrap().as_str();
+        if REMOTE_FILENAME.is_match(fname) {
+            full.into()
+        } else {
+            full.replace(fname, &transform(fname))
+        }
+    })
 }
 
 #[cfg(test)]
 mod test {
-    use super::matches_wildcard;
-    use crate::text::without_combining;
-    use crate::text::{
-        extract_av_tags, strip_av_tags, strip_html, strip_html_preserving_image_filenames, AVTag,
-    };
     use std::borrow::Cow;
+
+    use super::*;
 
     #[test]
     fn stripping() {
@@ -317,52 +545,80 @@ mod test {
         assert_eq!(strip_html("so<SCRIPT>t<b>e</b>st</script>me"), "some");
 
         assert_eq!(
-            strip_html_preserving_image_filenames("<img src=foo.jpg>"),
+            strip_html_preserving_media_filenames("<img src=foo.jpg>"),
             " foo.jpg "
         );
         assert_eq!(
-            strip_html_preserving_image_filenames("<img src='foo.jpg'><html>"),
+            strip_html_preserving_media_filenames("<img src='foo.jpg'><html>"),
             " foo.jpg "
         );
-        assert_eq!(strip_html_preserving_image_filenames("<html>"), "");
-    }
-
-    #[test]
-    fn audio() {
-        let s =
-            "abc[sound:fo&amp;o.mp3]def[anki:tts][en_US voices=Bob,Jane speed=1.2]foo<br>1&gt;2[/anki:tts]gh";
-        assert_eq!(strip_av_tags(s), "abcdefgh");
-
-        let (text, tags) = extract_av_tags(s, true);
-        assert_eq!(text, "abc[anki:play:q:0]def[anki:play:q:1]gh");
-
-        assert_eq!(
-            tags,
-            vec![
-                AVTag::SoundOrVideo("fo&o.mp3".into()),
-                AVTag::TextToSpeech {
-                    field_text: "foo 1>2".into(),
-                    lang: "en_US".into(),
-                    voices: vec!["Bob".into(), "Jane".into()],
-                    other_args: vec![],
-                    speed: 1.2
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn wildcard() {
-        assert_eq!(matches_wildcard("foo", "bar"), false);
-        assert_eq!(matches_wildcard("foo", "Foo"), true);
-        assert_eq!(matches_wildcard("foo", "F*"), true);
-        assert_eq!(matches_wildcard("foo", "F*oo"), true);
-        assert_eq!(matches_wildcard("foo", "b*"), false);
+        assert_eq!(strip_html_preserving_media_filenames("<html>"), "");
     }
 
     #[test]
     fn combining() {
         assert!(matches!(without_combining("test"), Cow::Borrowed(_)));
         assert!(matches!(without_combining("Über"), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn conversion() {
+        assert_eq!(&to_re(r"[te\*st]"), r"\[te\*st\]");
+        assert_eq!(&to_custom_re("f_o*", r"\d"), r"f\do\d*");
+        assert_eq!(&to_sql("%f_o*"), r"\%f_o%");
+        assert_eq!(&to_text(r"\*\_*_"), "*_*_");
+        assert!(is_glob(r"\\\\_"));
+        assert!(!is_glob(r"\\\_"));
+        assert!(glob_matcher(r"foo\*bar*")("foo*bar123"));
+    }
+
+    #[test]
+    fn extracting() {
+        assert_eq!(
+            extract_underscored_css_imports(concat!(
+                "@IMPORT '_foo.css'\n",
+                "@import \"_bar.css\"\n",
+                "@import '_baz.css'\n",
+                "@import 'nope.css'\n",
+                "url(_foo.css)\n",
+                "URL(\"_bar.css\")\n",
+                "@import url('_baz.css')\n",
+                "url('nope.css')\n",
+            )),
+            vec!["_foo.css", "_bar.css", "_baz.css", "_foo.css", "_bar.css", "_baz.css",]
+        );
+        assert_eq!(
+            extract_underscored_references(concat!(
+                "<img src=\"_foo.jpg\">",
+                "<object data=\"_bar\">",
+                "\"_baz.js\"",
+                "\"nope.js\"",
+                "<img src=_foo.jpg>",
+                "<object data=_bar>",
+                "'_baz.js'",
+            )),
+            vec!["_foo.jpg", "_bar", "_baz.js", "_foo.jpg", "_bar", "_baz.js",]
+        );
+    }
+
+    #[test]
+    fn replacing() {
+        assert_eq!(
+            &replace_media_refs("<img src=foo.jpg>[sound:bar.mp3]<img src=baz.jpg>", |s| {
+                (s != "baz.jpg").then(|| "spam".to_string())
+            })
+            .unwrap(),
+            "<img src=spam>[sound:spam]<img src=baz.jpg>",
+        );
+    }
+
+    #[test]
+    fn truncate() {
+        let mut s = "日本語".to_string();
+        truncate_to_char_boundary(&mut s, 6);
+        assert_eq!(&s, "日本");
+        let mut s = "日本語".to_string();
+        truncate_to_char_boundary(&mut s, 1);
+        assert_eq!(&s, "");
     }
 }

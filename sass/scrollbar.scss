@@ -1,0 +1,49 @@
+/* Copyright: Ankitects Pty Ltd and contributors
+ * License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html */
+
+@use "vars";
+@use "fusion-vars";
+
+@mixin custom {
+    ::-webkit-scrollbar {
+        background-color: var(--window-bg);
+
+        &:horizontal {
+            height: 12px;
+        }
+
+        &:vertical {
+            width: 12px;
+        }
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: var(--scrollbar-bg);
+        border-radius: 5px;
+
+        &:horizontal {
+            min-width: 50px;
+        }
+
+        &:vertical {
+            min-height: 50px;
+        }
+
+        &:hover {
+            background: var(--scrollbar-hover-bg);
+        }
+
+        &:active {
+            background: var(--scrollbar-active-bg);
+        }
+    }
+
+    ::-webkit-scrollbar-corner {
+        background-color: var(--window-bg);
+    }
+
+    ::-webkit-scrollbar-track {
+        border-radius: 5px;
+        background-color: transparent;
+    }
+}

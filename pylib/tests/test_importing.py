@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 # coding: utf-8
 
 import os
@@ -22,7 +25,7 @@ srcCards = None
 
 
 def clear_tempfile(tf):
-    """ https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file """
+    """https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file"""
     try:
         tf.close()
         os.unlink(tf.name)
@@ -35,7 +38,7 @@ def test_anki2_mediadupes():
     # add a note that references a sound
     n = col.newNote()
     n["Front"] = "[sound:foo.mp3]"
-    mid = n.model()["id"]
+    mid = n.note_type()["id"]
     col.addNote(n)
     # add that sound to media folder
     with open(os.path.join(col.media.dir(), "foo.mp3"), "w") as note:
@@ -51,7 +54,7 @@ def test_anki2_mediadupes():
     imp = Anki2Importer(empty, col.path)
     imp.run()
     assert os.listdir(empty.media.dir()) == ["foo.mp3"]
-    n = empty.getNote(empty.db.scalar("select id from notes"))
+    n = empty.get_note(empty.db.scalar("select id from notes"))
     assert "foo.mp3" in n.fields[0]
     # if the local file content is different, and import should trigger a
     # rename
@@ -60,8 +63,8 @@ def test_anki2_mediadupes():
         note.write("bar")
     imp = Anki2Importer(empty, col.path)
     imp.run()
-    assert sorted(os.listdir(empty.media.dir())) == ["foo.mp3", "foo_%s.mp3" % mid]
-    n = empty.getNote(empty.db.scalar("select id from notes"))
+    assert sorted(os.listdir(empty.media.dir())) == ["foo.mp3", f"foo_{mid}.mp3"]
+    n = empty.get_note(empty.db.scalar("select id from notes"))
     assert "_" in n.fields[0]
     # if the localized media file already exists, we rewrite the note and
     # media
@@ -70,15 +73,15 @@ def test_anki2_mediadupes():
         note.write("bar")
     imp = Anki2Importer(empty, col.path)
     imp.run()
-    assert sorted(os.listdir(empty.media.dir())) == ["foo.mp3", "foo_%s.mp3" % mid]
-    assert sorted(os.listdir(empty.media.dir())) == ["foo.mp3", "foo_%s.mp3" % mid]
-    n = empty.getNote(empty.db.scalar("select id from notes"))
+    assert sorted(os.listdir(empty.media.dir())) == ["foo.mp3", f"foo_{mid}.mp3"]
+    assert sorted(os.listdir(empty.media.dir())) == ["foo.mp3", f"foo_{mid}.mp3"]
+    n = empty.get_note(empty.db.scalar("select id from notes"))
     assert "_" in n.fields[0]
 
 
 def test_apkg():
     col = getEmptyCol()
-    apkg = str(os.path.join(testDir, "support/media.apkg"))
+    apkg = str(os.path.join(testDir, "support", "media.apkg"))
     imp = AnkiPackageImporter(col, apkg)
     assert os.listdir(col.media.dir()) == []
     imp.run()
@@ -112,9 +115,9 @@ def test_anki2_diffmodel_templates():
     imp.dupeOnSchemaChange = True
     imp.run()
     # collection should contain the note we imported
-    assert dst.noteCount() == 1
+    assert dst.note_count() == 1
     # the front template should contain the text added in the 2nd package
-    tcid = dst.findCards("")[0]  # only 1 note in collection
+    tcid = dst.find_cards("")[0]  # only 1 note in collection
     tnote = dst.getCard(tcid).note()
     assert "Changed Front Template" in tnote.cards()[0].template()["qfmt"]
 
@@ -135,7 +138,7 @@ def test_anki2_updates():
     assert imp.added == 0
     assert imp.updated == 0
     # importing a newer note should update
-    assert dst.noteCount() == 1
+    assert dst.note_count() == 1
     assert dst.db.scalar("select flds from notes").startswith("hello")
     col = getUpgradeDeckPath("update2.apkg")
     imp = AnkiPackageImporter(dst, col)
@@ -143,13 +146,13 @@ def test_anki2_updates():
     assert imp.dupes == 0
     assert imp.added == 0
     assert imp.updated == 1
-    assert dst.noteCount() == 1
+    assert dst.note_count() == 1
     assert dst.db.scalar("select flds from notes").startswith("goodbye")
 
 
 def test_csv():
     col = getEmptyCol()
-    file = str(os.path.join(testDir, "support/text-2fields.txt"))
+    file = str(os.path.join(testDir, "support", "text-2fields.txt"))
     i = TextImporter(col, file)
     i.initMapping()
     i.run()
@@ -162,8 +165,8 @@ def test_csv():
     assert len(i.log) == 10
     assert i.total == 5
     # but importing should not clobber tags if they're unmapped
-    n = col.getNote(col.db.scalar("select id from notes"))
-    n.addTag("test")
+    n = col.get_note(col.db.scalar("select id from notes"))
+    n.add_tag("test")
     n.flush()
     i.run()
     n.load()
@@ -173,12 +176,12 @@ def test_csv():
     i.run()
     assert i.total == 0
     # and if dupes mode, will reimport everything
-    assert col.cardCount() == 5
+    assert col.card_count() == 5
     i.importMode = 2
     i.run()
     # includes repeated field
     assert i.total == 6
-    assert col.cardCount() == 11
+    assert col.card_count() == 11
     col.close()
 
 
@@ -186,7 +189,7 @@ def test_csv2():
     col = getEmptyCol()
     mm = col.models
     m = mm.current()
-    note = mm.newField("Three")
+    note = mm.new_field("Three")
     mm.addField(m, note)
     mm.save(m)
     n = col.newNote()
@@ -195,7 +198,7 @@ def test_csv2():
     n["Three"] = "3"
     col.addNote(n)
     # an update with unmapped fields should not clobber those fields
-    file = str(os.path.join(testDir, "support/text-update.txt"))
+    file = str(os.path.join(testDir, "support", "text-update.txt"))
     i = TextImporter(col, file)
     i.initMapping()
     i.run()
@@ -210,14 +213,14 @@ def test_tsv_tag_modified():
     col = getEmptyCol()
     mm = col.models
     m = mm.current()
-    note = mm.newField("Top")
+    note = mm.new_field("Top")
     mm.addField(m, note)
     mm.save(m)
     n = col.newNote()
     n["Front"] = "1"
     n["Back"] = "2"
     n["Top"] = "3"
-    n.addTag("four")
+    n.add_tag("four")
     col.addNote(n)
 
     # https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
@@ -246,15 +249,15 @@ def test_tsv_tag_multiple_tags():
     col = getEmptyCol()
     mm = col.models
     m = mm.current()
-    note = mm.newField("Top")
+    note = mm.new_field("Top")
     mm.addField(m, note)
     mm.save(m)
     n = col.newNote()
     n["Front"] = "1"
     n["Back"] = "2"
     n["Top"] = "3"
-    n.addTag("four")
-    n.addTag("five")
+    n.add_tag("four")
+    n.add_tag("five")
     col.addNote(n)
 
     # https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
@@ -280,7 +283,7 @@ def test_csv_tag_only_if_modified():
     col = getEmptyCol()
     mm = col.models
     m = mm.current()
-    note = mm.newField("Left")
+    note = mm.new_field("Left")
     mm.addField(m, note)
     mm.save(m)
     n = col.newNote()
@@ -309,13 +312,13 @@ def test_csv_tag_only_if_modified():
 @pytest.mark.filterwarnings("ignore:Using or importing the ABCs")
 def test_supermemo_xml_01_unicode():
     col = getEmptyCol()
-    file = str(os.path.join(testDir, "support/supermemo1.xml"))
+    file = str(os.path.join(testDir, "support", "supermemo1.xml"))
     i = SupermemoXmlImporter(col, file)
     # i.META.logToStdOutput = True
     i.run()
     assert i.total == 1
     cid = col.db.scalar("select id from cards")
-    c = col.getCard(cid)
+    c = col.get_card(cid)
     # Applies A Factor-to-E Factor conversion
     assert c.factor == 2879
     assert c.reps == 7
@@ -324,10 +327,10 @@ def test_supermemo_xml_01_unicode():
 
 def test_mnemo():
     col = getEmptyCol()
-    file = str(os.path.join(testDir, "support/mnemo.db"))
+    file = str(os.path.join(testDir, "support", "mnemo.db"))
     i = MnemosyneImporter(col, file)
     i.run()
-    assert col.cardCount() == 7
+    assert col.card_count() == 7
     assert "a_longer_tag" in col.tags.all()
     assert col.db.scalar(f"select count() from cards where type = {CARD_TYPE_NEW}") == 1
     col.close()

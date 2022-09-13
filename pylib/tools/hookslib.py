@@ -2,10 +2,12 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 """
-Code for generating parts of hooks.py
+Code for generating hooks.
 """
 
-import re
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from operator import attrgetter
 from typing import List, Optional
@@ -19,7 +21,7 @@ class Hook:
     name: str
     # string of the typed arguments passed to the callback, eg
     # ["kind: str", "val: int"]
-    args: List[str] = None
+    args: list[str] = None
     # string of the return type. if set, hook is a filter.
     return_type: Optional[str] = None
     # if add-ons may be relying on the legacy hook name, add it here
@@ -34,13 +36,12 @@ class Hook:
         types = []
         for arg in self.args or []:
             (name, type) = arg.split(":")
-            if "." in type:
-                type = '"' + type.strip() + '"'
+            type = f'"{type.strip()}"'
             types.append(type)
         types_str = ", ".join(types)
         return f"Callable[[{types_str}], {self.return_type or 'None'}]"
 
-    def arg_names(self) -> List[str]:
+    def arg_names(self) -> list[str]:
         names = []
         for arg in self.args or []:
             if not arg:
@@ -59,11 +60,11 @@ class Hook:
             return "hook"
 
     def classname(self) -> str:
-        return "_" + stringcase.pascalcase(self.full_name())
+        return f"_{stringcase.pascalcase(self.full_name())}"
 
     def list_code(self) -> str:
         return f"""\
-    _hooks: List[{self.callable()}] = []
+    _hooks: list[{self.callable()}] = []
 """
 
     def code(self) -> str:
@@ -76,13 +77,13 @@ class Hook:
 class {self.classname()}:
 {classdoc}{self.list_code()}
     
-    def append(self, cb: {self.callable()}) -> None:
+    def append(self, callback: {self.callable()}) -> None:
         '''{appenddoc}'''
-        self._hooks.append(cb)
+        self._hooks.append(callback)
 
-    def remove(self, cb: {self.callable()}) -> None:
-        if cb in self._hooks:
-            self._hooks.remove(cb)
+    def remove(self, callback: {self.callable()}) -> None:
+        if callback in self._hooks:
+            self._hooks.remove(callback)
 
     def count(self) -> int:
         return len(self._hooks)
@@ -123,9 +124,9 @@ class {self.classname()}:
         if self.legacy_hook:
             out += f"""\
         # legacy support
-        runHook({self.legacy_args()})
+        anki.hooks.runHook({self.legacy_args()})
 """
-        return out + "\n\n"
+        return f"{out}\n\n"
 
     def filter_fire_code(self) -> str:
         arg_names = self.arg_names()
@@ -143,29 +144,26 @@ class {self.classname()}:
         if self.legacy_hook:
             out += f"""\
         # legacy support
-        {arg_names[0]} = runFilter({self.legacy_args()})
+        {arg_names[0]} = anki.hooks.runFilter({self.legacy_args()})
 """
 
         out += f"""\
         return {arg_names[0]}
 """
-        return out + "\n\n"
+        return f"{out}\n\n"
 
 
-def update_file(path: str, hooks: List[Hook]):
+def write_file(path: str, hooks: list[Hook], prefix: str, suffix: str):
     hooks.sort(key=attrgetter("name"))
-    code = ""
+    code = f"{prefix}\n"
     for hook in hooks:
         code += hook.code()
 
-    with open(path) as file:
-        orig = file.read()
+    code += f"\n{suffix}"
 
-    new = re.sub(
-        "(?s)# @@AUTOGEN@@.*?# @@AUTOGEN@@\n",
-        f"# @@AUTOGEN@@\n\n{code}# @@AUTOGEN@@\n",
-        orig,
-    )
-
+    # work around issue with latest black
+    if sys.platform == "win32" and "HOME" in os.environ:
+        os.environ["USERPROFILE"] = os.environ["HOME"]
     with open(path, "wb") as file:
-        file.write(new.encode("utf8"))
+        file.write(code.encode("utf8"))
+    subprocess.run([sys.executable, "-m", "black", "-q", path], check=True)

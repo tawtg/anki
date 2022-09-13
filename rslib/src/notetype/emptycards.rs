@@ -1,29 +1,24 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use std::{collections::HashSet, fmt::Write};
+
 use super::{
-    cardgen::group_generated_cards_by_note, CardGenContext, NoteType, NoteTypeID, NoteTypeKind,
+    cardgen::group_generated_cards_by_note, CardGenContext, Notetype, NotetypeId, NotetypeKind,
 };
-use crate::{
-    card::CardID,
-    collection::Collection,
-    err::Result,
-    i18n::{tr_args, TR},
-    notes::NoteID,
-};
-use std::collections::HashSet;
-use std::fmt::Write;
+use crate::{card::CardId, collection::Collection, error::Result, notes::NoteId};
 
 pub struct EmptyCardsForNote {
-    pub nid: NoteID,
+    pub nid: NoteId,
     // (ordinal, card id)
-    pub empty: Vec<(u32, CardID)>,
+    pub empty: Vec<(u32, CardId)>,
     pub current_count: usize,
 }
 
 impl Collection {
-    fn empty_cards_for_notetype(&self, nt: &NoteType) -> Result<Vec<EmptyCardsForNote>> {
-        let ctx = CardGenContext::new(nt, self.usn()?);
+    fn empty_cards_for_notetype(&self, nt: &Notetype) -> Result<Vec<EmptyCardsForNote>> {
+        let last_deck = self.get_last_deck_added_to_for_notetype(nt.id);
+        let ctx = CardGenContext::new(nt, last_deck, self.usn()?);
         let existing_cards = self.storage.existing_cards_for_notetype(nt.id)?;
         let by_note = group_generated_cards_by_note(existing_cards);
         let mut out = Vec::with_capacity(by_note.len());
@@ -55,7 +50,7 @@ impl Collection {
         Ok(out)
     }
 
-    pub fn empty_cards(&mut self) -> Result<Vec<(NoteTypeID, Vec<EmptyCardsForNote>)>> {
+    pub fn empty_cards(&mut self) -> Result<Vec<(NotetypeId, Vec<EmptyCardsForNote>)>> {
         self.storage
             .get_all_notetype_names()?
             .into_iter()
@@ -69,7 +64,7 @@ impl Collection {
     /// Create a report on empty cards. Mutates the provided data to sort ordinals.
     pub fn empty_cards_report(
         &mut self,
-        empty: &mut [(NoteTypeID, Vec<EmptyCardsForNote>)],
+        empty: &mut [(NotetypeId, Vec<EmptyCardsForNote>)],
     ) -> Result<String> {
         let nts = self.get_all_notetypes()?;
         let mut buf = String::new();
@@ -79,10 +74,7 @@ impl Collection {
                 write!(
                     buf,
                     "<div><b>{}</b></div><ol>",
-                    self.i18n.trn(
-                        TR::EmptyCardsForNoteType,
-                        tr_args!["notetype"=>nt.name.clone()],
-                    )
+                    self.tr.empty_cards_for_note_type(nt.name.clone())
                 )
                 .unwrap();
 
@@ -90,7 +82,7 @@ impl Collection {
                     note.empty.sort_unstable();
                     let templates = match nt.config.kind() {
                         // "Front, Back"
-                        NoteTypeKind::Normal => note
+                        NotetypeKind::Normal => note
                             .empty
                             .iter()
                             .map(|(ord, _)| {
@@ -102,9 +94,9 @@ impl Collection {
                             .collect::<Vec<_>>()
                             .join(", "),
                         // "Cloze 1, 3"
-                        NoteTypeKind::Cloze => format!(
+                        NotetypeKind::Cloze => format!(
                             "{} {}",
-                            self.i18n.tr(TR::NotetypesClozeName),
+                            self.tr.notetypes_cloze_name(),
                             note.empty
                                 .iter()
                                 .map(|(ord, _)| (ord + 1).to_string())
@@ -122,13 +114,10 @@ impl Collection {
                         "<li class={}>[anki:nid:{}] {}</li>",
                         class,
                         note.nid,
-                        self.i18n.trn(
-                            TR::EmptyCardsCountLine,
-                            tr_args![
-                            "empty_count"=>note.empty.len(),
-                            "existing_count"=>note.current_count,
-                            "template_names"=>templates
-                            ],
+                        self.tr.empty_cards_count_line(
+                            note.empty.len(),
+                            note.current_count,
+                            templates
                         )
                     )
                     .unwrap();

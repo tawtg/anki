@@ -2,20 +2,20 @@
 # License: GNU GPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 # pytype: disable=attribute-error
 # type: ignore
+# pylint: disable=C
 
 import re
 import sys
 import time
 import unicodedata
 from string import capwords
-from typing import List, Optional, Union
+from typing import Optional, Union
 from xml.dom import minidom
 from xml.dom.minidom import Element, Text
 
 from anki.collection import Collection
 from anki.importing.noteimp import ForeignCard, ForeignNote, NoteImporter
-from anki.lang import _, ngettext
-from anki.stdmodels import addBasicModel
+from anki.stdmodels import _legacy_add_basic_model
 
 
 class SmartDict(dict):
@@ -87,7 +87,7 @@ class SupermemoXmlImporter(NoteImporter):
         """Initialize internal varables.
         Pameters to be exposed to GUI are stored in self.META"""
         NoteImporter.__init__(self, col, file)
-        m = addBasicModel(self.col)
+        m = _legacy_add_basic_model(self.col)
         m["name"] = "Supermemo"
         self.col.models.save(m)
         self.initMapping()
@@ -185,7 +185,7 @@ class SupermemoXmlImporter(NoteImporter):
 
     ## DEFAULT IMPORTER METHODS
 
-    def foreignNotes(self) -> List[ForeignNote]:
+    def foreignNotes(self) -> list[ForeignNote]:
 
         # Load file and parse it by minidom
         self.loadSource(self.file)
@@ -198,9 +198,7 @@ class SupermemoXmlImporter(NoteImporter):
 
         # Return imported cards
         self.total = len(self.notes)
-        self.log.append(
-            ngettext("%d card imported.", "%d cards imported.", self.total) % self.total
-        )
+        self.log.append("%d cards imported." % self.total)
         return self.notes
 
     def fields(self) -> int:
@@ -261,16 +259,11 @@ class SupermemoXmlImporter(NoteImporter):
             #  clean whitespaces
             #  set Capital letters for first char of the word
             tmp = list(
-                set(
-                    [
-                        re.sub(r"(\[[0-9]+\])", " ", i).replace("_", " ")
-                        for i in item.lTitle
-                    ]
-                )
+                {re.sub(r"(\[[0-9]+\])", " ", i).replace("_", " ") for i in item.lTitle}
             )
-            tmp = list(set([re.sub(r"(\W)", " ", i) for i in tmp]))
-            tmp = list(set([re.sub("^[0-9 ]+$", "", i) for i in tmp]))
-            tmp = list(set([capwords(i).replace(" ", "") for i in tmp]))
+            tmp = list({re.sub(r"(\W)", " ", i) for i in tmp})
+            tmp = list({re.sub("^[0-9 ]+$", "", i) for i in tmp})
+            tmp = list({capwords(i).replace(" ", "") for i in tmp})
             tags = [j[0].lower() + j[1:] for j in tmp if j.strip() != ""]
 
             note.tags += tags
@@ -295,7 +288,7 @@ class SupermemoXmlImporter(NoteImporter):
                     + " - "
                     + dLevels[level].ljust(9)
                     + " -\t"
-                    + _(text)
+                    + text
                 )
 
     # OPEN AND LOAD
@@ -313,13 +306,13 @@ class SupermemoXmlImporter(NoteImporter):
 
         try:
             return urllib.request.urlopen(source)
-        except (IOError, OSError):
+        except OSError:
             pass
 
         # try to open with native open function (if source is pathname)
         try:
-            return open(source)
-        except (IOError, OSError):
+            return open(source, encoding="utf8")
+        except OSError:
             pass
 
         # treat source as string
@@ -331,7 +324,7 @@ class SupermemoXmlImporter(NoteImporter):
         """Load source file and parse with xml.dom.minidom"""
         self.source = source
         self.logger("Load started...")
-        sock = open(self.source)
+        sock = open(self.source, encoding="utf8")
         self.xmldoc = minidom.parse(sock).documentElement
         sock.close()
         self.logger("Load done.")
@@ -422,7 +415,7 @@ class SupermemoXmlImporter(NoteImporter):
                     self.logger("-" * 45, level=3)
                     for key in list(smel.keys()):
                         self.logger(
-                            "\t%s %s" % ((key + ":").ljust(15), smel[key]), level=3
+                            "\t{} {}".format((key + ":").ljust(15), smel[key]), level=3
                         )
             else:
                 self.logger("Element skiped  \t- no valid Q and A ...", level=3)

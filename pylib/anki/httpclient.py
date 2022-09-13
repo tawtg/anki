@@ -5,48 +5,49 @@
 Wrapper for requests that adds a callback for tracking upload/download progress.
 """
 
+from __future__ import annotations
+
 import io
 import os
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable
 
 import requests
 from requests import Response
+
+from anki._legacy import DeprecatedNamesMixin
 
 HTTP_BUF_SIZE = 64 * 1024
 
 ProgressCallback = Callable[[int, int], None]
 
 
-class HttpClient:
+class HttpClient(DeprecatedNamesMixin):
 
     verify = True
     timeout = 60
     # args are (upload_bytes_in_chunk, download_bytes_in_chunk)
-    progress_hook: Optional[ProgressCallback] = None
+    progress_hook: ProgressCallback | None = None
 
-    def __init__(self, progress_hook: Optional[ProgressCallback] = None) -> None:
+    def __init__(self, progress_hook: ProgressCallback | None = None) -> None:
         self.progress_hook = progress_hook
         self.session = requests.Session()
 
-    def __enter__(self):
+    def __enter__(self) -> HttpClient:
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: Any) -> None:
         self.close()
 
-    def close(self):
+    def close(self) -> None:
         if self.session:
             self.session.close()
             self.session = None
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.close()
 
-    def post(self, url: str, data: Any, headers: Optional[Dict[str, str]]) -> Response:
-        data = _MonitoringFile(
-            data, hook=self.progress_hook
-        )  # pytype: disable=wrong-arg-types
-        headers["User-Agent"] = self._agentName()
+    def post(self, url: str, data: bytes, headers: dict[str, str] | None) -> Response:
+        headers["User-Agent"] = self._agent_name()
         return self.session.post(
             url,
             data=data,
@@ -56,15 +57,15 @@ class HttpClient:
             verify=self.verify,
         )  # pytype: disable=wrong-arg-types
 
-    def get(self, url, headers=None) -> Response:
+    def get(self, url: str, headers: dict[str, str] = None) -> Response:
         if headers is None:
             headers = {}
-        headers["User-Agent"] = self._agentName()
+        headers["User-Agent"] = self._agent_name()
         return self.session.get(
             url, stream=True, headers=headers, timeout=self.timeout, verify=self.verify
         )
 
-    def streamContent(self, resp) -> bytes:
+    def stream_content(self, resp: Response) -> bytes:
         resp.raise_for_status()
 
         buf = io.BytesIO()
@@ -74,10 +75,10 @@ class HttpClient:
             buf.write(chunk)
         return buf.getvalue()
 
-    def _agentName(self) -> str:
-        from anki import version
+    def _agent_name(self) -> str:
+        from anki.buildinfo import version
 
-        return "Anki {}".format(version)
+        return f"Anki {version}"
 
 
 # allow user to accept invalid certs in work/school settings
@@ -87,15 +88,3 @@ if os.environ.get("ANKI_NOVERIFYSSL"):
     import warnings
 
     warnings.filterwarnings("ignore")
-
-
-class _MonitoringFile(io.BufferedReader):
-    def __init__(self, raw: io.RawIOBase, hook: Optional[ProgressCallback]):
-        io.BufferedReader.__init__(self, raw)
-        self.hook = hook
-
-    def read(self, size=-1) -> bytes:
-        data = io.BufferedReader.read(self, HTTP_BUF_SIZE)
-        if self.hook:
-            self.hook(len(data), 0)
-        return data

@@ -1,15 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use super::{CardTemplateConfig, CardTemplateProto};
 use crate::{
-    backend_proto::{CardTemplate as CardTemplateProto, CardTemplateConfig, OptionalUInt32},
-    decks::DeckID,
+    decks::DeckId,
+    error::{AnkiError, Result},
+    pb::UInt32,
     template::ParsedTemplate,
     timestamp::TimestampSecs,
     types::Usn,
 };
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CardTemplate {
     pub ord: Option<u32>,
     pub mtime_secs: TimestampSecs,
@@ -43,9 +45,9 @@ impl CardTemplate {
         }
     }
 
-    pub(crate) fn target_deck_id(&self) -> Option<DeckID> {
+    pub(crate) fn target_deck_id(&self) -> Option<DeckId> {
         if self.config.target_deck_id > 0 {
-            Some(DeckID(self.config.target_deck_id))
+            Some(DeckId(self.config.target_deck_id))
         } else {
             None
         }
@@ -55,11 +57,23 @@ impl CardTemplate {
 impl From<CardTemplate> for CardTemplateProto {
     fn from(t: CardTemplate) -> Self {
         CardTemplateProto {
-            ord: t.ord.map(|n| OptionalUInt32 { val: n }),
-            mtime_secs: t.mtime_secs.0 as u32,
+            ord: t.ord.map(|n| UInt32 { val: n }),
+            mtime_secs: t.mtime_secs.0,
             usn: t.usn.0,
             name: t.name,
             config: Some(t.config),
+        }
+    }
+}
+
+impl From<CardTemplateProto> for CardTemplate {
+    fn from(t: CardTemplateProto) -> Self {
+        CardTemplate {
+            ord: t.ord.map(|n| n.val),
+            mtime_secs: t.mtime_secs.into(),
+            usn: t.usn.into(),
+            name: t.name,
+            config: t.config.unwrap_or_default(),
         }
     }
 }
@@ -87,5 +101,23 @@ impl CardTemplate {
                 other: vec![],
             },
         }
+    }
+
+    /// Return whether the name is valid. Remove quote characters if it leads to a valid name.
+    pub(crate) fn fix_name(&mut self) -> Result<()> {
+        let bad_chars = |c| c == '"';
+        if self.name.is_empty() {
+            return Err(AnkiError::invalid_input("Empty template name"));
+        }
+        let trimmed = self.name.replace(bad_chars, "");
+        if trimmed.is_empty() {
+            return Err(AnkiError::invalid_input(
+                "Template name contain only quotes",
+            ));
+        }
+        if self.name.len() != trimmed.len() {
+            self.name = trimmed;
+        }
+        Ok(())
     }
 }

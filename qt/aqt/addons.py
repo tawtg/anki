@@ -1,5 +1,4 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 from __future__ import annotations
@@ -12,33 +11,39 @@ import zipfile
 from collections import defaultdict
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import IO, Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from datetime import datetime
+from pathlib import Path
+from typing import IO, Any, Callable, Iterable, Union
 from urllib.parse import parse_qs, urlparse
 from zipfile import ZipFile
 
 import jsonschema
 import markdown
 from jsonschema.exceptions import ValidationError
-from send2trash import send2trash
+from markdown.extensions import md_in_html
 
 import anki
+import anki.utils
 import aqt
 import aqt.forms
+import aqt.main
 from anki.httpclient import HttpClient
-from anki.lang import _, ngettext, without_unicode_isolation
+from anki.lang import without_unicode_isolation
 from aqt import gui_hooks
 from aqt.qt import *
 from aqt.utils import (
-    TR,
     askUser,
+    disable_help_button,
     getFile,
-    isWin,
+    is_win,
     openFolder,
     openLink,
     restoreGeom,
     restoreSplitter,
     saveGeom,
     saveSplitter,
+    send_to_trash,
+    show_info,
     showInfo,
     showWarning,
     tooltip,
@@ -46,10 +51,15 @@ from aqt.utils import (
 )
 
 
+class AbortAddonImport(Exception):
+    """If raised during add-on import, Anki will silently ignore this exception.
+    This allows you to terminate loading without an error being shown."""
+
+
 @dataclass
 class InstallOk:
     name: str
-    conflicts: List[str]
+    conflicts: set[str]
     compatible: bool
 
 
@@ -71,13 +81,13 @@ class DownloadOk:
 @dataclass
 class DownloadError:
     # set if result was not 200
-    status_code: Optional[int] = None
+    status_code: int | None = None
     # set if an exception occurred
-    exception: Optional[Exception] = None
+    exception: Exception | None = None
 
 
 # first arg is add-on id
-DownloadLogEntry = Tuple[int, Union[DownloadError, InstallError, InstallOk]]
+DownloadLogEntry = tuple[int, Union[DownloadError, InstallError, InstallOk]]
 
 
 @dataclass
@@ -91,25 +101,27 @@ class UpdateInfo:
 
 ANKIWEB_ID_RE = re.compile(r"^\d+$")
 
-current_point_version = anki.utils.pointVersion()
+current_point_version = anki.utils.point_version()
 
 
 @dataclass
 class AddonMeta:
     dir_name: str
-    provided_name: Optional[str]
+    provided_name: str | None
     enabled: bool
     installed_at: int
-    conflicts: List[str]
+    conflicts: list[str]
     min_point_version: int
     max_point_version: int
     branch_index: int
-    human_version: Optional[str]
+    human_version: str | None
+    update_enabled: bool
+    homepage: str | None
 
     def human_name(self) -> str:
         return self.provided_name or self.dir_name
 
-    def ankiweb_id(self) -> Optional[int]:
+    def ankiweb_id(self) -> int | None:
         m = ANKIWEB_ID_RE.match(self.dir_name)
         if m:
             return int(m.group(0))
@@ -128,8 +140,13 @@ class AddonMeta:
     def is_latest(self, server_update_time: int) -> bool:
         return self.installed_at >= server_update_time
 
+    def page(self) -> str | None:
+        if self.ankiweb_id():
+            return f"{aqt.appShared}info/{self.dir_name}"
+        return self.homepage
+
     @staticmethod
-    def from_json_meta(dir_name: str, json_meta: Dict[str, Any]) -> AddonMeta:
+    def from_json_meta(dir_name: str, json_meta: dict[str, Any]) -> AddonMeta:
         return AddonMeta(
             dir_name=dir_name,
             provided_name=json_meta.get("name"),
@@ -140,18 +157,33 @@ class AddonMeta:
             max_point_version=json_meta.get("max_point_version", 0) or 0,
             branch_index=json_meta.get("branch_index", 0) or 0,
             human_version=json_meta.get("human_version"),
+            update_enabled=json_meta.get("update_enabled", True),
+            homepage=json_meta.get("homepage"),
         )
+
+
+def package_name_valid(name: str) -> bool:
+    # embedded /?
+    base = os.path.basename(name)
+    if base != name:
+        return False
+    # tries to escape to parent?
+    root = os.getcwd()
+    subfolder = os.path.abspath(os.path.join(root, name))
+    if root.startswith(subfolder):
+        return False
+    return True
 
 
 # fixme: this class should not have any GUI code in it
 class AddonManager:
 
-    ext: str = ".ankiaddon"
+    exts: list[str] = [".ankiaddon", ".zip"]
     _manifest_schema: dict = {
         "type": "object",
         "properties": {
             # the name of the folder
-            "package": {"type": "string", "meta": False},
+            "package": {"type": "string", "minLength": 1, "meta": False},
             # the displayed name to the user
             "name": {"type": "string", "meta": True},
             # the time the add-on was last modified
@@ -167,6 +199,8 @@ class AddonManager:
             "branch_index": {"type": "number", "meta": True},
             # version string set by the add-on creator
             "human_version": {"type": "string", "meta": True},
+            # add-on page on AnkiWeb or some other webpage
+            "homepage": {"type": "string", "meta": True},
         },
         "required": ["package", "name"],
     }
@@ -179,7 +213,7 @@ class AddonManager:
         sys.path.insert(0, self.addonsFolder())
 
     # in new code, you may want all_addon_meta() instead
-    def allAddons(self) -> List[str]:
+    def allAddons(self) -> list[str]:
         l = []
         for d in os.listdir(self.addonsFolder()):
             path = self.addonsFolder(d)
@@ -194,11 +228,11 @@ class AddonManager:
     def all_addon_meta(self) -> Iterable[AddonMeta]:
         return map(self.addon_meta, self.allAddons())
 
-    def addonsFolder(self, dir=None) -> str:
+    def addonsFolder(self, module: str | None = None) -> str:
         root = self.mw.pm.addonFolder()
-        if not dir:
+        if module is None:
             return root
-        return os.path.join(root, dir)
+        return os.path.join(root, module)
 
     def loadAddons(self) -> None:
         for addon in self.all_addon_meta():
@@ -209,17 +243,18 @@ class AddonManager:
             self.dirty = True
             try:
                 __import__(addon.dir_name)
+            except AbortAddonImport:
+                pass
             except:
                 showWarning(
-                    tr(
-                        TR.ADDONS_FAILED_TO_LOAD,
+                    tr.addons_failed_to_load(
                         name=addon.human_name(),
                         traceback=traceback.format_exc(),
                     )
                 )
 
     def onAddonsDialog(self) -> None:
-        AddonsDialog(self)
+        aqt.dialogs.open("AddonsDialog", self)
 
     # Metadata
     ######################################################################
@@ -243,51 +278,51 @@ class AddonManager:
         json_obj["branch_index"] = addon.branch_index
         if addon.human_version is not None:
             json_obj["human_version"] = addon.human_version
+        json_obj["update_enabled"] = addon.update_enabled
 
         self.writeAddonMeta(addon.dir_name, json_obj)
 
-    def _addonMetaPath(self, dir: str) -> str:
-        return os.path.join(self.addonsFolder(dir), "meta.json")
+    def _addonMetaPath(self, module: str) -> str:
+        return os.path.join(self.addonsFolder(module), "meta.json")
 
     # in new code, use self.addon_meta() instead
-    def addonMeta(self, dir: str) -> Dict[str, Any]:
-        path = self._addonMetaPath(dir)
+    def addonMeta(self, module: str) -> dict[str, Any]:
+        path = self._addonMetaPath(module)
         try:
             with open(path, encoding="utf8") as f:
                 return json.load(f)
         except json.JSONDecodeError as e:
-            print(f"json error in add-on {dir}:\n{e}")
+            print(f"json error in add-on {module}:\n{e}")
             return dict()
         except:
             # missing meta file, etc
             return dict()
 
     # in new code, use write_addon_meta() instead
-    def writeAddonMeta(self, dir: str, meta: Dict[str, Any]) -> None:
-        path = self._addonMetaPath(dir)
+    def writeAddonMeta(self, module: str, meta: dict[str, Any]) -> None:
+        path = self._addonMetaPath(module)
         with open(path, "w", encoding="utf8") as f:
             json.dump(meta, f)
 
-    def toggleEnabled(self, dir: str, enable: Optional[bool] = None) -> None:
-        addon = self.addon_meta(dir)
+    def toggleEnabled(self, module: str, enable: bool | None = None) -> None:
+        addon = self.addon_meta(module)
         should_enable = enable if enable is not None else not addon.enabled
         if should_enable is True:
-            conflicting = self._disableConflicting(dir)
+            conflicting = self._disableConflicting(module)
             if conflicting:
                 addons = ", ".join(self.addonName(f) for f in conflicting)
                 showInfo(
-                    _(
-                        "The following add-ons are incompatible with %(name)s \
-and have been disabled: %(found)s"
-                    )
-                    % dict(name=addon.human_name(), found=addons),
+                    tr.addons_the_following_addons_are_incompatible_with(
+                        name=addon.human_name(),
+                        found=addons,
+                    ),
                     textFormat="plain",
                 )
 
         addon.enabled = should_enable
         self.write_addon_meta(addon)
 
-    def ankiweb_addons(self) -> List[int]:
+    def ankiweb_addons(self) -> list[int]:
         ids = []
         for meta in self.all_addon_meta():
             if meta.ankiweb_id() is not None:
@@ -297,27 +332,27 @@ and have been disabled: %(found)s"
     # Legacy helpers
     ######################################################################
 
-    def isEnabled(self, dir: str) -> bool:
-        return self.addon_meta(dir).enabled
+    def isEnabled(self, module: str) -> bool:
+        return self.addon_meta(module).enabled
 
-    def addonName(self, dir: str) -> str:
-        return self.addon_meta(dir).human_name()
+    def addonName(self, module: str) -> str:
+        return self.addon_meta(module).human_name()
 
-    def addonConflicts(self, dir: str) -> List[str]:
-        return self.addon_meta(dir).conflicts
+    def addonConflicts(self, module: str) -> list[str]:
+        return self.addon_meta(module).conflicts
 
-    def annotatedName(self, dir: str) -> str:
-        meta = self.addon_meta(dir)
+    def annotatedName(self, module: str) -> str:
+        meta = self.addon_meta(module)
         name = meta.human_name()
         if not meta.enabled:
-            name += _(" (disabled)")
+            name += f" {tr.addons_disabled()}"
         return name
 
     # Conflict resolution
     ######################################################################
 
-    def allAddonConflicts(self) -> Dict[str, List[str]]:
-        all_conflicts: Dict[str, List[str]] = defaultdict(list)
+    def allAddonConflicts(self) -> dict[str, list[str]]:
+        all_conflicts: dict[str, list[str]] = defaultdict(list)
         for addon in self.all_addon_meta():
             if not addon.enabled:
                 continue
@@ -325,14 +360,16 @@ and have been disabled: %(found)s"
                 all_conflicts[other_dir].append(addon.dir_name)
         return all_conflicts
 
-    def _disableConflicting(self, dir: str, conflicts: List[str] = None) -> List[str]:
-        conflicts = conflicts or self.addonConflicts(dir)
+    def _disableConflicting(self, module: str, conflicts: list[str] = None) -> set[str]:
+        if not self.isEnabled(module):
+            # disabled add-ons should not trigger conflict handling
+            return set()
+
+        conflicts = conflicts or self.addonConflicts(module)
 
         installed = self.allAddons()
-        found = [d for d in conflicts if d in installed and self.isEnabled(d)]
-        found.extend(self.allAddonConflicts().get(dir, []))
-        if not found:
-            return []
+        found = {d for d in conflicts if d in installed and self.isEnabled(d)}
+        found.update(self.allAddonConflicts().get(module, []))
 
         for package in found:
             self.toggleEnabled(package, enable=False)
@@ -342,7 +379,7 @@ and have been disabled: %(found)s"
     # Installing and deleting add-ons
     ######################################################################
 
-    def readManifestFile(self, zfile: ZipFile) -> Dict[Any, Any]:
+    def readManifestFile(self, zfile: ZipFile) -> dict[Any, Any]:
         try:
             with zfile.open("manifest.json") as f:
                 data = json.loads(f.read())
@@ -356,8 +393,11 @@ and have been disabled: %(found)s"
         return manifest
 
     def install(
-        self, file: Union[IO, str], manifest: Dict[str, Any] = None
-    ) -> Union[InstallOk, InstallError]:
+        self,
+        file: IO | str,
+        manifest: dict[str, Any] | None = None,
+        force_enable: bool = False,
+    ) -> InstallOk | InstallError:
         """Install add-on from path or file-like object. Metadata is read
         from the manifest file, with keys overriden by supplying a 'manifest'
         dictionary"""
@@ -374,6 +414,8 @@ and have been disabled: %(found)s"
             if not manifest:
                 return InstallError(errmsg="manifest")
             package = manifest["package"]
+            if not package_name_valid(package):
+                return InstallError(errmsg="invalid package")
             conflicts = manifest.get("conflicts", [])
             found_conflicts = self._disableConflicting(package, conflicts)
             meta = self.addonMeta(package)
@@ -384,6 +426,10 @@ and have been disabled: %(found)s"
             k: v for k, v in manifest.items() if k in schema and schema[k]["meta"]
         }
         meta.update(manifest_meta)
+
+        if force_enable:
+            meta["disabled"] = False
+
         self.writeAddonMeta(package, meta)
 
         meta2 = self.addon_meta(package)
@@ -392,17 +438,17 @@ and have been disabled: %(found)s"
             name=meta["name"], conflicts=found_conflicts, compatible=meta2.compatible()
         )
 
-    def _install(self, dir: str, zfile: ZipFile) -> None:
+    def _install(self, module: str, zfile: ZipFile) -> None:
         # previously installed?
-        base = self.addonsFolder(dir)
+        base = self.addonsFolder(module)
         if os.path.exists(base):
-            self.backupUserFiles(dir)
-            if not self.deleteAddon(dir):
-                self.restoreUserFiles(dir)
+            self.backupUserFiles(module)
+            if not self.deleteAddon(module):
+                self.restoreUserFiles(module)
                 return
 
         os.mkdir(base)
-        self.restoreUserFiles(dir)
+        self.restoreUserFiles(module)
 
         # extract
         for n in zfile.namelist():
@@ -417,16 +463,13 @@ and have been disabled: %(found)s"
             zfile.extract(n, base)
 
     # true on success
-    def deleteAddon(self, dir: str) -> bool:
+    def deleteAddon(self, module: str) -> bool:
         try:
-            send2trash(self.addonsFolder(dir))
+            send_to_trash(Path(self.addonsFolder(module)))
             return True
         except OSError as e:
             showWarning(
-                _(
-                    "Unable to update or delete add-on. Please start Anki while holding down the shift key to temporarily disable add-ons, then try again.\n\nDebug info: %s"
-                )
-                % e,
+                tr.addons_unable_to_update_or_delete_addon(val=str(e)),
                 textFormat="plain",
             )
             return False
@@ -435,8 +478,11 @@ and have been disabled: %(found)s"
     ######################################################################
 
     def processPackages(
-        self, paths: List[str], parent: QWidget = None
-    ) -> Tuple[List[str], List[str]]:
+        self,
+        paths: list[str],
+        parent: QWidget | None = None,
+        force_enable: bool = False,
+    ) -> tuple[list[str], list[str]]:
 
         log = []
         errs = []
@@ -445,7 +491,7 @@ and have been disabled: %(found)s"
         try:
             for path in paths:
                 base = os.path.basename(path)
-                result = self.install(path)
+                result = self.install(path, force_enable=force_enable)
 
                 if isinstance(result, InstallError):
                     errs.extend(
@@ -465,55 +511,51 @@ and have been disabled: %(found)s"
 
     def _installationErrorReport(
         self, result: InstallError, base: str, mode: str = "download"
-    ) -> List[str]:
+    ) -> list[str]:
 
         messages = {
-            "zip": _("Corrupt add-on file."),
-            "manifest": _("Invalid add-on manifest."),
+            "zip": tr.addons_corrupt_addon_file(),
+            "manifest": tr.addons_invalid_addon_manifest(),
         }
 
-        msg = messages.get(result.errmsg, _("Unknown error: {}".format(result.errmsg)))
+        msg = messages.get(result.errmsg, tr.addons_unknown_error(val=result.errmsg))
 
-        if mode == "download":  # preserve old format strings for i18n
-            template = _("Error downloading <i>%(id)s</i>: %(error)s")
+        if mode == "download":
+            template = tr.addons_error_downloading_ids_errors(id=base, error=msg)
         else:
-            template = _("Error installing <i>%(base)s</i>: %(error)s")
+            template = tr.addons_error_installing_bases_errors(base=base, error=msg)
 
-        name = base
-
-        return [template % dict(base=name, id=name, error=msg)]
+        return [template]
 
     def _installationSuccessReport(
         self, result: InstallOk, base: str, mode: str = "download"
-    ) -> List[str]:
-
-        if mode == "download":  # preserve old format strings for i18n
-            template = _("Downloaded %(fname)s")
-        else:
-            template = _("Installed %(name)s")
+    ) -> list[str]:
 
         name = result.name or base
-        strings = [template % dict(name=name, fname=name)]
+        if mode == "download":
+            template = tr.addons_downloaded_fnames(fname=name)
+        else:
+            template = tr.addons_installed_names(name=name)
+
+        strings = [template]
 
         if result.conflicts:
             strings.append(
-                _("The following conflicting add-ons were disabled:")
+                tr.addons_the_following_conflicting_addons_were_disabled()
                 + " "
                 + ", ".join(self.addonName(f) for f in result.conflicts)
             )
 
         if not result.compatible:
-            strings.append(
-                _("This add-on is not compatible with your version of Anki.")
-            )
+            strings.append(tr.addons_this_addon_is_not_compatible_with())
 
         return strings
 
     # Updating
     ######################################################################
 
-    def extract_update_info(self, items: List[Dict]) -> List[UpdateInfo]:
-        def extract_one(item: Dict) -> UpdateInfo:
+    def extract_update_info(self, items: list[dict]) -> list[UpdateInfo]:
+        def extract_one(item: dict) -> UpdateInfo:
             id = item["id"]
             meta = self.addon_meta(str(id))
             branch_idx = meta.branch_index
@@ -521,7 +563,7 @@ and have been disabled: %(found)s"
 
         return list(map(extract_one, items))
 
-    def update_supported_versions(self, items: List[UpdateInfo]) -> None:
+    def update_supported_versions(self, items: list[UpdateInfo]) -> None:
         for item in items:
             self.update_supported_version(item)
 
@@ -557,61 +599,71 @@ and have been disabled: %(found)s"
         if updated:
             self.write_addon_meta(addon)
 
-    def updates_required(self, items: List[UpdateInfo]) -> List[int]:
+    def updates_required(self, items: list[UpdateInfo]) -> list[UpdateInfo]:
         """Return ids of add-ons requiring an update."""
         need_update = []
         for item in items:
             addon = self.addon_meta(str(item.id))
             # update if server mtime is newer
             if not addon.is_latest(item.suitable_branch_last_modified):
-                need_update.append(item.id)
+                need_update.append(item)
             elif not addon.compatible() and item.suitable_branch_last_modified > 0:
                 # Addon is currently disabled, and a suitable branch was found on the
                 # server. Ignore our stored mtime (which may have been set incorrectly
                 # in the past) and require an update.
-                need_update.append(item.id)
+                need_update.append(item)
 
         return need_update
 
     # Add-on Config
     ######################################################################
 
-    _configButtonActions: Dict[str, Callable[[], Optional[bool]]] = {}
-    _configUpdatedActions: Dict[str, Callable[[Any], None]] = {}
+    _configButtonActions: dict[str, Callable[[], bool | None]] = {}
+    _configUpdatedActions: dict[str, Callable[[Any], None]] = {}
+    _config_help_actions: dict[str, Callable[[], str]] = {}
 
-    def addonConfigDefaults(self, dir: str) -> Optional[Dict[str, Any]]:
-        path = os.path.join(self.addonsFolder(dir), "config.json")
+    def addonConfigDefaults(self, module: str) -> dict[str, Any] | None:
+        path = os.path.join(self.addonsFolder(module), "config.json")
         try:
             with open(path, encoding="utf8") as f:
                 return json.load(f)
         except:
             return None
 
-    def addonConfigHelp(self, dir: str) -> str:
-        path = os.path.join(self.addonsFolder(dir), "config.md")
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                return markdown.markdown(f.read())
+    def set_config_help_action(self, module: str, action: Callable[[], str]) -> None:
+        "Set a callback used to produce config help."
+        self._config_help_actions[module] = action
+
+    def addonConfigHelp(self, module: str) -> str:
+        if action := self._config_help_actions.get(module, None):
+            contents = action()
         else:
-            return ""
+            path = os.path.join(self.addonsFolder(module), "config.md")
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    contents = f.read()
+            else:
+                return ""
+
+        return markdown.markdown(contents, extensions=[md_in_html.makeExtension()])
 
     def addonFromModule(self, module: str) -> str:
         return module.split(".")[0]
 
-    def configAction(self, addon: str) -> Callable[[], Optional[bool]]:
-        return self._configButtonActions.get(addon)
+    def configAction(self, module: str) -> Callable[[], bool | None]:
+        return self._configButtonActions.get(module)
 
-    def configUpdatedAction(self, addon: str) -> Callable[[Any], None]:
-        return self._configUpdatedActions.get(addon)
+    def configUpdatedAction(self, module: str) -> Callable[[Any], None]:
+        return self._configUpdatedActions.get(module)
 
     # Schema
     ######################################################################
 
-    def _addon_schema_path(self, dir: str) -> str:
-        return os.path.join(self.addonsFolder(dir), "config.schema.json")
+    def _addon_schema_path(self, module: str) -> str:
+        return os.path.join(self.addonsFolder(module), "config.schema.json")
 
-    def _addon_schema(self, dir: str):
-        path = self._addon_schema_path(dir)
+    def _addon_schema(self, module: str) -> Any:
+        path = self._addon_schema_path(module)
         try:
             if not os.path.exists(path):
                 # True is a schema accepting everything
@@ -625,7 +677,7 @@ and have been disabled: %(found)s"
     # Add-on Config API
     ######################################################################
 
-    def getConfig(self, module: str) -> Optional[Dict[str, Any]]:
+    def getConfig(self, module: str) -> dict[str, Any] | None:
         addon = self.addonFromModule(module)
         # get default config
         config = self.addonConfigDefaults(addon)
@@ -637,7 +689,7 @@ and have been disabled: %(found)s"
         config.update(userConf)
         return config
 
-    def setConfigAction(self, module: str, fn: Callable[[], Optional[bool]]) -> None:
+    def setConfigAction(self, module: str, fn: Callable[[], bool | None]) -> None:
         addon = self.addonFromModule(module)
         self._configButtonActions[addon] = fn
 
@@ -676,15 +728,14 @@ and have been disabled: %(found)s"
     # Web Exports
     ######################################################################
 
-    _webExports: Dict[str, str] = {}
+    _webExports: dict[str, str] = {}
 
     def setWebExports(self, module: str, pattern: str) -> None:
         addon = self.addonFromModule(module)
         self._webExports[addon] = pattern
 
-    # CHECK
-    def getWebExports(self, addon) -> str:
-        return self._webExports.get(addon)
+    def getWebExports(self, module: str) -> str:
+        return self._webExports.get(module)
 
 
 # Add-ons Dialog
@@ -695,6 +746,7 @@ class AddonsDialog(QDialog):
     def __init__(self, addonsManager: AddonManager) -> None:
         self.mgr = addonsManager
         self.mw = addonsManager.mw
+        self._require_restart = False
 
         super().__init__(self.mw)
 
@@ -710,23 +762,24 @@ class AddonsDialog(QDialog):
         qconnect(f.config.clicked, self.onConfig)
         qconnect(self.form.addonList.itemDoubleClicked, self.onConfig)
         qconnect(self.form.addonList.currentRowChanged, self._onAddonItemSelected)
-        self.setWindowTitle(tr(TR.ADDONS_WINDOW_TITLE))
+        self.setWindowTitle(tr.addons_window_title())
+        disable_help_button(self)
         self.setAcceptDrops(True)
         self.redrawAddons()
         restoreGeom(self, "addons")
         gui_hooks.addons_dialog_will_show(self)
         self.show()
 
-    def dragEnterEvent(self, event: QEvent) -> None:
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         mime = event.mimeData()
         if not mime.hasUrls():
             return None
         urls = mime.urls()
-        ext = self.mgr.ext
-        if all(url.toLocalFile().endswith(ext) for url in urls):
+        exts = self.mgr.exts
+        if all(any(url.toLocalFile().endswith(ext) for ext in exts) for url in urls):
             event.acceptProposedAction()
 
-    def dropEvent(self, event: QEvent) -> None:
+    def dropEvent(self, event: QDropEvent) -> None:
         mime = event.mimeData()
         paths = []
         for url in mime.urls():
@@ -736,16 +789,22 @@ class AddonsDialog(QDialog):
         self.onInstallFiles(paths)
 
     def reject(self) -> None:
+        if self._require_restart:
+            tooltip(tr.addons_changes_will_take_effect_when_anki(), parent=self.mw)
         saveGeom(self, "addons")
+        aqt.dialogs.markClosed("AddonsDialog")
+
         return QDialog.reject(self)
+
+    silentlyClose = True
 
     def name_for_addon_list(self, addon: AddonMeta) -> str:
         name = addon.human_name()
 
         if not addon.enabled:
-            return name + " " + _("(disabled)")
+            return f"{name} {tr.addons_disabled2()}"
         elif not addon.compatible():
-            return name + " " + _("(requires %s)") % self.compatible_string(addon)
+            return f"{name} {tr.addons_requires(val=self.compatible_string(addon))}"
 
         return name
 
@@ -776,7 +835,7 @@ class AddonsDialog(QDialog):
             name = self.name_for_addon_list(addon)
             item = QListWidgetItem(name, addonList)
             if self.should_grey(addon):
-                item.setForeground(Qt.gray)
+                item.setForeground(Qt.GlobalColor.gray)
             if addon.dir_name in selected:
                 item.setSelected(True)
 
@@ -787,7 +846,7 @@ class AddonsDialog(QDialog):
             addon = self.addons[row_int]
         except IndexError:
             return
-        self.form.viewPage.setEnabled(addon.ankiweb_id() is not None)
+        self.form.viewPage.setEnabled(addon.page() is not None)
         self.form.config.setEnabled(
             bool(
                 self.mgr.getConfig(addon.dir_name)
@@ -797,30 +856,36 @@ class AddonsDialog(QDialog):
         gui_hooks.addons_dialog_did_change_selected_addon(self, addon)
         return
 
-    def selectedAddons(self) -> List[str]:
+    def selectedAddons(self) -> list[str]:
         idxs = [x.row() for x in self.form.addonList.selectedIndexes()]
         return [self.addons[idx].dir_name for idx in idxs]
 
-    def onlyOneSelected(self) -> Optional[str]:
+    def onlyOneSelected(self) -> str | None:
         dirs = self.selectedAddons()
         if len(dirs) != 1:
-            showInfo(_("Please select a single add-on first."))
+            show_info(tr.addons_please_select_a_single_addon_first())
             return None
         return dirs[0]
 
+    def selected_addon_meta(self) -> AddonMeta | None:
+        idxs = [x.row() for x in self.form.addonList.selectedIndexes()]
+        if len(idxs) != 1:
+            show_info(tr.addons_please_select_a_single_addon_first())
+            return None
+        return self.addons[idxs[0]]
+
     def onToggleEnabled(self) -> None:
-        for dir in self.selectedAddons():
-            self.mgr.toggleEnabled(dir)
+        for module in self.selectedAddons():
+            self.mgr.toggleEnabled(module)
+        self._require_restart = True
         self.redrawAddons()
 
     def onViewPage(self) -> None:
-        addon = self.onlyOneSelected()
+        addon = self.selected_addon_meta()
         if not addon:
             return
-        if re.match(r"^\d+$", addon):
-            openLink(aqt.appShared + "info/{}".format(addon))
-        else:
-            showWarning(_("Add-on was not downloaded from AnkiWeb."))
+        if page := addon.page():
+            openLink(page)
 
     def onViewFiles(self) -> None:
         # if nothing selected, open top level folder
@@ -840,17 +905,14 @@ class AddonsDialog(QDialog):
         selected = self.selectedAddons()
         if not selected:
             return
-        if not askUser(
-            ngettext(
-                "Delete the %(num)d selected add-on?",
-                "Delete the %(num)d selected add-ons?",
-                len(selected),
-            )
-            % dict(num=len(selected))
-        ):
+        if not askUser(tr.addons_delete_the_numd_selected_addon(count=len(selected))):
             return
-        for dir in selected:
-            if not self.mgr.deleteAddon(dir):
+        gui_hooks.addons_dialog_will_delete_addons(self, selected)
+        for module in selected:
+            # doing this before deleting, as `enabled` is always True afterwards
+            if self.mgr.addon_meta(module).enabled:
+                self._require_restart = True
+            if not self.mgr.deleteAddon(module):
                 break
         self.form.addonList.clearSelection()
         self.redrawAddons()
@@ -858,31 +920,36 @@ class AddonsDialog(QDialog):
     def onGetAddons(self) -> None:
         obj = GetAddons(self)
         if obj.ids:
-            download_addons(self, self.mgr, obj.ids, self.after_downloading)
+            download_addons(
+                self, self.mgr, obj.ids, self.after_downloading, force_enable=True
+            )
 
-    def after_downloading(self, log: List[DownloadLogEntry]) -> None:
+    def after_downloading(self, log: list[DownloadLogEntry]) -> None:
         self.redrawAddons()
         if log:
             show_log_to_user(self, log)
         else:
-            tooltip(_("No updates available."))
+            tooltip(tr.addons_no_updates_available())
 
-    def onInstallFiles(self, paths: Optional[List[str]] = None) -> Optional[bool]:
+    def onInstallFiles(self, paths: list[str] | None = None) -> bool | None:
         if not paths:
-            key = _("Packaged Anki Add-on") + " (*{})".format(self.mgr.ext)
-            paths = getFile(
-                self, _("Install Add-on(s)"), None, key, key="addons", multi=True
+            filter = f"{tr.addons_packaged_anki_addon()} " + "({})".format(
+                " ".join(f"*{ext}" for ext in self.mgr.exts)
             )
+            paths_ = getFile(
+                self, tr.addons_install_addons(), None, filter, key="addons", multi=True
+            )
+            paths = paths_  # type: ignore
             if not paths:
                 return False
 
-        installAddonPackages(self.mgr, paths, parent=self)
+        installAddonPackages(self.mgr, paths, parent=self, force_enable=True)
 
         self.redrawAddons()
         return None
 
     def check_for_updates(self) -> None:
-        tooltip(_("Checking..."))
+        tooltip(tr.addons_checking())
         check_and_prompt_for_updates(self, self.mgr, self.after_downloading)
 
     def onConfig(self) -> None:
@@ -899,7 +966,7 @@ class AddonsDialog(QDialog):
 
         conf = self.mgr.getConfig(addon)
         if conf is None:
-            showInfo(_("Add-on has no configuration."))
+            showInfo(tr.addons_addon_has_no_configuration())
             return
 
         ConfigEditor(self, addon, conf)
@@ -910,31 +977,32 @@ class AddonsDialog(QDialog):
 
 
 class GetAddons(QDialog):
-    def __init__(self, dlg) -> None:
+    def __init__(self, dlg: AddonsDialog) -> None:
         QDialog.__init__(self, dlg)
         self.addonsDlg = dlg
         self.mgr = dlg.mgr
         self.mw = self.mgr.mw
-        self.ids: List[int] = []
+        self.ids: list[int] = []
         self.form = aqt.forms.getaddons.Ui_Dialog()
         self.form.setupUi(self)
         b = self.form.buttonBox.addButton(
-            _("Browse Add-ons"), QDialogButtonBox.ActionRole
+            tr.addons_browse_addons(), QDialogButtonBox.ButtonRole.ActionRole
         )
         qconnect(b.clicked, self.onBrowse)
+        disable_help_button(self)
         restoreGeom(self, "getaddons", adjustSize=True)
-        self.exec_()
+        self.exec()
         saveGeom(self, "getaddons")
 
     def onBrowse(self) -> None:
-        openLink(aqt.appShared + "addons/2.1")
+        openLink(f"{aqt.appShared}addons/2.1")
 
     def accept(self) -> None:
         # get codes
         try:
             ids = [int(n) for n in self.form.code.text().split()]
         except ValueError:
-            showWarning(_("Invalid code."))
+            showWarning(tr.addons_invalid_code())
             return
 
         self.ids = ids
@@ -945,16 +1013,16 @@ class GetAddons(QDialog):
 ######################################################################
 
 
-def download_addon(client: HttpClient, id: int) -> Union[DownloadOk, DownloadError]:
+def download_addon(client: HttpClient, id: int) -> DownloadOk | DownloadError:
     "Fetch a single add-on from AnkiWeb."
     try:
         resp = client.get(
-            aqt.appShared + f"download/{id}?v=2.1&p={current_point_version}"
+            f"{aqt.appShared}download/{id}?v=2.1&p={current_point_version}"
         )
         if resp.status_code != 200:
             return DownloadError(status_code=resp.status_code)
 
-        data = client.streamContent(resp)
+        data = client.stream_content(resp)
 
         fname = re.match(
             "attachment; filename=(.+)", resp.headers["content-disposition"]
@@ -996,7 +1064,7 @@ def extract_meta_from_download_url(url: str) -> ExtractedDownloadMeta:
     return meta
 
 
-def download_log_to_html(log: List[DownloadLogEntry]) -> str:
+def download_log_to_html(log: list[DownloadLogEntry]) -> str:
     return "<br>".join(map(describe_log_entry, log))
 
 
@@ -1007,31 +1075,29 @@ def describe_log_entry(id_and_entry: DownloadLogEntry) -> str:
     if isinstance(entry, DownloadError):
         if entry.status_code is not None:
             if entry.status_code in (403, 404):
-                buf += _(
-                    "Invalid code, or add-on not available for your version of Anki."
-                )
+                buf += tr.addons_invalid_code_or_addon_not_available()
             else:
-                buf += _("Unexpected response code: %s") % entry.status_code
+                buf += tr.qt_misc_unexpected_response_code(val=entry.status_code)
         else:
             buf += (
-                _("Please check your internet connection.")
+                tr.addons_please_check_your_internet_connection()
                 + "\n\n"
                 + str(entry.exception)
             )
     elif isinstance(entry, InstallError):
         buf += entry.errmsg
     else:
-        buf += _("Installed successfully.")
+        buf += tr.addons_installed_successfully()
 
     return buf
 
 
-def download_encountered_problem(log: List[DownloadLogEntry]) -> bool:
+def download_encountered_problem(log: list[DownloadLogEntry]) -> bool:
     return any(not isinstance(e[1], InstallOk) for e in log)
 
 
 def download_and_install_addon(
-    mgr: AddonManager, client: HttpClient, id: int
+    mgr: AddonManager, client: HttpClient, id: int, force_enable: bool = False
 ) -> DownloadLogEntry:
     "Download and install a single add-on."
     result = download_addon(client, id)
@@ -1039,7 +1105,9 @@ def download_and_install_addon(
         return (id, result)
 
     fname = result.filename.replace("_", " ")
-    name = os.path.splitext(fname)[0]
+    name = os.path.splitext(fname)[0].strip()
+    if not name:
+        name = str(id)
 
     manifest = dict(
         package=str(id),
@@ -1050,7 +1118,9 @@ def download_and_install_addon(
         branch_index=result.branch_index,
     )
 
-    result2 = mgr.install(io.BytesIO(result.data), manifest=manifest)
+    result2 = mgr.install(
+        io.BytesIO(result.data), manifest=manifest, force_enable=force_enable
+    )
 
     return (id, result2)
 
@@ -1064,56 +1134,65 @@ class DownloaderInstaller(QObject):
         self.client = client
         qconnect(self.progressSignal, self._progress_callback)
 
-        def bg_thread_progress(up, down) -> None:
+        def bg_thread_progress(up: int, down: int) -> None:
             self.progressSignal.emit(up, down)  # type: ignore
 
         self.client.progress_hook = bg_thread_progress
 
     def download(
-        self, ids: List[int], on_done: Callable[[List[DownloadLogEntry]], None]
+        self,
+        ids: list[int],
+        on_done: Callable[[list[DownloadLogEntry]], None],
+        force_enable: bool = False,
     ) -> None:
         self.ids = ids
-        self.log: List[DownloadLogEntry] = []
+        self.log: list[DownloadLogEntry] = []
 
         self.dl_bytes = 0
         self.last_tooltip = 0
 
         self.on_done = on_done
 
-        self.mgr.mw.progress.start(immediate=True, parent=self.parent())
-        self.mgr.mw.taskman.run_in_background(self._download_all, self._download_done)
+        parent = self.parent()
+        assert isinstance(parent, QWidget)
+        self.mgr.mw.progress.start(immediate=True, parent=parent)
+        self.mgr.mw.taskman.run_in_background(
+            lambda: self._download_all(force_enable), self._download_done
+        )
 
     def _progress_callback(self, up: int, down: int) -> None:
         self.dl_bytes += down
         self.mgr.mw.progress.update(
-            # T: "%(a)d" is the index of the element currently
-            # downloaded. "%(b)d" is the number of element to download,
-            # and "%(kb)0.2f" is the number of downloaded
-            # kilobytes. This lead for example to "Downloading 3/5
-            # (27KB)"
-            label=_("Downloading %(a)d/%(b)d (%(kb)0.2fKB)...")
-            % dict(a=len(self.log) + 1, b=len(self.ids), kb=self.dl_bytes / 1024)
+            label=tr.addons_downloading_adbd_kb02fkb(
+                part=len(self.log) + 1,
+                total=len(self.ids),
+                kilobytes=self.dl_bytes // 1024,
+            )
         )
 
-    def _download_all(self) -> None:
+    def _download_all(self, force_enable: bool = False) -> None:
         for id in self.ids:
-            self.log.append(download_and_install_addon(self.mgr, self.client, id))
+            self.log.append(
+                download_and_install_addon(
+                    self.mgr, self.client, id, force_enable=force_enable
+                )
+            )
 
     def _download_done(self, future: Future) -> None:
         self.mgr.mw.progress.finish()
         # qt gets confused if on_done() opens new windows while the progress
         # modal is still cleaning up
-        self.mgr.mw.progress.timer(50, lambda: self.on_done(self.log), False)
+        self.mgr.mw.progress.single_shot(50, lambda: self.on_done(self.log))
 
 
-def show_log_to_user(parent: QWidget, log: List[DownloadLogEntry]) -> None:
+def show_log_to_user(parent: QWidget, log: list[DownloadLogEntry]) -> None:
     have_problem = download_encountered_problem(log)
 
     if have_problem:
-        text = _("One or more errors occurred:")
+        text = tr.addons_one_or_more_errors_occurred()
     else:
-        text = _("Download complete. Please restart Anki to apply changes.")
-    text += "<br><br>" + download_log_to_html(log)
+        text = tr.addons_download_complete_please_restart_anki_to()
+    text += f"<br><br>{download_log_to_html(log)}"
 
     if have_problem:
         showWarning(text, textFormat="rich", parent=parent)
@@ -1124,23 +1203,187 @@ def show_log_to_user(parent: QWidget, log: List[DownloadLogEntry]) -> None:
 def download_addons(
     parent: QWidget,
     mgr: AddonManager,
-    ids: List[int],
-    on_done: Callable[[List[DownloadLogEntry]], None],
-    client: Optional[HttpClient] = None,
+    ids: list[int],
+    on_done: Callable[[list[DownloadLogEntry]], None],
+    client: HttpClient | None = None,
+    force_enable: bool = False,
 ) -> None:
     if client is None:
         client = HttpClient()
     downloader = DownloaderInstaller(parent, mgr, client)
-    downloader.download(ids, on_done=on_done)
+    downloader.download(ids, on_done=on_done, force_enable=force_enable)
 
 
 # Update checking
 ######################################################################
 
 
-def fetch_update_info(client: HttpClient, ids: List[int]) -> List[Dict]:
+class ChooseAddonsToUpdateList(QListWidget):
+    ADDON_ID_ROLE = 101
+
+    def __init__(
+        self,
+        parent: QWidget,
+        mgr: AddonManager,
+        updated_addons: list[UpdateInfo],
+    ) -> None:
+        QListWidget.__init__(self, parent)
+        self.mgr = mgr
+        self.updated_addons = sorted(
+            updated_addons, key=lambda addon: addon.suitable_branch_last_modified
+        )
+        self.ignore_check_evt = False
+        self.setup()
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        qconnect(self.itemClicked, self.on_click)
+        qconnect(self.itemChanged, self.on_check)
+        qconnect(self.itemDoubleClicked, self.on_double_click)
+        qconnect(self.customContextMenuRequested, self.on_context_menu)
+
+    def setup(self) -> None:
+        header_item = QListWidgetItem(tr.addons_choose_update_update_all(), self)
+        header_item.setFlags(
+            Qt.ItemFlag(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        )
+        self.header_item = header_item
+        for update_info in self.updated_addons:
+            addon_id = update_info.id
+            addon_meta = self.mgr.addon_meta(str(addon_id))
+            update_enabled = addon_meta.update_enabled
+            addon_name = addon_meta.human_name()
+            update_timestamp = update_info.suitable_branch_last_modified
+            update_time = datetime.fromtimestamp(update_timestamp)
+
+            addon_label = f"{update_time:%Y-%m-%d}   {addon_name}"
+            item = QListWidgetItem(addon_label, self)
+            # Not user checkable because it overlaps with itemClicked signal
+            item.setFlags(Qt.ItemFlag(Qt.ItemFlag.ItemIsEnabled))
+            if update_enabled:
+                item.setCheckState(Qt.CheckState.Checked)
+            else:
+                item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(self.ADDON_ID_ROLE, addon_id)
+        self.refresh_header_check_state()
+
+    def bool_to_check(self, check_bool: bool) -> Qt.CheckState:
+        if check_bool:
+            return Qt.CheckState.Checked
+        else:
+            return Qt.CheckState.Unchecked
+
+    def checked(self, item: QListWidgetItem) -> bool:
+        return item.checkState() == Qt.CheckState.Checked
+
+    def on_click(self, item: QListWidgetItem) -> None:
+        if item == self.header_item:
+            return
+        checked = self.checked(item)
+        self.check_item(item, self.bool_to_check(not checked))
+        self.refresh_header_check_state()
+
+    def on_check(self, item: QListWidgetItem) -> None:
+        if self.ignore_check_evt:
+            return
+        if item == self.header_item:
+            self.header_checked(item.checkState())
+
+    def on_double_click(self, item: QListWidgetItem) -> None:
+        if item == self.header_item:
+            checked = self.checked(item)
+            self.check_item(self.header_item, self.bool_to_check(not checked))
+            self.header_checked(self.bool_to_check(not checked))
+
+    def on_context_menu(self, point: QPoint) -> None:
+        item = self.itemAt(point)
+        addon_id = item.data(self.ADDON_ID_ROLE)
+        m = QMenu()
+        a = m.addAction(tr.addons_view_addon_page())
+        qconnect(a.triggered, lambda _: openLink(f"{aqt.appShared}info/{addon_id}"))
+        m.exec(QCursor.pos())
+
+    def check_item(self, item: QListWidgetItem, check: Qt.CheckState) -> None:
+        "call item.setCheckState without triggering on_check"
+        self.ignore_check_evt = True
+        item.setCheckState(check)
+        self.ignore_check_evt = False
+
+    def header_checked(self, check: Qt.CheckState) -> None:
+        for i in range(1, self.count()):
+            self.check_item(self.item(i), check)
+
+    def refresh_header_check_state(self) -> None:
+        for i in range(1, self.count()):
+            item = self.item(i)
+            if not self.checked(item):
+                self.check_item(self.header_item, Qt.CheckState.Unchecked)
+                return
+        self.check_item(self.header_item, Qt.CheckState.Checked)
+
+    def get_selected_addon_ids(self) -> list[int]:
+        addon_ids = []
+        for i in range(1, self.count()):
+            item = self.item(i)
+            if self.checked(item):
+                addon_id = item.data(self.ADDON_ID_ROLE)
+                addon_ids.append(addon_id)
+        return addon_ids
+
+    def save_check_state(self) -> None:
+        for i in range(1, self.count()):
+            item = self.item(i)
+            addon_id = item.data(self.ADDON_ID_ROLE)
+            addon_meta = self.mgr.addon_meta(str(addon_id))
+            addon_meta.update_enabled = self.checked(item)
+            self.mgr.write_addon_meta(addon_meta)
+
+
+class ChooseAddonsToUpdateDialog(QDialog):
+    def __init__(
+        self, parent: QWidget, mgr: AddonManager, updated_addons: list[UpdateInfo]
+    ) -> None:
+        QDialog.__init__(self, parent)
+        self.setWindowTitle(tr.addons_choose_update_window_title())
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.mgr = mgr
+        self.updated_addons = updated_addons
+        self.setup()
+        restoreGeom(self, "addonsChooseUpdate")
+
+    def setup(self) -> None:
+        layout = QVBoxLayout()
+        label = QLabel(tr.addons_the_following_addons_have_updates_available())
+        layout.addWidget(label)
+        addons_list_widget = ChooseAddonsToUpdateList(
+            self, self.mgr, self.updated_addons
+        )
+        layout.addWidget(addons_list_widget)
+        self.addons_list_widget = addons_list_widget
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)  # type: ignore
+        qconnect(
+            button_box.button(QDialogButtonBox.StandardButton.Ok).clicked, self.accept
+        )
+        qconnect(
+            button_box.button(QDialogButtonBox.StandardButton.Cancel).clicked,
+            self.reject,
+        )
+        layout.addWidget(button_box)
+        self.setLayout(layout)
+
+    def ask(self) -> list[int]:
+        "Returns a list of selected addons' ids"
+        ret = self.exec()
+        saveGeom(self, "addonsChooseUpdate")
+        self.addons_list_widget.save_check_state()
+        if ret == QDialog.DialogCode.Accepted:
+            return self.addons_list_widget.get_selected_addon_ids()
+        else:
+            return []
+
+
+def fetch_update_info(client: HttpClient, ids: list[int]) -> list[dict]:
     """Fetch update info from AnkiWeb in one or more batches."""
-    all_info: List[Dict] = []
+    all_info: list[dict] = []
 
     while ids:
         # get another chunk
@@ -1155,46 +1398,44 @@ def fetch_update_info(client: HttpClient, ids: List[int]) -> List[Dict]:
 
 def _fetch_update_info_batch(
     client: HttpClient, chunk: Iterable[str]
-) -> Iterable[Dict]:
+) -> Iterable[dict]:
     """Get update info from AnkiWeb.
 
     Chunk must not contain more than 25 ids."""
-    resp = client.get(aqt.appShared + "updates/" + ",".join(chunk) + "?v=3")
+    resp = client.get(f"{aqt.appShared}updates/{','.join(chunk)}?v=3")
     if resp.status_code == 200:
         return resp.json()
     else:
-        raise Exception(
-            "Unexpected response code from AnkiWeb: {}".format(resp.status_code)
-        )
+        raise Exception(f"Unexpected response code from AnkiWeb: {resp.status_code}")
 
 
 def check_and_prompt_for_updates(
     parent: QWidget,
     mgr: AddonManager,
-    on_done: Callable[[List[DownloadLogEntry]], None],
+    on_done: Callable[[list[DownloadLogEntry]], None],
+    requested_by_user: bool = True,
 ) -> None:
-    def on_updates_received(client: HttpClient, items: List[Dict]) -> None:
-        handle_update_info(parent, mgr, client, items, on_done)
+    def on_updates_received(client: HttpClient, items: list[dict]) -> None:
+        handle_update_info(parent, mgr, client, items, on_done, requested_by_user)
 
     check_for_updates(mgr, on_updates_received)
 
 
 def check_for_updates(
-    mgr: AddonManager, on_done: Callable[[HttpClient, List[Dict]], None]
+    mgr: AddonManager, on_done: Callable[[HttpClient, list[dict]], None]
 ) -> None:
     client = HttpClient()
 
-    def check() -> List[Dict]:
+    def check() -> list[dict]:
         return fetch_update_info(client, mgr.ankiweb_addons())
 
     def update_info_received(future: Future) -> None:
         # if syncing/in profile screen, defer message delivery
         if not mgr.mw.col:
-            mgr.mw.progress.timer(
+            mgr.mw.progress.single_shot(
                 1000,
                 lambda: update_info_received(future),
                 False,
-                requiresCollection=False,
             )
             return
 
@@ -1211,7 +1452,7 @@ def check_for_updates(
 
 
 def extract_update_info(
-    current_point_version: int, current_branch_idx: int, info_json: Dict
+    current_point_version: int, current_branch_idx: int, info_json: dict
 ) -> UpdateInfo:
     "Process branches to determine the updated mod time and min/max versions."
     branches = info_json["branches"]
@@ -1241,37 +1482,41 @@ def handle_update_info(
     parent: QWidget,
     mgr: AddonManager,
     client: HttpClient,
-    items: List[Dict],
-    on_done: Callable[[List[DownloadLogEntry]], None],
+    items: list[dict],
+    on_done: Callable[[list[DownloadLogEntry]], None],
+    requested_by_user: bool = True,
 ) -> None:
     update_info = mgr.extract_update_info(items)
     mgr.update_supported_versions(update_info)
 
-    updated_ids = mgr.updates_required(update_info)
+    updated_addons = mgr.updates_required(update_info)
 
-    if not updated_ids:
+    if not updated_addons:
         on_done([])
         return
 
-    prompt_to_update(parent, mgr, client, updated_ids, on_done)
+    prompt_to_update(parent, mgr, client, updated_addons, on_done, requested_by_user)
 
 
 def prompt_to_update(
     parent: QWidget,
     mgr: AddonManager,
     client: HttpClient,
-    ids: List[int],
-    on_done: Callable[[List[DownloadLogEntry]], None],
+    updated_addons: list[UpdateInfo],
+    on_done: Callable[[list[DownloadLogEntry]], None],
+    requested_by_user: bool = True,
 ) -> None:
-    names = map(lambda x: mgr.addonName(str(x)), ids)
-    if not askUser(
-        _("The following add-ons have updates available. Install them now?")
-        + "\n\n"
-        + "\n".join(names)
-    ):
-        # on_done is not called if the user cancels
-        return
+    if not requested_by_user:
+        prompt_update = False
+        for addon in updated_addons:
+            if mgr.addon_meta(str(addon.id)).update_enabled:
+                prompt_update = True
+        if not prompt_update:
+            return
 
+    ids = ChooseAddonsToUpdateDialog(parent, mgr, updated_addons).ask()
+    if not ids:
+        return
     download_addons(parent, mgr, ids, on_done, client)
 
 
@@ -1280,15 +1525,19 @@ def prompt_to_update(
 
 
 class ConfigEditor(QDialog):
-    def __init__(self, dlg, addon, conf) -> None:
+    def __init__(self, dlg: AddonsDialog, addon: str, conf: dict) -> None:
         super().__init__(dlg)
         self.addon = addon
         self.conf = conf
         self.mgr = dlg.mgr
         self.form = aqt.forms.addonconf.Ui_Dialog()
         self.form.setupUi(self)
-        restore = self.form.buttonBox.button(QDialogButtonBox.RestoreDefaults)
+        restore = self.form.buttonBox.button(
+            QDialogButtonBox.StandardButton.RestoreDefaults
+        )
         qconnect(restore.clicked, self.onRestoreDefaults)
+        ok = self.form.buttonBox.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setShortcut(QKeySequence("Ctrl+Return"))
         self.setupFonts()
         self.updateHelp()
         self.updateText(self.conf)
@@ -1296,21 +1545,21 @@ class ConfigEditor(QDialog):
         restoreSplitter(self.form.splitter, "addonconf")
         self.setWindowTitle(
             without_unicode_isolation(
-                tr(
-                    TR.ADDONS_CONFIG_WINDOW_TITLE,
+                tr.addons_config_window_title(
                     name=self.mgr.addon_meta(addon).human_name(),
                 )
             )
         )
+        disable_help_button(self)
         self.show()
 
     def onRestoreDefaults(self) -> None:
         default_conf = self.mgr.addonConfigDefaults(self.addon)
         self.updateText(default_conf)
-        tooltip(_("Restored defaults"), parent=self)
+        tooltip(tr.addons_restored_defaults(), parent=self)
 
     def setupFonts(self) -> None:
-        font_mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        font_mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font_mono.setPointSize(font_mono.pointSize() + 1)
         self.form.editor.setFont(font_mono)
 
@@ -1321,7 +1570,7 @@ class ConfigEditor(QDialog):
         else:
             self.form.scrollArea.setVisible(False)
 
-    def updateText(self, conf: Dict[str, Any]) -> None:
+    def updateText(self, conf: dict[str, Any]) -> None:
         text = json.dumps(
             conf,
             ensure_ascii=False,
@@ -1331,7 +1580,7 @@ class ConfigEditor(QDialog):
         )
         text = gui_hooks.addon_config_editor_will_display_json(text)
         self.form.editor.setPlainText(text)
-        if isMac:
+        if is_mac:
             self.form.editor.repaint()
 
     def onClose(self) -> None:
@@ -1347,7 +1596,7 @@ class ConfigEditor(QDialog):
         txt = gui_hooks.addon_config_editor_will_save_json(txt)
         try:
             new_conf = json.loads(txt)
-            jsonschema.validate(new_conf, self.parent().mgr._addon_schema(self.addon))
+            jsonschema.validate(new_conf, self.mgr._addon_schema(self.addon))
         except ValidationError as e:
             # The user did edit the configuration and entered a value
             # which can not be interpreted.
@@ -1364,8 +1613,7 @@ class ConfigEditor(QDialog):
                     erroneous_conf=erroneous_conf,
                 )
             else:
-                msg = tr(
-                    TR.ADDONS_CONFIG_VALIDATION_ERROR,
+                msg = tr.addons_config_validation_error(
                     problem=e.message,
                     path=path,
                     schema=str(schema),
@@ -1373,11 +1621,11 @@ class ConfigEditor(QDialog):
             showInfo(msg)
             return
         except Exception as e:
-            showInfo(_("Invalid configuration: ") + repr(e))
+            showInfo(f"{tr.addons_invalid_configuration()} {repr(e)}")
             return
 
         if not isinstance(new_conf, dict):
-            showInfo(_("Invalid configuration: top level object must be a map"))
+            showInfo(tr.addons_invalid_configuration_top_level_object_must())
             return
 
         if new_conf != self.conf:
@@ -1397,42 +1645,40 @@ class ConfigEditor(QDialog):
 
 def installAddonPackages(
     addonsManager: AddonManager,
-    paths: List[str],
-    parent: Optional[QWidget] = None,
+    paths: list[str],
+    parent: QWidget | None = None,
     warn: bool = False,
     strictly_modal: bool = False,
     advise_restart: bool = False,
+    force_enable: bool = False,
 ) -> bool:
 
     if warn:
         names = ",<br>".join(f"<b>{os.path.basename(p)}</b>" for p in paths)
-        q = _(
-            "<b>Important</b>: As add-ons are programs downloaded from the internet, "
-            "they are potentially malicious."
-            "<b>You should only install add-ons you trust.</b><br><br>"
-            "Are you sure you want to proceed with the installation of the "
-            "following Anki add-on(s)?<br><br>%(names)s"
-        ) % dict(names=names)
+        q = tr.addons_important_as_addons_are_programs_downloaded() % dict(names=names)
         if (
             not showInfo(
                 q,
                 parent=parent,
-                title=_("Install Anki add-on"),
+                title=tr.addons_install_anki_addon(),
                 type="warning",
-                customBtns=[QMessageBox.No, QMessageBox.Yes],
+                customBtns=[
+                    QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                ],
             )
-            == QMessageBox.Yes
+            == QMessageBox.StandardButton.Yes
         ):
             return False
 
-    log, errs = addonsManager.processPackages(paths, parent=parent)
+    log, errs = addonsManager.processPackages(
+        paths, parent=parent, force_enable=force_enable
+    )
 
     if log:
         log_html = "<br>".join(log)
         if advise_restart:
-            log_html += "<br><br>" + _(
-                "<b>Please restart Anki to complete the installation.</b>"
-            )
+            log_html += f"<br><br>{tr.addons_please_restart_anki_to_complete_the()}"
         if len(log) == 1 and not strictly_modal:
             tooltip(log_html, parent=parent)
         else:
@@ -1440,15 +1686,15 @@ def installAddonPackages(
                 log_html,
                 parent=parent,
                 textFormat="rich",
-                title=_("Installation complete"),
+                title=tr.addons_installation_complete(),
             )
     if errs:
-        msg = _("Please report this to the respective add-on author(s).")
+        msg = tr.addons_please_report_this_to_the_respective()
         showWarning(
             "<br><br>".join(errs + [msg]),
             parent=parent,
             textFormat="rich",
-            title=_("Add-on installation error"),
+            title=tr.addons_addon_installation_error(),
         )
 
     return not errs

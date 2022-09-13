@@ -1,11 +1,11 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use std::{fs, fs::OpenOptions, io};
+
 pub use slog::{debug, error, Logger};
 use slog::{slog_o, Drain};
 use slog_async::OverflowStrategy;
-use std::fs::OpenOptions;
-use std::{fs, io};
 
 const LOG_ROTATE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -81,7 +81,7 @@ fn maybe_rotate_log(path: &str) -> io::Result<()> {
 }
 
 /// Get a logger, logging to a file if a path was provided, otherwise terminal.
-pub(crate) fn default_logger(path: Option<&str>) -> io::Result<Logger> {
+pub fn default_logger(path: Option<&str>) -> io::Result<Logger> {
     Ok(match path {
         Some(path) => file(path)?,
         None => terminal(),

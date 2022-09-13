@@ -3,30 +3,45 @@
 
 from __future__ import annotations
 
-import pprint
-from typing import Any, List, Optional, Sequence, Tuple
+import copy
+from typing import NewType, Sequence
 
 import anki  # pylint: disable=unused-import
-from anki import hooks
-from anki.models import NoteType
-from anki.rsbackend import BackendNote
-from anki.utils import joinFields
+import anki.cards
+import anki.collection
+import anki.decks
+import anki.template
+from anki import hooks, notes_pb2
+from anki._legacy import DeprecatedNamesMixin
+from anki.consts import MODEL_STD
+from anki.models import NotetypeDict, NotetypeId, TemplateDict
+from anki.utils import join_fields
+
+DuplicateOrEmptyResult = notes_pb2.NoteFieldsCheckResponse.State
+NoteFieldsCheckResult = notes_pb2.NoteFieldsCheckResponse.State
+DefaultsForAdding = notes_pb2.DeckAndNotetype
+
+# types
+NoteId = NewType("NoteId", int)
 
 
-class Note:
+class Note(DeprecatedNamesMixin):
     # not currently exposed
     flags = 0
     data = ""
+    id: NoteId
+    mid: NotetypeId
 
     def __init__(
         self,
         col: anki.collection.Collection,
-        model: Optional[NoteType] = None,
-        id: Optional[int] = None,
+        model: NotetypeDict | NotetypeId | None = None,
+        id: NoteId | None = None,
     ) -> None:
-        assert not (model and id)
+        if model and id:
+            raise Exception("only model or id should be provided")
+        notetype_id = model["id"] if isinstance(model, dict) else model
         self.col = col.weakref()
-        # self.newlyAdded = False
 
         if id:
             # existing note
@@ -34,26 +49,26 @@ class Note:
             self.load()
         else:
             # new note for provided notetype
-            self._load_from_backend_note(self.col.backend.new_note(model["id"]))
+            self._load_from_backend_note(self.col._backend.new_note(notetype_id))
 
     def load(self) -> None:
-        n = self.col.backend.get_note(self.id)
-        assert n
-        self._load_from_backend_note(n)
+        note = self.col._backend.get_note(self.id)
+        assert note
+        self._load_from_backend_note(note)
 
-    def _load_from_backend_note(self, n: BackendNote) -> None:
-        self.id = n.id
-        self.guid = n.guid
-        self.mid = n.notetype_id
-        self.mod = n.mtime_secs
-        self.usn = n.usn
-        self.tags = list(n.tags)
-        self.fields = list(n.fields)
-        self._fmap = self.col.models.fieldMap(self.model())
+    def _load_from_backend_note(self, note: notes_pb2.Note) -> None:
+        self.id = NoteId(note.id)
+        self.guid = note.guid
+        self.mid = NotetypeId(note.notetype_id)
+        self.mod = note.mtime_secs
+        self.usn = note.usn
+        self.tags = list(note.tags)
+        self.fields = list(note.fields)
+        self._fmap = self.col.models.field_map(self.note_type())
 
-    def to_backend_note(self) -> BackendNote:
+    def _to_backend_note(self) -> notes_pb2.Note:
         hooks.note_will_flush(self)
-        return BackendNote(
+        return notes_pb2.Note(
             id=self.id,
             guid=self.guid,
             notetype_id=self.mid,
@@ -64,85 +79,124 @@ class Note:
         )
 
     def flush(self) -> None:
-        assert self.id != 0
-        self.col.backend.update_note(self.to_backend_note())
+        """This preserves any current checkpoint.
+        For an undo entry, use col.update_note() instead."""
+        if self.id == 0:
+            raise Exception("can't flush a new note")
+        self.col._backend.update_notes(
+            notes=[self._to_backend_note()], skip_undo_entry=True
+        )
 
-    def __repr__(self) -> str:
-        d = dict(self.__dict__)
-        del d["col"]
-        return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
+    def joined_fields(self) -> str:
+        return join_fields(self.fields)
 
-    def joinedFields(self) -> str:
-        return joinFields(self.fields)
+    def ephemeral_card(
+        self,
+        ord: int = 0,
+        *,
+        custom_note_type: NotetypeDict = None,
+        custom_template: TemplateDict = None,
+        fill_empty: bool = False,
+    ) -> anki.cards.Card:
+        card = anki.cards.Card(self.col)
+        card.ord = ord
+        card.did = anki.decks.DEFAULT_DECK_ID
 
-    def cards(self) -> List[anki.cards.Card]:
-        return [self.col.getCard(id) for id in self.card_ids()]
+        model = custom_note_type or self.note_type()
+        template = copy.copy(
+            custom_template
+            or (
+                model["tmpls"][ord] if model["type"] == MODEL_STD else model["tmpls"][0]
+            )
+        )
+        # may differ in cloze case
+        template["ord"] = card.ord
 
-    def card_ids(self) -> Sequence[int]:
+        output = anki.template.TemplateRenderContext.from_card_layout(
+            self,
+            card,
+            notetype=model,
+            template=template,
+            fill_empty=fill_empty,
+        ).render()
+        card.set_render_output(output)
+        card._note = self
+        return card
+
+    def cards(self) -> list[anki.cards.Card]:
+        return [self.col.get_card(id) for id in self.card_ids()]
+
+    def card_ids(self) -> Sequence[anki.cards.CardId]:
         return self.col.card_ids_of_note(self.id)
 
-    def model(self) -> Optional[NoteType]:
+    def note_type(self) -> NotetypeDict | None:
         return self.col.models.get(self.mid)
 
-    _model = property(model)
+    _note_type = property(note_type)
 
     def cloze_numbers_in_fields(self) -> Sequence[int]:
-        return self.col.backend.cloze_numbers_in_note(self.to_backend_note())
+        return self.col._backend.cloze_numbers_in_note(self._to_backend_note())
 
     # Dict interface
     ##################################################
 
-    def keys(self) -> List[str]:
+    def keys(self) -> list[str]:
         return list(self._fmap.keys())
 
-    def values(self) -> List[str]:
+    def values(self) -> list[str]:
         return self.fields
 
-    def items(self) -> List[Tuple[Any, Any]]:
+    def items(self) -> list[tuple[str, str]]:
         return [(f["name"], self.fields[ord]) for ord, f in sorted(self._fmap.values())]
 
-    def _fieldOrd(self, key: str) -> Any:
+    def _field_index(self, key: str) -> int:
         try:
             return self._fmap[key][0]
         except Exception as exc:
             raise KeyError(key) from exc
 
     def __getitem__(self, key: str) -> str:
-        return self.fields[self._fieldOrd(key)]
+        return self.fields[self._field_index(key)]
 
     def __setitem__(self, key: str, value: str) -> None:
-        self.fields[self._fieldOrd(key)] = value
+        self.fields[self._field_index(key)] = value
 
-    def __contains__(self, key) -> bool:
+    def __contains__(self, key: str) -> bool:
         return key in self._fmap
 
     # Tags
     ##################################################
 
-    def hasTag(self, tag: str) -> Any:
-        return self.col.tags.inList(tag, self.tags)
+    def has_tag(self, tag: str) -> bool:
+        return self.col.tags.in_list(tag, self.tags)
 
-    def stringTags(self) -> Any:
-        return self.col.tags.join(self.col.tags.canonify(self.tags))
-
-    def setTagsFromStr(self, tags: str) -> None:
-        self.tags = self.col.tags.split(tags)
-
-    def delTag(self, tag: str) -> None:
+    def remove_tag(self, tag: str) -> None:
         rem = []
-        for t in self.tags:
-            if t.lower() == tag.lower():
-                rem.append(t)
-        for r in rem:
-            self.tags.remove(r)
+        for tag_ in self.tags:
+            if tag_.lower() == tag.lower():
+                rem.append(tag_)
+        for tag_ in rem:
+            self.tags.remove(tag_)
 
-    def addTag(self, tag: str) -> None:
-        # duplicates will be stripped on save
+    def add_tag(self, tag: str) -> None:
+        "Add tag. Duplicates will be stripped on save."
         self.tags.append(tag)
 
-    # Unique/duplicate check
+    def string_tags(self) -> str:
+        return self.col.tags.join(self.tags)
+
+    def set_tags_from_str(self, tags: str) -> None:
+        self.tags = self.col.tags.split(tags)
+
+    # Unique/duplicate/cloze check
     ##################################################
 
-    def dupeOrEmpty(self) -> int:
-        "1 if first is empty; 2 if first is a duplicate, 0 otherwise."
-        return self.col.backend.note_is_duplicate_or_empty(self.to_backend_note()).state
+    def fields_check(self) -> NoteFieldsCheckResult.V:
+        return self.col._backend.note_fields_check(self._to_backend_note()).state
+
+    dupeOrEmpty = duplicate_or_empty = fields_check
+
+
+Note.register_deprecated_aliases(
+    delTag=Note.remove_tag, _fieldOrd=Note._field_index, model=Note.note_type
+)

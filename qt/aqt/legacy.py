@@ -1,45 +1,48 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 """
 Legacy support
 """
 
-from typing import List
+from __future__ import annotations
+
+from typing import Any
 
 import anki
+import anki.sound
+import anki.utils
 import aqt
-from anki.sound import SoundOrVideoTag
-from anki.template import av_tags_to_native
 from aqt.theme import theme_manager
 
 # Routines removed from pylib/
 ##########################################################################
 
 
-def bodyClass(col, card) -> str:
+def bodyClass(col, card) -> str:  # type: ignore
     print("bodyClass() deprecated")
     return theme_manager.body_classes_for_card_ord(card.ord)
 
 
-def allSounds(text) -> List:
+def allSounds(text) -> list:  # type: ignore
     print("allSounds() deprecated")
-    out = aqt.mw.col.backend.extract_av_tags(text=text, question_side=True)
-    return [
-        x.filename
-        for x in av_tags_to_native(out.av_tags)
-        if isinstance(x, SoundOrVideoTag)
-    ]
+    return aqt.mw.col.media._extract_filenames(text)
 
 
-def stripSounds(text) -> str:
+def stripSounds(text) -> str:  # type: ignore
     print("stripSounds() deprecated")
-    return aqt.mw.col.backend.strip_av_tags(text)
+    return aqt.mw.col.media.strip_av_tags(text)
 
 
-def fmtTimeSpan(time, pad=0, point=0, short=False, inTime=False, unit=99):
-    print("fmtTimeSpan() has become col.backend.format_time_span()")
+def fmtTimeSpan(
+    time: Any,
+    pad: Any = 0,
+    point: Any = 0,
+    short: Any = False,
+    inTime: Any = False,
+    unit: Any = 99,
+) -> Any:
+    print("fmtTimeSpan() has become col.format_timespan()")
     return aqt.mw.col.format_timespan(time)
 
 

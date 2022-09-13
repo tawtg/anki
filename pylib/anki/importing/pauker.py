@@ -1,6 +1,8 @@
 # Copyright: Andreas Klauer <Andreas.Klauer@metamorpher.de>
 # License: BSD-3
 
+# pylint: disable=invalid-name
+
 import gzip
 import html
 import math
@@ -9,7 +11,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from anki.importing.noteimp import ForeignCard, ForeignNote, NoteImporter
-from anki.stdmodels import addForwardReverse
+from anki.stdmodels import _legacy_add_forward_reverse
 
 ONE_DAY = 60 * 60 * 24
 
@@ -21,10 +23,10 @@ class PaukerImporter(NoteImporter):
     allowHTML = True
 
     def run(self):
-        model = addForwardReverse(self.col)
+        model = _legacy_add_forward_reverse(self.col)
         model["name"] = "Pauker"
         self.col.models.save(model, updateReqs=False)
-        self.col.models.setCurrent(model)
+        self.col.models.set_current(model)
         self.model = model
         self.initMapping()
         NoteImporter.run(self)
@@ -39,7 +41,7 @@ class PaukerImporter(NoteImporter):
 
         try:
             f = gzip.open(self.file)
-            tree = ET.parse(f)
+            tree = ET.parse(f)  # type: ignore
             lesson = tree.getroot()
             assert lesson.tag == "Lesson"
         finally:

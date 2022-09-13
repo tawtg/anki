@@ -1,14 +1,16 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 # coding: utf-8
 
 import os
 import tempfile
 
-from anki import Collection as aopen
+from anki.collection import Collection as aopen
 from anki.dbproxy import emulate_named_args
-from anki.lang import without_unicode_isolation
-from anki.rsbackend import TR
-from anki.stdmodels import addBasicModel, get_stock_notetypes
-from anki.utils import isWin
+from anki.lang import TR, without_unicode_isolation
+from anki.stdmodels import _legacy_add_basic_model, get_stock_notetypes
+from anki.utils import is_win
 from tests.shared import assertException, getEmptyCol
 
 
@@ -32,7 +34,7 @@ def test_create_open():
     col.close()
 
     # non-writeable dir
-    if isWin:
+    if is_win:
         dir = "c:\root.anki2"
     else:
         dir = "/attachroot.anki2"
@@ -55,32 +57,32 @@ def test_noteAddDelete():
     # test multiple cards - add another template
     m = col.models.current()
     mm = col.models
-    t = mm.newTemplate("Reverse")
+    t = mm.new_template("Reverse")
     t["qfmt"] = "{{Back}}"
     t["afmt"] = "{{Front}}"
-    mm.addTemplate(m, t)
+    mm.add_template(m, t)
     mm.save(m)
-    assert col.cardCount() == 2
+    assert col.card_count() == 2
     # creating new notes should use both cards
     note = col.newNote()
     note["Front"] = "three"
     note["Back"] = "four"
     n = col.addNote(note)
     assert n == 2
-    assert col.cardCount() == 4
+    assert col.card_count() == 4
     # check q/a generation
     c0 = note.cards()[0]
-    assert "three" in c0.q()
+    assert "three" in c0.question()
     # it should not be a duplicate
-    assert not note.dupeOrEmpty()
+    assert not note.fields_check()
     # now let's make a duplicate
     note2 = col.newNote()
     note2["Front"] = "one"
     note2["Back"] = ""
-    assert note2.dupeOrEmpty()
+    assert note2.fields_check()
     # empty first field should not be permitted either
     note2["Front"] = " "
-    assert note2.dupeOrEmpty()
+    assert note2.fields_check()
 
 
 def test_fieldChecksum():
@@ -105,13 +107,13 @@ def test_addDelTags():
     note2["Front"] = "2"
     col.addNote(note2)
     # adding for a given id
-    col.tags.bulkAdd([note.id], "foo")
+    col.tags.bulk_add([note.id], "foo")
     note.load()
     note2.load()
     assert "foo" in note.tags
     assert "foo" not in note2.tags
     # should be canonified
-    col.tags.bulkAdd([note.id], "foo aaa")
+    col.tags.bulk_add([note.id], "foo aaa")
     note.load()
     assert note.tags[0] == "aaa"
     assert len(note.tags) == 2
@@ -121,7 +123,7 @@ def test_timestamps():
     col = getEmptyCol()
     assert len(col.models.all_names_and_ids()) == len(get_stock_notetypes(col))
     for i in range(100):
-        addBasicModel(col)
+        _legacy_add_basic_model(col)
     assert len(col.models.all_names_and_ids()) == 100 + len(get_stock_notetypes(col))
 
 
@@ -136,15 +138,15 @@ def test_furigana():
     n["Front"] = "foo[abc]"
     col.addNote(n)
     c = n.cards()[0]
-    assert c.q().endswith("abc")
+    assert c.question().endswith("abc")
     # and should avoid sound
     n["Front"] = "foo[sound:abc.mp3]"
     n.flush()
-    assert "anki:play" in c.q(reload=True)
+    assert "anki:play" in c.question(reload=True)
     # it shouldn't throw an error while people are editing
     m["tmpls"][0]["qfmt"] = "{{kana:}}"
     mm.save(m)
-    c.q(reload=True)
+    c.question(reload=True)
 
 
 def test_translate():
@@ -152,11 +154,11 @@ def test_translate():
     no_uni = without_unicode_isolation
 
     assert (
-        col.tr(TR.CARD_TEMPLATE_RENDERING_FRONT_SIDE_PROBLEM)
+        col.tr.card_template_rendering_front_side_problem()
         == "Front template has a problem:"
     )
-    assert no_uni(col.tr(TR.STATISTICS_REVIEWS, reviews=1)) == "1 review"
-    assert no_uni(col.tr(TR.STATISTICS_REVIEWS, reviews=2)) == "2 reviews"
+    assert no_uni(col.tr.statistics_reviews(reviews=1)) == "1 review"
+    assert no_uni(col.tr.statistics_reviews(reviews=2)) == "2 reviews"
 
 
 def test_db_named_args(capsys):

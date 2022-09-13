@@ -1,15 +1,16 @@
-# -*- coding: utf-8 -*-
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 from typing import Optional
 
-from anki.lang import _
 from aqt import AnkiQt, gui_hooks
 from aqt.qt import *
-from aqt.utils import shortcut
+from aqt.utils import HelpPage, shortcut, tr
 
 
 class ModelChooser(QHBoxLayout):
+    "New code should prefer NotetypeChooser."
+
     def __init__(
         self,
         mw: AnkiQt,
@@ -21,7 +22,7 @@ class ModelChooser(QHBoxLayout):
         and the caller can call .onModelChange() to pull up the dialog when they
         are ready."""
         QHBoxLayout.__init__(self)
-        self.widget = widget  # type: ignore
+        self._widget = widget  # type: ignore
         self.mw = mw
         self.deck = mw.col
         self.label = label
@@ -33,16 +34,16 @@ class ModelChooser(QHBoxLayout):
         self.setSpacing(8)
         self.setupModels()
         gui_hooks.state_did_reset.append(self.onReset)
-        self.widget.setLayout(self)
+        self._widget.setLayout(self)
 
     def setupModels(self) -> None:
         if self.label:
-            self.modelLabel = QLabel(_("Type"))
+            self.modelLabel = QLabel(tr.notetypes_type())
             self.addWidget(self.modelLabel)
         # models box
         self.models = QPushButton()
-        self.models.setToolTip(shortcut(_("Change Note Type (Ctrl+N)")))
-        QShortcut(QKeySequence("Ctrl+N"), self.widget, activated=self.on_activated)  # type: ignore
+        self.models.setToolTip(shortcut(tr.qt_misc_change_note_type_ctrlandn()))
+        QShortcut(QKeySequence("Ctrl+N"), self._widget, activated=self.on_activated)  # type: ignore
         self.models.setAutoDefault(False)
         self.addWidget(self.models)
         qconnect(self.models.clicked, self.onModelChange)
@@ -58,47 +59,50 @@ class ModelChooser(QHBoxLayout):
         self.updateModels()
 
     def show(self) -> None:
-        self.widget.show()  # type: ignore
+        self._widget.show()  # type: ignore
 
     def hide(self) -> None:
-        self.widget.hide()  # type: ignore
+        self._widget.hide()  # type: ignore
 
     def onEdit(self) -> None:
         import aqt.models
 
-        aqt.models.Models(self.mw, self.widget)
+        aqt.models.Models(self.mw, self._widget)
 
     def onModelChange(self) -> None:
         from aqt.studydeck import StudyDeck
 
         current = self.deck.models.current()["name"]
         # edit button
-        edit = QPushButton(_("Manage"), clicked=self.onEdit)  # type: ignore
+        edit = QPushButton(tr.qt_misc_manage(), clicked=self.onEdit)  # type: ignore
 
-        def nameFunc():
-            return sorted(self.deck.models.allNames())
+        def nameFunc() -> list[str]:
+            return [nt.name for nt in self.deck.models.all_names_and_ids()]
 
-        ret = StudyDeck(
+        def callback(ret: StudyDeck) -> None:
+            if not ret.name:
+                return
+            m = self.deck.models.by_name(ret.name)
+            self.deck.conf["curModel"] = m["id"]
+            cdeck = self.deck.decks.current()
+            cdeck["mid"] = m["id"]
+            self.deck.decks.save(cdeck)
+            gui_hooks.current_note_type_did_change(current)
+            self.mw.reset()
+
+        StudyDeck(
             self.mw,
             names=nameFunc,
-            accept=_("Choose"),
-            title=_("Choose Note Type"),
-            help="_notes",
+            accept=tr.actions_choose(),
+            title=tr.qt_misc_choose_note_type(),
+            help=HelpPage.NOTE_TYPE,
             current=current,
-            parent=self.widget,
+            parent=self._widget,
             buttons=[edit],
             cancel=True,
             geomKey="selectModel",
+            callback=callback,
         )
-        if not ret.name:
-            return
-        m = self.deck.models.byName(ret.name)
-        self.deck.conf["curModel"] = m["id"]
-        cdeck = self.deck.decks.current()
-        cdeck["mid"] = m["id"]
-        self.deck.decks.save(cdeck)
-        gui_hooks.current_note_type_did_change(current)
-        self.mw.reset()
 
     def updateModels(self) -> None:
-        self.models.setText(self.deck.models.current()["name"])
+        self.models.setText(self.deck.models.current()["name"].replace("&", "&&"))

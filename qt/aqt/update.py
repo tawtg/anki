@@ -2,14 +2,15 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import time
+from typing import Any
 
 import requests
 
 import aqt
-from anki.lang import _
-from anki.utils import platDesc, versionWithBuild
+from anki.utils import plat_desc, version_with_build
+from aqt.main import AnkiQt
 from aqt.qt import *
-from aqt.utils import openLink, showText
+from aqt.utils import openLink, showText, tr
 
 
 class LatestVersionFinder(QThread):
@@ -18,21 +19,21 @@ class LatestVersionFinder(QThread):
     newMsg = pyqtSignal(dict)
     clockIsOff = pyqtSignal(float)
 
-    def __init__(self, main):
+    def __init__(self, main: AnkiQt) -> None:
         QThread.__init__(self)
         self.main = main
         self.config = main.pm.meta
 
-    def _data(self):
+    def _data(self) -> dict[str, Any]:
         return {
-            "ver": versionWithBuild(),
-            "os": platDesc(),
+            "ver": version_with_build(),
+            "os": plat_desc(),
             "id": self.config["id"],
             "lm": self.config["lastMsg"],
             "crt": self.config["created"],
         }
 
-    def run(self):
+    def run(self) -> None:
         if not self.config["updates"]:
             return
         d = self._data()
@@ -55,23 +56,23 @@ class LatestVersionFinder(QThread):
             self.clockIsOff.emit(diff)  # type: ignore
 
 
-def askAndUpdate(mw, ver):
-    baseStr = _("""<h1>Anki Updated</h1>Anki %s has been released.<br><br>""") % ver
+def askAndUpdate(mw: aqt.AnkiQt, ver: str) -> None:
+    baseStr = tr.qt_misc_anki_updatedanki_has_been_released(val=ver)
     msg = QMessageBox(mw)
-    msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)  # type: ignore
-    msg.setIcon(QMessageBox.Information)
-    msg.setText(baseStr + _("Would you like to download it now?"))
-    button = QPushButton(_("Ignore this update"))
-    msg.addButton(button, QMessageBox.RejectRole)
-    msg.setDefaultButton(QMessageBox.Yes)
-    ret = msg.exec_()
+    msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)  # type: ignore
+    msg.setIcon(QMessageBox.Icon.Information)
+    msg.setText(baseStr + tr.qt_misc_would_you_like_to_download_it())
+    button = QPushButton(tr.qt_misc_ignore_this_update())
+    msg.addButton(button, QMessageBox.ButtonRole.RejectRole)
+    msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+    ret = msg.exec()
     if msg.clickedButton() == button:
         # ignore this update
         mw.pm.meta["suppressUpdate"] = ver
-    elif ret == QMessageBox.Yes:
-        openLink(aqt.appWebsite)
+    elif ret == QMessageBox.StandardButton.Yes:
+        openLink(aqt.appWebsiteDownloadSection)
 
 
-def showMessages(mw, data):
+def showMessages(mw: aqt.AnkiQt, data: dict) -> None:
     showText(data["msg"], parent=mw, type="html")
     mw.pm.meta["lastMsg"] = data["msgId"]

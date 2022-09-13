@@ -1,9 +1,12 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-from typing import Any, Dict
+from __future__ import annotations
 
-from anki.lang import _
+import sys
+from typing import Any, NewType, no_type_check
+
+from anki._legacy import DeprecatedNamesMixinForModule
 
 # whether new cards should be mixed with reviews, or shown first or last
 NEW_CARDS_DISTRIBUTE = 0
@@ -15,20 +18,22 @@ NEW_CARDS_RANDOM = 0
 NEW_CARDS_DUE = 1
 
 # Queue types
-QUEUE_TYPE_MANUALLY_BURIED = -3
-QUEUE_TYPE_SIBLING_BURIED = -2
-QUEUE_TYPE_SUSPENDED = -1
-QUEUE_TYPE_NEW = 0
-QUEUE_TYPE_LRN = 1
-QUEUE_TYPE_REV = 2
-QUEUE_TYPE_DAY_LEARN_RELEARN = 3
-QUEUE_TYPE_PREVIEW = 4
+CardQueue = NewType("CardQueue", int)
+QUEUE_TYPE_MANUALLY_BURIED = CardQueue(-3)
+QUEUE_TYPE_SIBLING_BURIED = CardQueue(-2)
+QUEUE_TYPE_SUSPENDED = CardQueue(-1)
+QUEUE_TYPE_NEW = CardQueue(0)
+QUEUE_TYPE_LRN = CardQueue(1)
+QUEUE_TYPE_REV = CardQueue(2)
+QUEUE_TYPE_DAY_LEARN_RELEARN = CardQueue(3)
+QUEUE_TYPE_PREVIEW = CardQueue(4)
 
 # Card types
-CARD_TYPE_NEW = 0
-CARD_TYPE_LRN = 1
-CARD_TYPE_REV = 2
-CARD_TYPE_RELEARNING = 3
+CardType = NewType("CardType", int)
+CARD_TYPE_NEW = CardType(0)
+CARD_TYPE_LRN = CardType(1)
+CARD_TYPE_REV = CardType(2)
+CARD_TYPE_RELEARNING = CardType(3)
 
 # removal types
 REM_CARD = 0
@@ -65,8 +70,9 @@ MODEL_STD = 0
 MODEL_CLOZE = 1
 
 STARTING_FACTOR = 2500
+STARTING_FACTOR_FRACTION = STARTING_FACTOR / 1000
 
-HELP_SITE = "https://apps.ankiweb.net/docs/manual.html"
+HELP_SITE = "https://docs.ankiweb.net/"
 
 # Leech actions
 LEECH_SUSPEND = 0
@@ -83,43 +89,49 @@ REVLOG_LRN = 0
 REVLOG_REV = 1
 REVLOG_RELRN = 2
 REVLOG_CRAM = 3
+REVLOG_RESCHED = 4
 
 # Labels
 ##########################################################################
 
+import anki.collection
 
-def newCardOrderLabels() -> Dict[int, Any]:
+
+def _tr(col: anki.collection.Collection | None) -> Any:
+    if col:
+        return col.tr
+    else:
+        print("routine in consts.py should be passed col")
+        import traceback
+
+        traceback.print_stack(file=sys.stdout)
+        from anki.lang import tr_legacyglobal
+
+        return tr_legacyglobal
+
+
+def new_card_order_labels(col: anki.collection.Collection | None) -> dict[int, Any]:
+    tr = _tr(col)
     return {
-        0: _("Show new cards in random order"),
-        1: _("Show new cards in order added"),
+        0: tr.scheduling_show_new_cards_in_random_order(),
+        1: tr.scheduling_show_new_cards_in_order_added(),
     }
 
 
-def newCardSchedulingLabels() -> Dict[int, Any]:
+def new_card_scheduling_labels(
+    col: anki.collection.Collection | None,
+) -> dict[int, Any]:
+    tr = _tr(col)
     return {
-        0: _("Mix new cards and reviews"),
-        1: _("Show new cards after reviews"),
-        2: _("Show new cards before reviews"),
+        0: tr.scheduling_mix_new_cards_and_reviews(),
+        1: tr.scheduling_show_new_cards_after_reviews(),
+        2: tr.scheduling_show_new_cards_before_reviews(),
     }
 
 
-def alignmentLabels() -> Dict[int, Any]:
-    return {
-        0: _("Center"),
-        1: _("Left"),
-        2: _("Right"),
-    }
+_deprecated_names = DeprecatedNamesMixinForModule(globals())
 
 
-def dynOrderLabels() -> Dict[int, Any]:
-    return {
-        0: _("Oldest seen first"),
-        1: _("Random"),
-        2: _("Increasing intervals"),
-        3: _("Decreasing intervals"),
-        4: _("Most lapses"),
-        5: _("Order added"),
-        6: _("Order due"),
-        7: _("Latest added first"),
-        8: _("Relative overdueness"),
-    }
+@no_type_check
+def __getattr__(name: str) -> Any:
+    return _deprecated_names.__getattr__(name)

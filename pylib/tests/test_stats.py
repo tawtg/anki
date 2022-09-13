@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
-# -*- coding: UTF-8 -*-
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import os
 import tempfile
 
+from anki.collection import CardStats
 from tests.shared import getEmptyCol
 
 
@@ -14,12 +15,14 @@ def test_stats():
     col.addNote(note)
     c = note.cards()[0]
     # card stats
-    assert col.cardStats(c)
+    card_stats = col.card_stats_data(c.id)
+    assert card_stats.note_id == note.id
     col.reset()
     c = col.sched.getCard()
     col.sched.answerCard(c, 3)
     col.sched.answerCard(c, 2)
-    assert col.cardStats(c)
+    card_stats = col.card_stats_data(c.id)
+    assert len(card_stats.revlog) == 2
 
 
 def test_graphs_empty():

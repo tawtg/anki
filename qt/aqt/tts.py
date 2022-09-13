@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 """
 Basic text to speech support.
 
@@ -25,19 +28,24 @@ expose the name of the engine, which would mean the user could write
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import subprocess
+import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
 from operator import attrgetter
-from typing import Any, List, Optional, cast
+from typing import Any, cast
 
+import anki
+import anki.template
 from anki import hooks
 from anki.sound import AVTag, TTSTag
-from anki.utils import checksum, isWin, tmpdir
+from anki.utils import checksum, is_win, tmpdir
 from aqt import gui_hooks
 from aqt.sound import OnDoneCallback, SimpleProcessPlayer
+from aqt.utils import tooltip, tr
 
 
 @dataclass
@@ -54,17 +62,17 @@ class TTSVoiceMatch:
 
 class TTSPlayer:
     default_rank = 0
-    _available_voices: Optional[List[TTSVoice]] = None
+    _available_voices: list[TTSVoice] | None = None
 
-    def get_available_voices(self) -> List[TTSVoice]:
+    def get_available_voices(self) -> list[TTSVoice]:
         return []
 
-    def voices(self) -> List[TTSVoice]:
+    def voices(self) -> list[TTSVoice]:
         if self._available_voices is None:
             self._available_voices = self.get_available_voices()
         return self._available_voices
 
-    def voice_for_tag(self, tag: TTSTag) -> Optional[TTSVoiceMatch]:
+    def voice_for_tag(self, tag: TTSTag) -> TTSVoiceMatch | None:
         avail_voices = self.voices()
 
         rank = self.default_rank
@@ -96,7 +104,7 @@ class TTSPlayer:
 
 class TTSProcessPlayer(SimpleProcessPlayer, TTSPlayer):
     # mypy gets confused if rank_for_tag is defined in TTSPlayer
-    def rank_for_tag(self, tag: AVTag) -> Optional[int]:
+    def rank_for_tag(self, tag: AVTag) -> int | None:
         if not isinstance(tag, TTSTag):
             return None
 
@@ -111,10 +119,10 @@ class TTSProcessPlayer(SimpleProcessPlayer, TTSPlayer):
 ##########################################################################
 
 
-def all_tts_voices() -> List[TTSVoice]:
+def all_tts_voices() -> list[TTSVoice]:
     from aqt.sound import av_player
 
-    all_voices: List[TTSVoice] = []
+    all_voices: list[TTSVoice] = []
     for p in av_player.players:
         getter = getattr(p, "voices", None)
         if not getter:
@@ -123,7 +131,9 @@ def all_tts_voices() -> List[TTSVoice]:
     return all_voices
 
 
-def on_tts_voices(text: str, field, filter: str, ctx) -> str:
+def on_tts_voices(
+    text: str, field: str, filter: str, ctx: anki.template.TemplateRenderContext
+) -> str:
     if filter != "tts-voices":
         return text
     voices = all_tts_voices()
@@ -135,7 +145,7 @@ def on_tts_voices(text: str, field, filter: str, ctx) -> str:
         f"{{{{tts {v.lang} voices={v.name}}}}}"  # pylint: disable=no-member
         for v in voices
     )
-    return buf + "</div>"
+    return f"{buf}</div>"
 
 
 hooks.field_filter.append(on_tts_voices)
@@ -149,6 +159,7 @@ class MacVoice(TTSVoice):
     original_name: str
 
 
+# pylint: disable=no-member
 class MacTTSPlayer(TTSProcessPlayer):
     "Invokes a process to play the audio in the background."
 
@@ -175,7 +186,7 @@ class MacTTSPlayer(TTSProcessPlayer):
         self._process.stdin.close()
         self._wait_for_termination(tag)
 
-    def get_available_voices(self) -> List[TTSVoice]:
+    def get_available_voices(self) -> list[TTSVoice]:
         cmd = subprocess.run(
             ["say", "-v", "?"], capture_output=True, check=True, encoding="utf8"
         )
@@ -187,13 +198,13 @@ class MacTTSPlayer(TTSProcessPlayer):
                 voices.append(voice)
         return voices
 
-    def _parse_voice_line(self, line: str) -> Optional[TTSVoice]:
+    def _parse_voice_line(self, line: str) -> TTSVoice | None:
         m = self.VOICE_HELP_LINE_RE.match(line)
         if not m:
             return None
 
         original_name = m.group(1).strip()
-        tidy_name = "Apple_" + original_name.replace(" ", "_")
+        tidy_name = f"Apple_{original_name.replace(' ', '_')}"
         return MacVoice(name=tidy_name, original_name=original_name, lang=m.group(2))
 
 
@@ -254,7 +265,7 @@ class WindowsVoice(TTSVoice):
     handle: Any
 
 
-if isWin:
+if is_win:
     import win32com.client  # pylint: disable=import-error
 
     # language ID map from https://github.com/sindresorhus/lcid/blob/master/lcid.json
@@ -463,26 +474,41 @@ if isWin:
         "31748": "zh_CHT",
     }
 
-    def lcid_hex_str_to_lang_code(hex: str) -> str:
-        dec_str = str(int(hex, 16))
-        return LCIDS.get(dec_str, "unknown")
+    def lcid_hex_str_to_lang_codes(hex_codes: str) -> list[str]:
+        return [
+            LCIDS.get(str(int(code, 16)), "unknown") for code in hex_codes.split(";")
+        ]
 
     class WindowsTTSPlayer(TTSProcessPlayer):
+        default_rank = -1
         try:
             speaker = win32com.client.Dispatch("SAPI.SpVoice")
         except:
             speaker = None
 
-        def get_available_voices(self) -> List[TTSVoice]:
+        def get_available_voices(self) -> list[TTSVoice]:
             if self.speaker is None:
                 return []
-            return list(map(self._voice_to_object, self.speaker.GetVoices()))
+            return [
+                obj
+                for voice in self.speaker.GetVoices()
+                for obj in self._voice_to_objects(voice)
+            ]
 
-        def _voice_to_object(self, voice: Any):
-            lang = voice.GetAttribute("language")
-            lang = lcid_hex_str_to_lang_code(lang)
-            name = self._tidy_name(voice.GetAttribute("name"))
-            return WindowsVoice(name=name, lang=lang, handle=voice)
+        def _voice_to_objects(self, voice: Any) -> list[WindowsVoice]:
+            try:
+                langs = voice.GetAttribute("language")
+            except:
+                # no associated language; ignore
+                return []
+            langs = lcid_hex_str_to_lang_codes(langs)
+            try:
+                name = voice.GetAttribute("name")
+            except:
+                # some voices may not have a name
+                name = "unknown"
+            name = self._tidy_name(name)
+            return [WindowsVoice(name=name, lang=lang, handle=voice) for lang in langs]
 
         def _play(self, tag: AVTag) -> None:
             assert isinstance(tag, TTSTag)
@@ -501,7 +527,7 @@ if isWin:
                 while not self.speaker.WaitUntilDone(100):
                     if self._terminate_flag:
                         # stop playing
-                        self.speaker.Skip("Sentence", 2 ** 15)
+                        self.speaker.Skip("Sentence", 2**15)
                         return
             finally:
                 self._terminate_flag = False
@@ -516,3 +542,82 @@ if isWin:
             "eg. 1.5 -> 15, 0.5 -> -5"
             speed = (speed * 10) - 10
             return int(max(-10, min(10, speed)))
+
+    @dataclass
+    class WindowsRTVoice(TTSVoice):
+        id: Any
+
+    class WindowsRTTTSFilePlayer(TTSProcessPlayer):
+        voice_list: list[Any] = []
+        tmppath = os.path.join(tmpdir(), "tts.wav")
+
+        def import_voices(self) -> None:
+            import winrt.windows.media.speechsynthesis as speechsynthesis  # type: ignore
+
+            try:
+                self.voice_list = speechsynthesis.SpeechSynthesizer.get_all_voices()
+            except Exception as e:
+                print("winrt tts voices unavailable:", e)
+                self.voice_list = []
+
+        def get_available_voices(self) -> list[TTSVoice]:
+            t = threading.Thread(target=self.import_voices)
+            t.start()
+            t.join()
+            return list(map(self._voice_to_object, self.voice_list))
+
+        def _voice_to_object(self, voice: Any) -> TTSVoice:
+            return WindowsRTVoice(
+                id=voice.id,
+                name=voice.display_name.replace(" ", "_"),
+                lang=voice.language.replace("-", "_"),
+            )
+
+        def _play(self, tag: AVTag) -> None:
+            assert isinstance(tag, TTSTag)
+            match = self.voice_for_tag(tag)
+            assert match
+            voice = cast(WindowsRTVoice, match.voice)
+
+            self._taskman.run_on_main(
+                lambda: gui_hooks.av_player_did_begin_playing(self, tag)
+            )
+            asyncio.run(self.speakText(tag, voice.id))
+
+        def _on_done(self, ret: Future, cb: OnDoneCallback) -> None:
+            try:
+                ret.result()
+            except RuntimeError:
+                tooltip(tr.errors_windows_tts_runtime_error())
+                return
+
+            # inject file into the top of the audio queue
+            from aqt.sound import av_player
+
+            av_player.insert_file(self.tmppath)
+
+            # then tell player to advance, which will cause the file to be played
+            cb()
+
+        async def speakText(self, tag: TTSTag, voice_id: Any) -> None:
+            import winrt.windows.media.speechsynthesis as speechsynthesis  # type: ignore
+            import winrt.windows.storage.streams as streams  # type: ignore
+
+            synthesizer = speechsynthesis.SpeechSynthesizer()
+
+            voices = speechsynthesis.SpeechSynthesizer.get_all_voices()
+            voice_match = next(filter(lambda v: v.id == voice_id, voices))
+
+            assert voice_match
+
+            synthesizer.voice = voice_match
+            synthesizer.options.speaking_rate = tag.speed
+
+            stream = await synthesizer.synthesize_text_to_stream_async(tag.field_text)
+            inputStream = stream.get_input_stream_at(0)
+            dataReader = streams.DataReader(inputStream)
+            dataReader.load_async(stream.size)
+            f = open(self.tmppath, "wb")
+            for x in range(stream.size):
+                f.write(bytes([dataReader.read_byte()]))
+            f.close()

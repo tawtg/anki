@@ -1,10 +1,12 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-from typing import Any, List, Optional
+# pylint: disable=invalid-name
+
+from typing import Any, Optional
 
 from anki.collection import Collection
-from anki.utils import maxID
+from anki.utils import max_id
 
 # Base importer
 ##########################################################################
@@ -18,13 +20,21 @@ class Importer:
 
     def __init__(self, col: Collection, file: str) -> None:
         self.file = file
-        self.log: List[str] = []
+        self.log: list[str] = []
         self.col = col.weakref()
         self.total = 0
         self.dst = None
 
     def run(self) -> None:
         pass
+
+    def open(self) -> None:
+        "Open file and ensure it's in the right format."
+        return
+
+    def close(self) -> None:
+        "Closes the open file."
+        return
 
     # Timestamps
     ######################################################################
@@ -33,7 +43,7 @@ class Importer:
     # need to make sure our starting point is safe.
 
     def _prepareTS(self) -> None:
-        self._ts = maxID(self.dst.db)
+        self._ts = max_id(self.dst.db)
 
     def ts(self) -> Any:
         self._ts += 1

@@ -1,4 +1,3 @@
-insert
-  or ignore into tags (tag, usn)
-values
-  (?, ?)
+INSERT
+  OR REPLACE INTO tags (tag, usn, collapsed)
+VALUES (?, ?, ?)

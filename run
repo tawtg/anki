@@ -1,5 +1,6 @@
 #!/bin/bash
 
-set -eu -o pipefail ${SHELLFLAGS}
+set -e
 
-make -C $(dirname $0) run RUNFLAGS="$*"
+export PYTHONWARNINGS=default
+bazel run $BUILDARGS //qt:runanki -- $*

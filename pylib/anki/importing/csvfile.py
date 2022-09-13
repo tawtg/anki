@@ -1,13 +1,16 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+# pylint: disable=invalid-name
+
+from __future__ import annotations
+
 import csv
 import re
-from typing import Any, List, Optional, TextIO, Union
+from typing import Any, Optional, TextIO
 
 from anki.collection import Collection
 from anki.importing.noteimp import ForeignNote, NoteImporter
-from anki.lang import _
 
 
 class TextImporter(NoteImporter):
@@ -20,12 +23,12 @@ class TextImporter(NoteImporter):
         self.lines = None
         self.fileobj: Optional[TextIO] = None
         self.delimiter: Optional[str] = None
-        self.tagsToAdd: List[str] = []
+        self.tagsToAdd: list[str] = []
         self.numFields = 0
         self.dialect: Optional[Any]
-        self.data: Optional[Union[str, List[str]]]
+        self.data: Optional[str | list[str]]
 
-    def foreignNotes(self) -> List[ForeignNote]:
+    def foreignNotes(self) -> list[ForeignNote]:
         self.open()
         # process all lines
         log = []
@@ -41,19 +44,18 @@ class TextImporter(NoteImporter):
                 if len(row) != self.numFields:
                     if row:
                         log.append(
-                            _("'%(row)s' had %(num1)d fields, " "expected %(num2)d")
-                            % {
-                                "row": " ".join(row),
-                                "num1": len(row),
-                                "num2": self.numFields,
-                            }
+                            self.col.tr.importing_rows_had_num1d_fields_expected_num2d(
+                                row=" ".join(row),
+                                found=len(row),
+                                expected=self.numFields,
+                            )
                         )
                         ignored += 1
                     continue
                 note = self.noteFromFields(row)
                 notes.append(note)
         except (csv.Error) as e:
-            log.append(_("Aborted: %s") % str(e))
+            log.append(self.col.tr.importing_aborted(val=str(e)))
         self.log = log
         self.ignored = ignored
         self.close()
@@ -71,14 +73,14 @@ class TextImporter(NoteImporter):
 
     def openFile(self) -> None:
         self.dialect = None
-        self.fileobj = open(self.file, "r", encoding="utf-8-sig")
+        self.fileobj = open(self.file, encoding="utf-8-sig")
         self.data = self.fileobj.read()
 
         def sub(s):
             return re.sub(r"^\#.*$", "__comment", s)
 
         self.data = [
-            sub(x) + "\n" for x in self.data.split("\n") if sub(x) != "__comment"
+            f"{sub(x)}\n" for x in self.data.split("\n") if sub(x) != "__comment"
         ]
         if self.data:
             if self.data[0].startswith("tags:"):
@@ -146,7 +148,7 @@ class TextImporter(NoteImporter):
             # pylint: disable=no-member
             zuper.__del__(self)  # type: ignore
 
-    def noteFromFields(self, fields: List[str]) -> ForeignNote:
+    def noteFromFields(self, fields: list[str]) -> ForeignNote:
         note = ForeignNote()
         note.fields.extend([x for x in fields])
         note.tags.extend(self.tagsToAdd)

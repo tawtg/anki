@@ -2,36 +2,60 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 use crate::{
-    backend_proto::{
-        collection_scheduling_settings::NewReviewMix as NewRevMixPB, CollectionSchedulingSettings,
+    collection::Collection,
+    config::{BoolKey, StringKey},
+    error::Result,
+    pb::{
+        preferences::{scheduling::NewReviewMix as NewRevMixPB, Editing, Reviewing, Scheduling},
         Preferences,
     },
-    collection::Collection,
-    err::Result,
-    sched::cutoff::local_minutes_west_for_stamp,
-    timestamp::TimestampSecs,
+    prelude::*,
+    scheduler::timing::local_minutes_west_for_stamp,
 };
 
 impl Collection {
     pub fn get_preferences(&self) -> Result<Preferences> {
         Ok(Preferences {
-            sched: Some(self.get_collection_scheduling_settings()?),
+            scheduling: Some(self.get_scheduling_preferences()?),
+            reviewing: Some(self.get_reviewing_preferences()?),
+            editing: Some(self.get_editing_preferences()?),
+            backups: Some(self.get_backup_limits()),
         })
     }
 
-    pub fn set_preferences(&self, prefs: Preferences) -> Result<()> {
-        if let Some(sched) = prefs.sched {
-            self.set_collection_scheduling_settings(sched)?;
-        }
+    pub fn set_preferences(&mut self, prefs: Preferences) -> Result<OpOutput<()>> {
+        self.transact(Op::UpdatePreferences, |col| {
+            col.set_preferences_inner(prefs)
+        })
+    }
 
+    fn set_preferences_inner(&mut self, prefs: Preferences) -> Result<()> {
+        if let Some(sched) = prefs.scheduling {
+            self.set_scheduling_preferences(sched)?;
+        }
+        if let Some(reviewing) = prefs.reviewing {
+            self.set_reviewing_preferences(reviewing)?;
+        }
+        if let Some(editing) = prefs.editing {
+            self.set_editing_preferences(editing)?;
+        }
+        if let Some(backups) = prefs.backups {
+            self.set_backup_limits(backups)?;
+        }
         Ok(())
     }
 
-    pub fn get_collection_scheduling_settings(&self) -> Result<CollectionSchedulingSettings> {
-        Ok(CollectionSchedulingSettings {
-            scheduler_version: match self.sched_ver() {
+    pub fn get_scheduling_preferences(&self) -> Result<Scheduling> {
+        Ok(Scheduling {
+            scheduler_version: match self.scheduler_version() {
                 crate::config::SchedulerVersion::V1 => 1,
-                crate::config::SchedulerVersion::V2 => 2,
+                crate::config::SchedulerVersion::V2 => {
+                    if self.get_config_bool(BoolKey::Sched2021) {
+                        3
+                    } else {
+                        2
+                    }
+                }
             },
             rollover: self.rollover_for_current_scheduler()? as u32,
             learn_ahead_secs: self.learn_ahead_secs(),
@@ -40,24 +64,15 @@ impl Collection {
                 crate::config::NewReviewMix::ReviewsFirst => NewRevMixPB::ReviewsFirst,
                 crate::config::NewReviewMix::NewFirst => NewRevMixPB::NewFirst,
             } as i32,
-            show_remaining_due_counts: self.get_show_due_counts(),
-            show_intervals_on_buttons: self.get_show_intervals_above_buttons(),
-            time_limit_secs: self.get_answer_time_limit_secs(),
-            new_timezone: self.get_creation_mins_west().is_some(),
-            day_learn_first: self.get_day_learn_first(),
+            new_timezone: self.get_creation_utc_offset().is_some(),
+            day_learn_first: self.get_config_bool(BoolKey::ShowDayLearningCardsFirst),
         })
     }
 
-    pub(crate) fn set_collection_scheduling_settings(
-        &self,
-        settings: CollectionSchedulingSettings,
-    ) -> Result<()> {
+    pub(crate) fn set_scheduling_preferences(&mut self, settings: Scheduling) -> Result<()> {
         let s = settings;
 
-        self.set_day_learn_first(s.day_learn_first)?;
-        self.set_answer_time_limit_secs(s.time_limit_secs)?;
-        self.set_show_due_counts(s.show_remaining_due_counts)?;
-        self.set_show_intervals_above_buttons(s.show_intervals_on_buttons)?;
+        self.set_config_bool_inner(BoolKey::ShowDayLearningCardsFirst, s.day_learn_first)?;
         self.set_learn_ahead_secs(s.learn_ahead_secs)?;
 
         self.set_new_review_mix(match s.new_review_mix() {
@@ -73,18 +88,68 @@ impl Collection {
         }
 
         if s.new_timezone {
-            if self.get_creation_mins_west().is_none() {
-                self.set_creation_mins_west(Some(local_minutes_west_for_stamp(created.0)))?;
+            if self.get_creation_utc_offset().is_none() {
+                self.set_creation_utc_offset(Some(local_minutes_west_for_stamp(created.0)))?;
             }
         } else {
-            self.set_creation_mins_west(None)?;
+            self.set_creation_utc_offset(None)?;
         }
 
-        if s.scheduler_version != 1 {
-            self.set_local_mins_west(local_minutes_west_for_stamp(TimestampSecs::now().0))?;
-        }
+        Ok(())
+    }
 
-        // fixme: currently scheduler change unhandled
+    pub fn get_reviewing_preferences(&self) -> Result<Reviewing> {
+        Ok(Reviewing {
+            hide_audio_play_buttons: self.get_config_bool(BoolKey::HideAudioPlayButtons),
+            interrupt_audio_when_answering: self
+                .get_config_bool(BoolKey::InterruptAudioWhenAnswering),
+            show_remaining_due_counts: self.get_config_bool(BoolKey::ShowRemainingDueCountsInStudy),
+            show_intervals_on_buttons: self
+                .get_config_bool(BoolKey::ShowIntervalsAboveAnswerButtons),
+            time_limit_secs: self.get_answer_time_limit_secs(),
+        })
+    }
+
+    pub(crate) fn set_reviewing_preferences(&mut self, settings: Reviewing) -> Result<()> {
+        let s = settings;
+        self.set_config_bool_inner(BoolKey::HideAudioPlayButtons, s.hide_audio_play_buttons)?;
+        self.set_config_bool_inner(
+            BoolKey::InterruptAudioWhenAnswering,
+            s.interrupt_audio_when_answering,
+        )?;
+        self.set_config_bool_inner(
+            BoolKey::ShowRemainingDueCountsInStudy,
+            s.show_remaining_due_counts,
+        )?;
+        self.set_config_bool_inner(
+            BoolKey::ShowIntervalsAboveAnswerButtons,
+            s.show_intervals_on_buttons,
+        )?;
+        self.set_answer_time_limit_secs(s.time_limit_secs)?;
+        Ok(())
+    }
+
+    pub fn get_editing_preferences(&self) -> Result<Editing> {
+        Ok(Editing {
+            adding_defaults_to_current_deck: self
+                .get_config_bool(BoolKey::AddingDefaultsToCurrentDeck),
+            paste_images_as_png: self.get_config_bool(BoolKey::PasteImagesAsPng),
+            paste_strips_formatting: self.get_config_bool(BoolKey::PasteStripsFormatting),
+            default_search_text: self.get_config_string(StringKey::DefaultSearchText),
+            ignore_accents_in_search: self.get_config_bool(BoolKey::IgnoreAccentsInSearch),
+        })
+    }
+
+    pub(crate) fn set_editing_preferences(&mut self, settings: Editing) -> Result<()> {
+        let s = settings;
+        self.set_config_bool_inner(
+            BoolKey::AddingDefaultsToCurrentDeck,
+            s.adding_defaults_to_current_deck,
+        )?;
+        self.set_config_bool_inner(BoolKey::PasteImagesAsPng, s.paste_images_as_png)?;
+        self.set_config_bool_inner(BoolKey::PasteStripsFormatting, s.paste_strips_formatting)?;
+        self.set_config_string_inner(StringKey::DefaultSearchText, &s.default_search_text)?;
+        self.set_config_bool_inner(BoolKey::IgnoreAccentsInSearch, s.ignore_accents_in_search)?;
         Ok(())
     }
 }

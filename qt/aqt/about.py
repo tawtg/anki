@@ -1,34 +1,35 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 import platform
 import time
 
 import aqt.forms
-from anki.lang import _
-from anki.utils import versionWithBuild
+from anki.lang import without_unicode_isolation
+from anki.utils import version_with_build
 from aqt.addons import AddonManager, AddonMeta
 from aqt.qt import *
-from aqt.utils import supportText, tooltip
+from aqt.utils import disable_help_button, supportText, tooltip, tr
 
 
 class ClosableQDialog(QDialog):
-    def reject(self):
+    def reject(self) -> None:
         aqt.dialogs.markClosed("About")
         QDialog.reject(self)
 
-    def accept(self):
+    def accept(self) -> None:
         aqt.dialogs.markClosed("About")
         QDialog.accept(self)
 
-    def closeWithCallback(self, callback):
+    def closeWithCallback(self, callback: Callable[[], None]) -> None:
         self.reject()
         callback()
 
 
-def show(mw):
+def show(mw: aqt.AnkiQt) -> QDialog:
     dialog = ClosableQDialog(mw)
-    mw.setupDialogGC(dialog)
+    disable_help_button(dialog)
+    mw.garbage_collect_on_dialog_finish(dialog)
     abt = aqt.forms.about.Ui_About()
     abt.setupUi(dialog)
 
@@ -54,7 +55,7 @@ def show(mw):
             modified = "mod"
         return f"{name} ['{addon.dir_name}', {installed}, '{addon.human_version}', {modified}]"
 
-    def onCopy():
+    def onCopy() -> None:
         addmgr = mw.addonManager
         active = []
         activeids = []
@@ -81,33 +82,39 @@ def show(mw):
 (add-on provided name [Add-on folder, installed at, version, is config changed])
 {newline.join(sorted(inactive))}
 """
-        info = "    " + "    ".join(info.splitlines(True))
+        info = f"    {'    '.join(info.splitlines(True))}"
         QApplication.clipboard().setText(info)
-        tooltip(_("Copied to clipboard"), parent=dialog)
+        tooltip(tr.about_copied_to_clipboard(), parent=dialog)
 
-    btn = QPushButton(_("Copy Debug Info"))
+    btn = QPushButton(tr.about_copy_debug_info())
     qconnect(btn.clicked, onCopy)
-    abt.buttonBox.addButton(btn, QDialogButtonBox.ActionRole)
-    abt.buttonBox.button(QDialogButtonBox.Ok).setFocus()
+    abt.buttonBox.addButton(btn, QDialogButtonBox.ButtonRole.ActionRole)
+    abt.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setFocus()
+
+    # WebView cleanup
+    ######################################################################
+
+    def on_dialog_destroyed() -> None:
+        abt.label.cleanup()
+        abt.label = None
+
+    qconnect(dialog.destroyed, on_dialog_destroyed)
 
     # WebView contents
     ######################################################################
     abouttext = "<center><img src='/_anki/imgs/anki-logo-thin.png'></center>"
-    abouttext += "<p>" + _(
-        "Anki is a friendly, intelligent spaced learning \
-system. It's free and open source."
-    )
-    abouttext += "<p>" + _(
-        "Anki is licensed under the AGPL3 license. Please see "
-        "the license file in the source distribution for more information."
-    )
-    abouttext += "<p>" + _("Version %s") % versionWithBuild() + "<br>"
+    abouttext += f"<p>{tr.about_anki_is_a_friendly_intelligent_spaced()}"
+    abouttext += f"<p>{tr.about_anki_is_licensed_under_the_agpl3()}"
+    abouttext += f"<p>{tr.about_version(val=version_with_build())}<br>"
     abouttext += ("Python %s Qt %s PyQt %s<br>") % (
         platform.python_version(),
         QT_VERSION_STR,
         PYQT_VERSION_STR,
     )
-    abouttext += (_("<a href='%s'>Visit website</a>") % aqt.appWebsite) + "</span>"
+    abouttext += (
+        without_unicode_isolation(tr.about_visit_website(val=aqt.appWebsite))
+        + "</span>"
+    )
 
     # automatically sorted; add new lines at the end
     allusers = sorted(
@@ -206,25 +213,27 @@ system. It's free and open source."
             "ANH",
             "Junseo Park",
             "Gustavo Costa",
+            "余时行",
+            "叶峻峣",
+            "RumovZ",
+            "学习骇客",
+            "ready-research",
+            "Henrik Giesel",
+            "Yoonchae Lee",
+            "Hikaru Yoshiga",
+            "Matthias Metelka",
+            "Sergio Quintero",
+            "Nicholas Flint",
+            "Daniel Vieira Memoria10X",
+            "Luka Warren",
         )
     )
 
-    abouttext += (
-        "<p>"
-        + _(
-            "Written by Damien Elmes, with patches, translation,\
-    testing and design from:<p>%(cont)s"
-        )
-        % {"cont": ", ".join(allusers)}
+    abouttext += "<p>" + tr.about_written_by_damien_elmes_with_patches(
+        cont=", ".join(allusers)
     )
-    abouttext += "<p>" + _(
-        "If you have contributed and are not on this list, \
-please get in touch."
-    )
-    abouttext += "<p>" + _(
-        "A big thanks to all the people who have provided \
-suggestions, bug reports and donations."
-    )
+    abouttext += f"<p>{tr.about_if_you_have_contributed_and_are()}"
+    abouttext += f"<p>{tr.about_a_big_thanks_to_all_the()}"
     abt.label.setMinimumWidth(800)
     abt.label.setMinimumHeight(600)
     dialog.show()

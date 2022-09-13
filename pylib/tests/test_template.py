@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 from tests.shared import getEmptyCol
 
 
@@ -12,4 +15,4 @@ def test_deferred_frontside():
     note["Back"] = ""
     col.addNote(note)
 
-    assert "xxtest" in note.cards()[0].a()
+    assert "xxtest" in note.cards()[0].answer()

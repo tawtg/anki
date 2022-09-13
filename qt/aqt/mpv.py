@@ -1,4 +1,3 @@
-# coding: utf-8
 # ------------------------------------------------------------------------------
 #
 # mpv.py - Control mpv from Python using JSON IPC
@@ -41,9 +40,9 @@ from distutils.spawn import (  # pylint: disable=import-error,no-name-in-module
     find_executable,
 )
 from queue import Empty, Full, Queue
-from typing import Dict, Optional
+from typing import Optional
 
-from anki.utils import isWin
+from anki.utils import is_win
 
 
 class MPVError(Exception):
@@ -66,7 +65,7 @@ class MPVTimeoutError(MPVError):
     pass
 
 
-if isWin:
+if is_win:
     # pylint: disable=import-error
     import pywintypes
     import win32file  # pytype: disable=import-error
@@ -80,7 +79,7 @@ class MPVBase:
     """
 
     executable = find_executable("mpv")
-    popenEnv: Optional[Dict[str, str]] = None
+    popenEnv: Optional[dict[str, str]] = None
 
     default_argv = [
         "--idle",
@@ -89,8 +88,8 @@ class MPVBase:
         "--ontop",
         "--audio-display=no",
         "--keep-open=no",
-        "--reset-on-next-file=pause",
         "--autoload-files=no",
+        "--gapless-audio=no",
     ]
 
     def __init__(self, window_id=None, debug=False):
@@ -119,9 +118,9 @@ class MPVBase:
         """Prepare the argument list for the mpv process."""
         self.argv = [self.executable]
         self.argv += self.default_argv
-        self.argv += ["--input-ipc-server=" + self._sock_filename]
+        self.argv += [f"--input-ipc-server={self._sock_filename}"]
         if self.window_id is not None:
-            self.argv += ["--wid=" + str(self.window_id)]
+            self.argv += [f"--wid={str(self.window_id)}"]
 
     def _start_process(self):
         """Start the mpv process."""
@@ -143,7 +142,7 @@ class MPVBase:
         """Create a random socket filename which we pass to mpv with the
         --input-unix-socket option.
         """
-        if isWin:
+        if is_win:
             self._sock_filename = "ankimpv"
             return
         fd, self._sock_filename = tempfile.mkstemp(prefix="mpv.")
@@ -158,7 +157,7 @@ class MPVBase:
         while self.is_running() and time.time() < start + 10:
             time.sleep(0.1)
 
-            if isWin:
+            if is_win:
                 # named pipe
                 try:
                     self._sock = win32file.CreateFile(
@@ -229,7 +228,7 @@ class MPVBase:
         """
         buf = b""
         while not self._stop_event.is_set():
-            if isWin:
+            if is_win:
                 try:
                     (n, b) = win32file.ReadFile(self._sock, 4096)
                     buf += b
@@ -258,7 +257,7 @@ class MPVBase:
                 buf = buf[newline + 1 :]
 
                 if self.debug:
-                    sys.stdout.write("<<< " + data.decode("utf8", "replace"))
+                    sys.stdout.write(f"<<< {data.decode('utf8', 'replace')}")
 
                 message = self._parse_message(data)
                 self._handle_message(message)
@@ -298,7 +297,7 @@ class MPVBase:
             self._event_queue.put(message)
 
         else:
-            raise MPVCommunicationError("invalid message %r" % message)
+            raise MPVCommunicationError(f"invalid message {message!r}")
 
     def _send_message(self, message, timeout=None):
         """Send a message/command to the mpv process, message must be a
@@ -308,7 +307,7 @@ class MPVBase:
         data = self._compose_message(message)
 
         if self.debug:
-            sys.stdout.write(">>> " + data.decode("utf8", "replace"))
+            sys.stdout.write(f">>> {data.decode('utf8', 'replace')}")
 
         # Request/response cycles are coordinated across different threads, so
         # that they don't get mixed up. This makes it possible to use commands
@@ -328,7 +327,7 @@ class MPVBase:
             raise MPVTimeoutError("unable to put request")
 
         # Write the message data to the socket.
-        if isWin:
+        if is_win:
             win32file.WriteFile(self._sock, data)
         else:
             while data:
@@ -371,7 +370,7 @@ class MPVBase:
             self._send_message(message, timeout)
             return self._get_response(timeout)
         except MPVCommandError as e:
-            raise MPVCommandError("%r: %s" % (message["command"], e))
+            raise MPVCommandError(f"{message['command']!r}: {e}")
         except Exception as e:
             if _retry:
                 print("mpv timed out, restarting")
@@ -512,7 +511,7 @@ class MPV(MPVBase):
             return
 
         if message["event"] == "property-change":
-            name = "property-" + message["name"]
+            name = f"property-{message['name']}"
         else:
             name = message["event"]
 
@@ -527,7 +526,7 @@ class MPV(MPVBase):
         try:
             self.command("enable_event", name)
         except MPVCommandError:
-            raise MPVError("no such event %r" % name)
+            raise MPVError(f"no such event {name!r}")
 
         self._callbacks.setdefault(name, []).append(callback)
 
@@ -538,12 +537,12 @@ class MPV(MPVBase):
         try:
             callbacks = self._callbacks[name]
         except KeyError:
-            raise MPVError("no callbacks registered for event %r" % name)
+            raise MPVError(f"no callbacks registered for event {name!r}")
 
         try:
             callbacks.remove(callback)
         except ValueError:
-            raise MPVError("callback %r not registered for event %r" % (callback, name))
+            raise MPVError(f"callback {callback!r} not registered for event {name!r}")
 
     def register_property_callback(self, name, callback):
         """Register a function `callback` for the property-change event on
@@ -554,11 +553,11 @@ class MPV(MPVBase):
 
         # XXX We manually have to check for the existence of the property name.
         # Apparently observe_property does not check it :-(
-        proplist = self.command("get_property", "property-list")
+        proplist = self.command("get_property", "property-list", timeout=5)
         if name not in proplist:
-            raise MPVError("no such property %r" % name)
+            raise MPVError(f"no such property {name!r}")
 
-        self._callbacks.setdefault("property-" + name, []).append(callback)
+        self._callbacks.setdefault(f"property-{name}", []).append(callback)
 
         # 'observe_property' expects some kind of id which can be used later
         # for unregistering with 'unobserve_property'.
@@ -572,15 +571,15 @@ class MPV(MPVBase):
         property-change event on property `name`.
         """
         try:
-            callbacks = self._callbacks["property-" + name]
+            callbacks = self._callbacks[f"property-{name}"]
         except KeyError:
-            raise MPVError("no callbacks registered for property %r" % name)
+            raise MPVError(f"no callbacks registered for property {name!r}")
 
         try:
             callbacks.remove(callback)
         except ValueError:
             raise MPVError(
-                "callback %r not registered for property %r" % (callback, name)
+                f"callback {callback!r} not registered for property {name!r}"
             )
 
         serial = self._property_serials.pop((name, callback))

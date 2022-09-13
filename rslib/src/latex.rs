@@ -1,15 +1,15 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::cloze::expand_clozes_to_reveal_latex;
-use crate::media::files::sha1_of_data;
-use crate::text::strip_html;
-use lazy_static::lazy_static;
-use regex::{Captures, Regex};
 use std::borrow::Cow;
 
+use lazy_static::lazy_static;
+use regex::{Captures, Regex};
+
+use crate::{cloze::expand_clozes_to_reveal_latex, media::files::sha1_of_data, text::strip_html};
+
 lazy_static! {
-    static ref LATEX: Regex = Regex::new(
+    pub(crate) static ref LATEX: Regex = Regex::new(
         r#"(?xsi)
             \[latex\](.+?)\[/latex\]     # 1 - standard latex
             |
@@ -66,7 +66,7 @@ pub(crate) fn extract_latex(text: &str, svg: bool) -> (String, Vec<ExtractedLate
         };
         let latex_text = strip_html_for_latex(&latex);
         let fname = fname_for_latex(&latex_text, svg);
-        let img_link = image_link_for_fname(&fname);
+        let img_link = image_link_for_fname(&latex_text, &fname);
         extracted.push(ExtractedLatex {
             fname,
             latex: latex_text.into(),
@@ -97,8 +97,12 @@ fn fname_for_latex(latex: &str, svg: bool) -> String {
     format!("latex-{}.{}", csum, ext)
 }
 
-fn image_link_for_fname(fname: &str) -> String {
-    format!("<img class=latex src=\"{}\">", fname)
+fn image_link_for_fname(src: &str, fname: &str) -> String {
+    format!(
+        "<img class=latex alt=\"{}\" src=\"{}\">",
+        htmlescape::encode_attribute(src),
+        fname
+    )
 }
 
 #[cfg(test)]
@@ -111,7 +115,10 @@ mod test {
         assert_eq!(
             extract_latex("a[latex]one<br>and<div>two[/latex]b", false),
             (
-                format!("a<img class=latex src=\"{}\">b", fname),
+                format!(
+                    "a<img class=latex alt=\"one&#x0A;and&#x0A;two\" src=\"{}\">b",
+                    fname
+                ),
                 vec![ExtractedLatex {
                     fname: fname.into(),
                     latex: "one\nand\ntwo".into()

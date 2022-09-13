@@ -1,19 +1,21 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::SqliteStorage;
-use crate::err::Result;
-use crate::{
-    backend_proto as pb,
-    prelude::*,
-    revlog::{RevlogEntry, RevlogReviewKind},
-};
+use std::convert::TryFrom;
+
 use rusqlite::{
     params,
     types::{FromSql, FromSqlError, ValueRef},
-    Row, NO_PARAMS,
+    Row,
 };
-use std::convert::TryFrom;
+
+use super::SqliteStorage;
+use crate::{
+    error::Result,
+    pb,
+    prelude::*,
+    revlog::{RevlogEntry, RevlogReviewKind},
+};
 
 pub(crate) struct StudiedToday {
     pub cards: u32,
@@ -48,21 +50,30 @@ impl SqliteStorage {
     pub(crate) fn fix_revlog_properties(&self) -> Result<usize> {
         self.db
             .prepare(include_str!("fix_props.sql"))?
-            .execute(NO_PARAMS)
+            .execute([])
             .map_err(Into::into)
     }
 
     pub(crate) fn clear_pending_revlog_usns(&self) -> Result<()> {
         self.db
             .prepare("update revlog set usn = 0 where usn = -1")?
-            .execute(NO_PARAMS)?;
+            .execute([])?;
         Ok(())
     }
 
-    pub(crate) fn add_revlog_entry(&self, entry: &RevlogEntry) -> Result<()> {
-        self.db
+    /// Adds the entry, if its id is unique. If it is not, and `uniquify` is true,
+    /// adds it with a new id. Returns the added id.
+    /// (I.e., the option is safe to unwrap, if `uniquify` is true.)
+    pub(crate) fn add_revlog_entry(
+        &self,
+        entry: &RevlogEntry,
+        uniquify: bool,
+    ) -> Result<Option<RevlogId>> {
+        let added = self
+            .db
             .prepare_cached(include_str!("add.sql"))?
             .execute(params![
+                uniquify,
                 entry.id,
                 entry.cid,
                 entry.usn,
@@ -73,36 +84,52 @@ impl SqliteStorage {
                 entry.taken_millis,
                 entry.review_kind as u8
             ])?;
-        Ok(())
+        Ok((added > 0).then(|| RevlogId(self.db.last_insert_rowid())))
     }
 
-    pub(crate) fn get_revlog_entry(&self, id: RevlogID) -> Result<Option<RevlogEntry>> {
+    pub(crate) fn get_revlog_entry(&self, id: RevlogId) -> Result<Option<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where id=?"))?
-            .query_and_then(&[id], row_to_revlog_entry)?
+            .query_and_then([id], row_to_revlog_entry)?
             .next()
             .transpose()
     }
 
-    pub(crate) fn get_revlog_entries_for_card(&self, cid: CardID) -> Result<Vec<RevlogEntry>> {
+    /// Only intended to be used by the undo code, as Anki can not sync revlog deletions.
+    pub(crate) fn remove_revlog_entry(&self, id: RevlogId) -> Result<()> {
+        self.db
+            .prepare_cached("delete from revlog where id = ?")?
+            .execute([id])?;
+        Ok(())
+    }
+
+    pub(crate) fn get_revlog_entries_for_card(&self, cid: CardId) -> Result<Vec<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where cid=?"))?
-            .query_and_then(&[cid], row_to_revlog_entry)?
+            .query_and_then([cid], row_to_revlog_entry)?
             .collect()
     }
 
-    pub(crate) fn get_revlog_entries_for_searched_cards(
+    pub(crate) fn get_pb_revlog_entries_for_searched_cards(
         &self,
         after: TimestampSecs,
     ) -> Result<Vec<pb::RevlogEntry>> {
         self.db
             .prepare_cached(concat!(
                 include_str!("get.sql"),
-                " where cid in (select id from search_cids) and id >= ?"
+                " where cid in (select cid from search_cids) and id >= ?"
             ))?
-            .query_and_then(&[after.0 * 1000], |r| {
-                row_to_revlog_entry(r).map(Into::into)
-            })?
+            .query_and_then([after.0 * 1000], |r| row_to_revlog_entry(r).map(Into::into))?
+            .collect()
+    }
+
+    pub(crate) fn get_revlog_entries_for_searched_cards(&self) -> Result<Vec<RevlogEntry>> {
+        self.db
+            .prepare_cached(concat!(
+                include_str!("get.sql"),
+                " where cid in (select cid from search_cids)"
+            ))?
+            .query_and_then([], row_to_revlog_entry)?
             .collect()
     }
 
@@ -113,17 +140,15 @@ impl SqliteStorage {
     ) -> Result<Vec<pb::RevlogEntry>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where id >= ?"))?
-            .query_and_then(&[after.0 * 1000], |r| {
-                row_to_revlog_entry(r).map(Into::into)
-            })?
+            .query_and_then([after.0 * 1000], |r| row_to_revlog_entry(r).map(Into::into))?
             .collect()
     }
 
-    pub(crate) fn studied_today(&self, day_cutoff: i64) -> Result<StudiedToday> {
-        let start = (day_cutoff - 86_400) * 1_000;
+    pub(crate) fn studied_today(&self, day_cutoff: TimestampSecs) -> Result<StudiedToday> {
+        let start = day_cutoff.adding_secs(-86_400).as_millis();
         self.db
             .prepare_cached(include_str!("studied_today.sql"))?
-            .query_map(&[start, RevlogReviewKind::Manual as i64], |row| {
+            .query_map([start.0, RevlogReviewKind::Manual as i64], |row| {
                 Ok(StudiedToday {
                     cards: row.get(0)?,
                     seconds: row.get(1)?,
@@ -131,6 +156,12 @@ impl SqliteStorage {
             })?
             .next()
             .unwrap()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn upgrade_revlog_to_v2(&self) -> Result<()> {
+        self.db
+            .execute_batch(include_str!("v2_upgrade.sql"))
             .map_err(Into::into)
     }
 }

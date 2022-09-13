@@ -1,14 +1,12 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::latex::contains_latex;
-use crate::template::RenderContext;
-use crate::text::strip_html_preserving_entities;
+use std::{borrow::Cow, collections::HashSet};
+
 use lazy_static::lazy_static;
-use regex::Captures;
-use regex::Regex;
-use std::borrow::Cow;
-use std::collections::HashSet;
+use regex::{Captures, Regex};
+
+use crate::{latex::contains_latex, template::RenderContext, text::strip_html_preserving_entities};
 
 lazy_static! {
     static ref CLOZE: Regex = Regex::new(
@@ -59,26 +57,30 @@ pub fn reveal_cloze_text(text: &str, cloze_ord: u16, question: bool) -> Cow<str>
             .parse()
             .unwrap_or(0);
 
+        let text = caps.get(cloze_caps::TEXT).unwrap().as_str().to_owned();
         if captured_ord != cloze_ord {
             // other cloze deletions are unchanged
-            return caps.get(cloze_caps::TEXT).unwrap().as_str().to_owned();
+            return text;
         } else {
             cloze_ord_was_in_text = true;
         }
 
+        let text_attr;
         let replacement;
         if question {
+            text_attr = format!(r#" data-cloze="{}""#, htmlescape::encode_attribute(&text));
             // hint provided?
             if let Some(hint) = caps.get(cloze_caps::HINT) {
                 replacement = format!("[{}]", hint.as_str());
             } else {
-                replacement = "[...]".to_string()
+                replacement = "[...]".to_string();
             }
         } else {
-            replacement = caps.get(cloze_caps::TEXT).unwrap().as_str().to_owned();
+            text_attr = "".to_string();
+            replacement = text;
         }
 
-        format!("<span class=cloze>{}</span>", replacement)
+        format!(r#"<span class="cloze"{}>{}</span>"#, text_attr, replacement)
     });
 
     if !cloze_ord_was_in_text {
@@ -141,6 +143,10 @@ pub fn expand_clozes_to_reveal_latex(text: &str) -> String {
     buf
 }
 
+pub(crate) fn contains_cloze(text: &str) -> bool {
+    CLOZE.is_match(text)
+}
+
 pub fn cloze_numbers_in_string(html: &str) -> HashSet<u16> {
     let mut set = HashSet::with_capacity(4);
     add_cloze_numbers_in_string(html, &mut set);
@@ -182,9 +188,10 @@ pub(crate) fn cloze_only_filter<'a>(text: &'a str, context: &RenderContext) -> C
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::text::strip_html;
-    use std::collections::HashSet;
 
     #[test]
     fn cloze() {

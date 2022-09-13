@@ -1,10 +1,11 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::err::Result;
-use rusqlite::{params, Connection, OptionalExtension, Row, Statement, NO_PARAMS};
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
+
+use rusqlite::{params, Connection, OptionalExtension, Row, Statement};
+
+use crate::prelude::*;
 
 fn trace(s: &str) {
     println!("sql: {}", s)
@@ -30,12 +31,12 @@ fn initial_db_setup(db: &mut Connection) -> Result<()> {
     // tables already exist?
     if db
         .prepare("select null from sqlite_master where type = 'table' and name = 'media'")?
-        .exists(NO_PARAMS)?
+        .exists([])?
     {
         return Ok(());
     }
 
-    db.execute("begin", NO_PARAMS)?;
+    db.execute("begin", [])?;
     db.execute_batch(include_str!("schema.sql"))?;
     db.execute_batch("commit; vacuum; analyze;")?;
 
@@ -46,7 +47,7 @@ fn initial_db_setup(db: &mut Connection) -> Result<()> {
 pub struct MediaEntry {
     pub fname: String,
     /// If None, file has been deleted
-    pub sha1: Option<[u8; 20]>,
+    pub sha1: Option<Sha1Hash>,
     // Modification time; 0 if deleted
     pub mtime: i64,
     /// True if changed since last sync
@@ -171,7 +172,7 @@ delete from media where fname=?"
     pub(super) fn get_meta(&mut self) -> Result<MediaDatabaseMetadata> {
         let mut stmt = self.db.prepare("select dirMod, lastUsn from meta")?;
 
-        stmt.query_row(NO_PARAMS, |row| {
+        stmt.query_row([], |row| {
             Ok(MediaDatabaseMetadata {
                 folder_mtime: row.get(0)?,
                 last_sync_usn: row.get(1)?,
@@ -191,8 +192,8 @@ delete from media where fname=?"
         self.db
             .query_row(
                 "select count(*) from media where csum is not null",
-                NO_PARAMS,
-                |row| Ok(row.get(0)?),
+                [],
+                |row| row.get(0),
             )
             .map_err(Into::into)
     }
@@ -203,7 +204,7 @@ delete from media where fname=?"
             .prepare("select fname from media where dirty=1 limit ?")?;
         let results: Result<Vec<_>> = stmt
             .query_and_then(params![max_entries], |row| {
-                let fname = row.get_raw(0).as_str()?;
+                let fname = row.get_ref_unwrap(0).as_str()?;
                 Ok(self.get_entry(fname)?.unwrap())
             })?
             .collect();
@@ -216,9 +217,17 @@ delete from media where fname=?"
             .db
             .prepare("select fname, mtime from media where csum is not null")?;
         let map: std::result::Result<HashMap<String, i64>, rusqlite::Error> = stmt
-            .query_map(NO_PARAMS, |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect();
         Ok(map?)
+    }
+
+    /// Returns all filenames and checksums, where the checksum is not null.
+    pub(super) fn all_checksums(&mut self) -> Result<HashMap<String, Sha1Hash>> {
+        self.db
+            .prepare("SELECT fname, csum FROM media WHERE csum IS NOT NULL")?
+            .query_and_then([], row_to_name_and_checksum)?
+            .collect()
     }
 
     pub(super) fn force_resync(&mut self) -> Result<()> {
@@ -230,7 +239,7 @@ delete from media where fname=?"
 
 fn row_to_entry(row: &Row) -> rusqlite::Result<MediaEntry> {
     // map the string checksum into bytes
-    let sha1_str: Option<String> = row.get(1)?;
+    let sha1_str = row.get_ref(1)?.as_str_or_null()?;
     let sha1_array = if let Some(s) = sha1_str {
         let mut arr = [0; 20];
         match hex::decode_to_slice(s, arr.as_mut()) {
@@ -249,13 +258,23 @@ fn row_to_entry(row: &Row) -> rusqlite::Result<MediaEntry> {
     })
 }
 
+fn row_to_name_and_checksum(row: &Row) -> Result<(String, Sha1Hash)> {
+    let file_name = row.get(0)?;
+    let sha1_str: String = row.get(1)?;
+    let mut sha1 = [0; 20];
+    hex::decode_to_slice(sha1_str, &mut sha1)
+        .map_err(|_| AnkiError::invalid_input(format!("bad media checksum: {file_name}")))?;
+    Ok((file_name, sha1))
+}
+
 #[cfg(test)]
 mod test {
-    use crate::err::Result;
-    use crate::media::database::MediaEntry;
-    use crate::media::files::sha1_of_data;
-    use crate::media::MediaManager;
     use tempfile::NamedTempFile;
+
+    use crate::{
+        error::Result,
+        media::{database::MediaEntry, files::sha1_of_data, MediaManager},
+    };
 
     #[test]
     fn database() -> Result<()> {

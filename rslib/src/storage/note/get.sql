@@ -1,9 +1,10 @@
-select
-  id,
+SELECT id,
   guid,
   mid,
   mod,
   usn,
   tags,
-  flds
-from notes
+  flds,
+  cast(sfld AS text),
+  csum
+FROM notes

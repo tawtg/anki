@@ -1,16 +1,22 @@
-# -*- coding: utf-8 -*-
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
-# Please leave the coding line in this file to prevent xgettext complaining.
 
 from __future__ import annotations
 
-import gettext
-import os
+import locale
 import re
-from typing import Optional, Union
+import weakref
+from typing import Any, no_type_check
 
 import anki
+import anki._backend
+import anki.i18n_pb2 as _pb
+from anki._legacy import DeprecatedNamesMixinForModule
+
+# public exports
+TR = anki._backend.LegacyTranslationEnum
+FormatTimeSpan = _pb.FormatTimespanRequest
+
 
 langs = sorted(
     [
@@ -52,15 +58,18 @@ langs = sorted(
         ("Ελληνικά", "el_GR"),
         ("Български", "bg_BG"),
         ("Монгол хэл", "mn_MN"),
-        ("русский язык", "ru_RU"),
+        ("Pусский язык", "ru_RU"),
         ("Српски", "sr_SP"),
-        ("українська мова", "uk_UA"),
+        ("Yкраїнська мова", "uk_UA"),
         ("Հայերեն", "hy_AM"),
         ("עִבְרִית", "he_IL"),
         ("العربية", "ar_SA"),
         ("فارسی", "fa_IR"),
         ("ภาษาไทย", "th_TH"),
         ("Latin", "la_LA"),
+        ("Gaeilge", "ga_IE"),
+        ("Беларуская мова", "be_BY"),
+        ("ଓଡ଼ିଆ", "or_OR"),
     ]
 )
 
@@ -133,56 +142,69 @@ def lang_to_disk_lang(lang: str) -> str:
     ):
         return lang.replace("_", "-")
     # other languages have the region portion stripped
-    m = re.match("(.*)_", lang)
-    if m:
-        return m.group(1)
+    match = re.match("(.*)_", lang)
+    if match:
+        return match.group(1)
     else:
         return lang
 
 
 # the currently set interface language
-currentLang = "en"
+current_lang = "en"  # pylint: disable=invalid-name
 
-# the current gettext translation catalog
-current_catalog: Optional[
-    Union[gettext.NullTranslations, gettext.GNUTranslations]
-] = None
-
-# the current Fluent translation instance
-current_i18n: Optional[anki.rsbackend.RustBackend]
-
-# path to locale folder
-locale_folder = ""
+# the current Fluent translation instance. Code in pylib/ should
+# not reference this, and should use col.tr instead. The global
+# instance exists for legacy reasons, and as a convenience for the
+# Qt code.
+current_i18n: anki._backend.RustBackend | None = None  # pylint: disable=invalid-name
+tr_legacyglobal = anki._backend.Translations(None)
 
 
 def _(str: str) -> str:
-    if current_catalog:
-        return current_catalog.gettext(str)
-    else:
-        return str
+    print(f"gettext _() is deprecated: {str}")
+    return str
 
 
-def ngettext(single: str, plural: str, n: int) -> str:
-    if current_catalog:
-        return current_catalog.ngettext(single, plural, n)
-    elif n == 1:
-        return single
+def ngettext(single: str, plural: str, num: int) -> str:
+    print(f"ngettext() is deprecated: {plural}")
     return plural
 
 
-def set_lang(lang: str, locale_dir: str) -> None:
-    global currentLang, current_catalog, current_i18n, locale_folder
-    gettext_dir = os.path.join(locale_dir, "gettext")
-    ftl_dir = os.path.join(locale_dir, "fluent")
+def set_lang(lang: str) -> None:
+    global current_lang, current_i18n  # pylint: disable=invalid-name
+    current_lang = lang
+    current_i18n = anki._backend.RustBackend(langs=[lang])
+    tr_legacyglobal.backend = weakref.ref(current_i18n)
 
-    currentLang = lang
-    current_catalog = gettext.translation(
-        "anki", gettext_dir, languages=[lang], fallback=True
-    )
 
-    current_i18n = anki.rsbackend.RustBackend(ftl_folder=ftl_dir, langs=[lang])
-
-    locale_folder = locale_dir
+def get_def_lang(lang: str | None = None) -> tuple[int, str]:
+    """Return lang converted to name used on disk and its index, defaulting to system language
+    or English if not available."""
+    try:
+        (sys_lang, enc) = locale.getdefaultlocale()
+    except:
+        # fails on osx
+        sys_lang = "en_US"
+    user_lang = lang
+    if user_lang in compatMap:
+        user_lang = compatMap[user_lang]
+    idx = None
+    lang = None
+    en_idx = None
+    for preferred_lang in (user_lang, sys_lang):
+        for lang_idx, (name, code) in enumerate(langs):
+            if code == "en_US":
+                en_idx = lang_idx
+            if code == preferred_lang:
+                idx = lang_idx
+                lang = preferred_lang
+        if idx is not None:
+            break
+    # if the specified language and the system language aren't available, revert to english
+    if idx is None:
+        idx = en_idx
+        lang = "en_US"
+    return (idx, lang)
 
 
 def is_rtl(lang: str) -> bool:
@@ -191,5 +213,17 @@ def is_rtl(lang: str) -> bool:
 
 # strip off unicode isolation markers from a translated string
 # for testing purposes
-def without_unicode_isolation(s: str) -> str:
-    return s.replace("\u2068", "").replace("\u2069", "")
+def without_unicode_isolation(string: str) -> str:
+    return string.replace("\u2068", "").replace("\u2069", "")
+
+
+def with_collapsed_whitespace(string: str) -> str:
+    return re.sub(r"\s+", " ", string)
+
+
+_deprecated_names = DeprecatedNamesMixinForModule(globals())
+
+
+@no_type_check
+def __getattr__(name: str) -> Any:
+    return _deprecated_names.__getattr__(name)

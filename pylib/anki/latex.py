@@ -7,19 +7,28 @@ import html
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
 
 import anki
-from anki import hooks
-from anki.lang import _
-from anki.models import NoteType
-from anki.rsbackend import pb
+import anki.collection
+from anki import card_rendering_pb2, hooks
+from anki.models import NotetypeDict
 from anki.template import TemplateRenderContext, TemplateRenderOutput
-from anki.utils import call, isMac, namedtmp, tmpdir
+from anki.utils import call, is_mac, namedtmp, tmpdir
 
 pngCommands = [
     ["latex", "-interaction=nonstopmode", "tmp.tex"],
-    ["dvipng", "-D", "200", "-T", "tight", "tmp.dvi", "-o", "tmp.png"],
+    [
+        "dvipng",
+        "-bg",
+        "Transparent",
+        "-D",
+        "200",
+        "-T",
+        "tight",
+        "tmp.dvi",
+        "-o",
+        "tmp.png",
+    ],
 ]
 
 svgCommands = [
@@ -27,10 +36,11 @@ svgCommands = [
     ["dvisvgm", "--no-fonts", "--exact", "-Z", "2", "tmp.dvi", "-o", "tmp.svg"],
 ]
 
-build = True  # if off, use existing media but don't create new
+# if off, use existing media but don't create new
+build = True  # pylint: disable=invalid-name
 
 # add standard tex install location to osx
-if isMac:
+if is_mac:
     os.environ["PATH"] += ":/usr/texbin:/Library/TeX/texbin"
 
 
@@ -43,10 +53,12 @@ class ExtractedLatex:
 @dataclass
 class ExtractedLatexOutput:
     html: str
-    latex: List[ExtractedLatex]
+    latex: list[ExtractedLatex]
 
     @staticmethod
-    def from_proto(proto: pb.ExtractLatexOut) -> ExtractedLatexOutput:
+    def from_proto(
+        proto: card_rendering_pb2.ExtractLatexResponse,
+    ) -> ExtractedLatexOutput:
         return ExtractedLatexOutput(
             html=proto.text,
             latex=[
@@ -65,7 +77,9 @@ def on_card_did_render(
     output.answer_text = render_latex(output.answer_text, ctx.note_type(), ctx.col())
 
 
-def render_latex(html: str, model: NoteType, col: anki.collection.Collection) -> str:
+def render_latex(
+    html: str, model: NotetypeDict, col: anki.collection.Collection
+) -> str:
     "Convert embedded latex tags in text to image links."
     html, err = render_latex_returning_errors(html, model, col)
     if err:
@@ -75,10 +89,10 @@ def render_latex(html: str, model: NoteType, col: anki.collection.Collection) ->
 
 def render_latex_returning_errors(
     html: str,
-    model: NoteType,
+    model: NotetypeDict,
     col: anki.collection.Collection,
     expand_clozes: bool = False,
-) -> Tuple[str, List[str]]:
+) -> tuple[str, list[str]]:
     """Returns (text, errors).
 
     errors will be non-empty if LaTeX failed to render."""
@@ -86,7 +100,7 @@ def render_latex_returning_errors(
     header = model["latexPre"]
     footer = model["latexPost"]
 
-    proto = col.backend.extract_latex(text=html, svg=svg, expand_clozes=expand_clozes)
+    proto = col._backend.extract_latex(text=html, svg=svg, expand_clozes=expand_clozes)
     out = ExtractedLatexOutput.from_proto(proto)
     errors = []
     html = out.html
@@ -109,9 +123,9 @@ def _save_latex_image(
     header: str,
     footer: str,
     svg: bool,
-) -> Optional[str]:
+) -> str | None:
     # add header/footer
-    latex = header + "\n" + extracted.latex_body + "\n" + footer
+    latex = f"{header}\n{extracted.latex_body}\n{footer}"
     # it's only really secure if run in a jail, but these are the most common
     tmplatex = latex.replace("\\includegraphics", "")
     for bad in (
@@ -127,40 +141,32 @@ def _save_latex_image(
         "\\shipout",
     ):
         # don't mind if the sequence is only part of a command
-        bad_re = "\\" + bad + "[^a-zA-Z]"
+        bad_re = f"\\{bad}[^a-zA-Z]"
         if re.search(bad_re, tmplatex):
-            return (
-                _(
-                    """\
-For security reasons, '%s' is not allowed on cards. You can still use \
-it by placing the command in a different package, and importing that \
-package in the LaTeX header instead."""
-                )
-                % bad
-            )
+            return col.tr.media_for_security_reasons_is_not(val=bad)
 
     # commands to use
     if svg:
-        latexCmds = svgCommands
+        latex_cmds = svgCommands
         ext = "svg"
     else:
-        latexCmds = pngCommands
+        latex_cmds = pngCommands
         ext = "png"
 
     # write into a temp file
-    log = open(namedtmp("latex_log.txt"), "w")
+    log = open(namedtmp("latex_log.txt"), "w", encoding="utf8")
     texpath = namedtmp("tmp.tex")
     texfile = open(texpath, "w", encoding="utf8")
     texfile.write(latex)
     texfile.close()
     oldcwd = os.getcwd()
-    png_or_svg = namedtmp("tmp.%s" % ext)
+    png_or_svg = namedtmp(f"tmp.{ext}")
     try:
         # generate png/svg
         os.chdir(tmpdir())
-        for latexCmd in latexCmds:
-            if call(latexCmd, stdout=log, stderr=log):
-                return _errMsg(latexCmd[0], texpath)
+        for latex_cmd in latex_cmds:
+            if call(latex_cmd, stdout=log, stderr=log):
+                return _err_msg(col, latex_cmd[0], texpath)
         # add to media
         with open(png_or_svg, "rb") as file:
             data = file.read()
@@ -172,18 +178,19 @@ package in the LaTeX header instead."""
         log.close()
 
 
-def _errMsg(type: str, texpath: str) -> Any:
-    msg = (_("Error executing %s.") % type) + "<br>"
-    msg += (_("Generated file: %s") % texpath) + "<br>"
+def _err_msg(col: anki.collection.Collection, type: str, texpath: str) -> str:
+    msg = f"{col.tr.media_error_executing(val=type)}<br>"
+    msg += f"{col.tr.media_generated_file(val=texpath)}<br>"
     try:
-        with open(namedtmp("latex_log.txt", rm=False)) as f:
-            log = f.read()
+        with open(namedtmp("latex_log.txt", remove=False), encoding="utf8") as file:
+            log = file.read()
         if not log:
             raise Exception()
-        msg += "<small><pre>" + html.escape(log) + "</pre></small>"
+        msg += f"<small><pre>{html.escape(log)}</pre></small>"
     except:
-        msg += _("Have you installed latex and dvipng/dvisvgm?")
+        msg += col.tr.media_have_you_installed_latex_and_dvipngdvisvgm()
     return msg
 
 
-hooks.card_did_render.append(on_card_did_render)
+def setup_hook() -> None:
+    hooks.card_did_render.append(on_card_did_render)
