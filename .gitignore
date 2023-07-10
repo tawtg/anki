@@ -4,8 +4,11 @@ anki.prof
 target
 /user.bazelrc
 .dmypy.json
-node_modules
 /.idea/
-/.vscode/
+/.vscode
 /.bazel
 /windows.bazelrc
+/out
+node_modules
+.n2_db
+.ninja_log

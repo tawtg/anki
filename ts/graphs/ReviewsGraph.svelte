@@ -3,13 +3,14 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import * as tr from "../lib/ftl";
-    import type { Stats } from "../lib/proto";
+    import type { GraphsResponse } from "@tslib/anki/stats_pb";
+    import * as tr from "@tslib/ftl";
+
     import AxisTicks from "./AxisTicks.svelte";
     import CumulativeOverlay from "./CumulativeOverlay.svelte";
     import Graph from "./Graph.svelte";
-    import type { TableDatum } from "./graph-helpers";
-    import { defaultGraphBounds, GraphRange, RevlogRange } from "./graph-helpers";
+    import type { RevlogRange, TableDatum } from "./graph-helpers";
+    import { defaultGraphBounds, GraphRange } from "./graph-helpers";
     import GraphRangeRadios from "./GraphRangeRadios.svelte";
     import HoverColumns from "./HoverColumns.svelte";
     import InputBox from "./InputBox.svelte";
@@ -18,7 +19,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import { gatherData, renderReviews } from "./reviews";
     import TableData from "./TableData.svelte";
 
-    export let sourceData: Stats.GraphsResponse | null = null;
+    export let sourceData: GraphsResponse | null = null;
     export let revlogRange: RevlogRange;
 
     let graphData: GraphData | null = null;
@@ -56,7 +57,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 <Graph {title} {subtitle}>
     <InputBox>
-        <label> <input type="checkbox" bind:checked={showTime} /> {time} </label>
+        <label>
+            <input type="checkbox" bind:checked={showTime} />
+            {time}
+        </label>
 
         <GraphRangeRadios bind:graphRange {revlogRange} followRevlog={true} />
     </InputBox>

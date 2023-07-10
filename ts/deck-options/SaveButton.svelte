@@ -3,9 +3,11 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import * as tr from "@tslib/ftl";
+    import { withCollapsedWhitespace } from "@tslib/i18n";
+    import { getPlatformString } from "@tslib/shortcuts";
     import { createEventDispatcher, tick } from "svelte";
 
-    import ButtonGroup from "../components/ButtonGroup.svelte";
     import DropdownDivider from "../components/DropdownDivider.svelte";
     import DropdownItem from "../components/DropdownItem.svelte";
     import IconButton from "../components/IconButton.svelte";
@@ -13,20 +15,21 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import Popover from "../components/Popover.svelte";
     import Shortcut from "../components/Shortcut.svelte";
     import WithFloating from "../components/WithFloating.svelte";
-    import * as tr from "../lib/ftl";
-    import { withCollapsedWhitespace } from "../lib/i18n";
-    import { getPlatformString } from "../lib/shortcuts";
     import { chevronDown } from "./icons";
     import type { DeckOptionsState } from "./lib";
+
+    const rtl: boolean = window.getComputedStyle(document.body).direction == "rtl";
 
     const dispatch = createEventDispatcher();
 
     export let state: DeckOptionsState;
 
-    function commitEditing(): void {
+    /** Ensure blur handler has fired so changes get committed. */
+    async function commitEditing(): Promise<void> {
         if (document.activeElement instanceof HTMLElement) {
             document.activeElement.blur();
         }
+        await tick();
     }
 
     async function removeConfig(): Promise<void> {
@@ -54,8 +57,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
     }
 
-    function save(applyToChildDecks: boolean): void {
-        commitEditing();
+    async function save(applyToChildDecks: boolean): Promise<void> {
+        await commitEditing();
         state.save(applyToChildDecks);
     }
 
@@ -64,48 +67,60 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     let showFloating = false;
 </script>
 
-<ButtonGroup>
-    <LabelButton
-        theme="primary"
-        on:click={() => save(false)}
-        tooltip={getPlatformString(saveKeyCombination)}
-        --border-left-radius="5px">{tr.deckConfigSaveButton()}</LabelButton
-    >
-    <Shortcut keyCombination={saveKeyCombination} on:action={() => save(false)} />
+<LabelButton
+    primary
+    on:click={() => save(false)}
+    tooltip={getPlatformString(saveKeyCombination)}
+    --border-left-radius={!rtl ? "var(--border-radius)" : "0"}
+    --border-right-radius={rtl ? "var(--border-radius)" : "0"}
+>
+    <div class="save">{tr.deckConfigSaveButton()}</div>
+</LabelButton>
+<Shortcut keyCombination={saveKeyCombination} on:action={() => save(false)} />
 
-    <WithFloating
-        show={showFloating}
-        closeOnInsideClick
-        inline
-        on:close={() => (showFloating = false)}
+<WithFloating
+    show={showFloating}
+    closeOnInsideClick
+    inline
+    on:close={() => (showFloating = false)}
+>
+    <IconButton
+        class="chevron"
+        slot="reference"
+        on:click={() => (showFloating = !showFloating)}
+        --border-right-radius={!rtl ? "var(--border-radius)" : "0"}
+        --border-left-radius={rtl ? "var(--border-radius)" : "0"}
+        iconSize={80}
     >
-        <IconButton
-            slot="reference"
-            widthMultiplier={0.5}
-            iconSize={120}
-            --border-right-radius="5px"
-            on:click={() => (showFloating = !showFloating)}
-        >
-            {@html chevronDown}
-        </IconButton>
+        {@html chevronDown}
+    </IconButton>
+    <Popover slot="floating">
+        <DropdownItem on:click={() => dispatch("add")}>
+            {tr.deckConfigAddGroup()}
+        </DropdownItem>
+        <DropdownItem on:click={() => dispatch("clone")}>
+            {tr.deckConfigCloneGroup()}
+        </DropdownItem>
+        <DropdownItem on:click={() => dispatch("rename")}>
+            {tr.deckConfigRenameGroup()}
+        </DropdownItem>
+        <DropdownItem on:click={removeConfig}>
+            {tr.deckConfigRemoveGroup()}
+        </DropdownItem>
+        <DropdownDivider />
+        <DropdownItem on:click={() => save(true)}>
+            {tr.deckConfigSaveToAllSubdecks()}
+        </DropdownItem>
+    </Popover>
+</WithFloating>
 
-        <Popover slot="floating">
-            <DropdownItem on:click={() => dispatch("add")}
-                >{tr.deckConfigAddGroup()}</DropdownItem
-            >
-            <DropdownItem on:click={() => dispatch("clone")}
-                >{tr.deckConfigCloneGroup()}</DropdownItem
-            >
-            <DropdownItem on:click={() => dispatch("rename")}>
-                {tr.deckConfigRenameGroup()}
-            </DropdownItem>
-            <DropdownItem on:click={removeConfig}
-                >{tr.deckConfigRemoveGroup()}</DropdownItem
-            >
-            <DropdownDivider />
-            <DropdownItem on:click={() => save(true)}>
-                {tr.deckConfigSaveToAllSubdecks()}
-            </DropdownItem>
-        </Popover>
-    </WithFloating>
-</ButtonGroup>
+<style lang="scss">
+    .save {
+        margin: 0 0.75rem;
+    }
+
+    /* Todo: find more elegant fix for misalignment */
+    :global(.chevron) {
+        height: 100% !important;
+    }
+</style>

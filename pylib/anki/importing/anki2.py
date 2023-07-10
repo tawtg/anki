@@ -30,7 +30,6 @@ class MediaMapInvalid(Exception):
 
 
 class Anki2Importer(Importer):
-
     needMapper = False
     deckPrefix: Optional[str] = None
     allowUpdate = True
@@ -151,7 +150,7 @@ class Anki2Importer(Importer):
 
         if dupesIgnored:
             self.log.append(
-                self.dst.tr.importing_notes_that_could_not_be_imported(
+                self.dst.tr.importing_notes_skipped_update_due_to_notetype(
                     val=len(dupesIgnored)
                 )
             )
@@ -315,7 +314,7 @@ class Anki2Importer(Importer):
         self._cards: dict[tuple[str, int], CardId] = {}
         existing = {}
         for guid, ord, cid in self.dst.db.execute(
-            "select f.guid, c.ord, c.id from cards c, notes f " "where c.nid = f.id"
+            "select f.guid, c.ord, c.id from cards c, notes f where c.nid = f.id"
         ):
             existing[cid] = True
             self._cards[(guid, ord)] = cid
@@ -326,7 +325,7 @@ class Anki2Importer(Importer):
         usn = self.dst.usn()
         aheadBy = self.src.sched.today - self.dst.sched.today
         for card in self.src.db.execute(
-            "select f.guid, f.mid, c.* from cards c, notes f " "where c.nid = f.id"
+            "select f.guid, f.mid, c.* from cards c, notes f where c.nid = f.id"
         ):
             guid = card[0]
             if guid in self._ignoredGuids:

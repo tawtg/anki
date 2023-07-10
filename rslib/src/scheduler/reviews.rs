@@ -4,16 +4,18 @@
 use std::collections::HashMap;
 
 use lazy_static::lazy_static;
-use rand::distributions::{Distribution, Uniform};
+use rand::distributions::Distribution;
+use rand::distributions::Uniform;
 use regex::Regex;
 
-use crate::{
-    card::{Card, CardId, CardQueue, CardType},
-    collection::Collection,
-    config::StringKey,
-    error::Result,
-    prelude::*,
-};
+use crate::card::Card;
+use crate::card::CardId;
+use crate::card::CardQueue;
+use crate::card::CardType;
+use crate::collection::Collection;
+use crate::config::StringKey;
+use crate::error::Result;
+use crate::prelude::*;
 
 impl Card {
     /// Make card due in `days_from_today`.
@@ -55,7 +57,7 @@ impl Card {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct DueDateSpecifier {
     min: u32,
     max: u32,
@@ -68,7 +70,7 @@ pub fn parse_due_date_str(s: &str) -> Result<DueDateSpecifier> {
             r#"(?x)^
             # a number
             (?P<min>\d+)
-            # an optional hypen and another number
+            # an optional hyphen and another number
             (?:
                 -
                 (?P<max>\d+)
@@ -80,7 +82,7 @@ pub fn parse_due_date_str(s: &str) -> Result<DueDateSpecifier> {
         )
         .unwrap();
     }
-    let caps = RE.captures(s).ok_or_else(|| AnkiError::invalid_input(s))?;
+    let caps = RE.captures(s).or_invalid(s)?;
     let min: u32 = caps.name("min").unwrap().as_str().parse()?;
     let max = if let Some(max) = caps.name("max") {
         max.as_str().parse()?
@@ -117,11 +119,8 @@ impl Collection {
                 let ease_factor = match decks_initial_ease.get(&deck_id) {
                     Some(ease) => *ease,
                     None => {
-                        let config_id = col
-                            .get_deck(deck_id)?
-                            .ok_or(AnkiError::NotFound)?
-                            .config_id()
-                            .ok_or(AnkiError::NotFound)?;
+                        let deck = col.get_deck(deck_id)?.or_not_found(deck_id)?;
+                        let config_id = deck.config_id().or_invalid("home deck is filtered")?;
                         let ease = col
                             .get_deck_config(config_id, true)?
                             // just for compiler; get_deck_config() is guaranteed to return a value

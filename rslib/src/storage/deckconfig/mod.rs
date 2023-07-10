@@ -4,17 +4,23 @@
 use std::collections::HashMap;
 
 use prost::Message;
-use rusqlite::{params, Row};
+use rusqlite::params;
+use rusqlite::Row;
 use serde_json::Value;
 
 use super::SqliteStorage;
-use crate::{
-    deckconfig::{DeckConfSchema11, DeckConfig, DeckConfigId, DeckConfigInner},
-    prelude::*,
-};
+use crate::deckconfig::ensure_deck_config_values_valid;
+use crate::deckconfig::DeckConfSchema11;
+use crate::deckconfig::DeckConfig;
+use crate::deckconfig::DeckConfigId;
+use crate::deckconfig::DeckConfigInner;
+use crate::prelude::*;
 
-fn row_to_deckconf(row: &Row) -> Result<DeckConfig> {
-    let config = DeckConfigInner::decode(row.get_ref_unwrap(4).as_blob()?)?;
+fn row_to_deckconf(row: &Row, fix_invalid: bool) -> Result<DeckConfig> {
+    let mut config = DeckConfigInner::decode(row.get_ref_unwrap(4).as_blob()?)?;
+    if fix_invalid {
+        ensure_deck_config_values_valid(&mut config);
+    }
     Ok(DeckConfig {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -28,14 +34,22 @@ impl SqliteStorage {
     pub(crate) fn all_deck_config(&self) -> Result<Vec<DeckConfig>> {
         self.db
             .prepare_cached(include_str!("get.sql"))?
-            .query_and_then([], row_to_deckconf)?
+            .query_and_then([], |row| row_to_deckconf(row, true))?
+            .collect()
+    }
+
+    /// Does not cap values to those expected by the latest schema.
+    pub(crate) fn all_deck_config_for_schema16_upgrade(&self) -> Result<Vec<DeckConfig>> {
+        self.db
+            .prepare_cached(include_str!("get.sql"))?
+            .query_and_then([], |row| row_to_deckconf(row, false))?
             .collect()
     }
 
     pub(crate) fn get_deck_config_map(&self) -> Result<HashMap<DeckConfigId, DeckConfig>> {
         self.db
             .prepare_cached(include_str!("get.sql"))?
-            .query_and_then([], row_to_deckconf)?
+            .query_and_then([], |row| row_to_deckconf(row, true))?
             .map(|res| res.map(|d| (d.id, d)))
             .collect()
     }
@@ -43,7 +57,7 @@ impl SqliteStorage {
     pub(crate) fn get_deck_config(&self, dcid: DeckConfigId) -> Result<Option<DeckConfig>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where id = ?"))?
-            .query_and_then(params![dcid], row_to_deckconf)?
+            .query_and_then(params![dcid], |row| row_to_deckconf(row, true))?
             .next()
             .transpose()
     }
@@ -104,9 +118,7 @@ impl SqliteStorage {
         &self,
         conf: &DeckConfig,
     ) -> Result<()> {
-        if conf.id.0 == 0 {
-            return Err(AnkiError::invalid_input("deck with id 0"));
-        }
+        require!(conf.id.0 != 0, "deck with id 0");
         let mut conf_bytes = vec![];
         conf.inner.encode(&mut conf_bytes)?;
         self.db
@@ -176,7 +188,9 @@ impl SqliteStorage {
                             let conf: Value = serde_json::from_str(text)?;
                             serde_json::from_value(conf)
                         })
-                        .map_err(|e| AnkiError::JsonError(format!("decoding deck config: {}", e)))
+                        .map_err(|e| AnkiError::JsonError {
+                            info: format!("decoding deck config: {}", e),
+                        })
                 })?;
         for (id, mut conf) in conf.into_iter() {
             // buggy clients may have failed to set inner id to match hash key
@@ -214,7 +228,7 @@ impl SqliteStorage {
 
     pub(super) fn upgrade_deck_conf_to_schema16(&self, server: bool) -> Result<()> {
         let mut invalid_configs = vec![];
-        for mut conf in self.all_deck_config()? {
+        for mut conf in self.all_deck_config_for_schema16_upgrade()? {
             // schema 16 changed starting ease of 250 to 2.5
             conf.inner.initial_ease /= 100.0;
             // new deck configs created with schema 15 had the wrong
@@ -241,7 +255,7 @@ impl SqliteStorage {
             .collect();
         self.db.execute(
             "update col set dconf=?",
-            params![serde_json::to_string(&confmap)?],
+            params![crate::serde::schema11_to_string(confmap)?],
         )?;
         Ok(())
     }

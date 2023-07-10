@@ -2,23 +2,28 @@
 
 set -e
 
-# check author has added themselves to CONTRIBUTORS
-echo "--- Checking CONTRIBUTORS"
-.buildkite/linux/check_contributors
+export PATH="$PATH:/state/rust/cargo/bin"
+export BUILD_ROOT=/state/build
+export ONLINE_TESTS=1
 
-BAZEL="bazel --output_user_root=/state/bazel --output_base=/state/bazel/anki"
-BUILDARGS="--config=ci --disk_cache=/state/bazel/disk --repository_cache=/state/bazel/repo"
+echo "--- Install n2"
+./tools/install-n2
 
 echo "+++ Building and testing"
+ln -sf out/node_modules .
 
-# move existing node_modules into tree
-test -e /state/node_modules && mv /state/node_modules .
+if [ "$CLEAR_RUST" = "1" ]; then
+    rm -rf $BUILD_ROOT/rust
+fi
 
-$BAZEL test $BUILDARGS ... //rslib/linkchecker
+./ninja pylib qt check
 
-echo "--- Running lints"
-python tools/copyright_headers.py
+echo "--- Ensure libs importable"
+SKIP_RUN=1 ./run
+
+echo "--- Check Rust libs"
+cargo install cargo-deny
+cargo deny check -A duplicate
 
 echo "--- Cleanup"
-# if tests succeed, back up node_modules folder
-mv node_modules /state/
+rm -rf /tmp/* || true

@@ -7,19 +7,19 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import { chevronDown } from "./icons";
 
     export let collapsed = false;
-    export let highlighted = false;
 </script>
 
-<div class="collapse-badge" class:collapsed class:highlighted>
-    <Badge iconSize={80} --icon-align="text-bottom">{@html chevronDown}</Badge>
+<div class="collapse-badge" class:collapsed>
+    <Badge iconSize={80}>{@html chevronDown}</Badge>
 </div>
 
 <style lang="scss">
     .collapse-badge {
         display: inline-block;
         opacity: 0.4;
-        transition: opacity 0.2s ease-in-out, transform 80ms ease-in;
-        &.highlighted {
+        transition: opacity var(--transition) ease-in-out,
+            transform var(--transition) ease-in;
+        :global(.collapse-label:hover) & {
             opacity: 1;
         }
         &.collapsed {

@@ -3,40 +3,52 @@
 
 use std::collections::HashSet;
 
+use anki_proto::scheduler::custom_study_request::cram::CramKind;
+use anki_proto::scheduler::custom_study_request::Cram;
+use anki_proto::scheduler::custom_study_request::Value as CustomStudyValue;
+
 use super::FilteredDeckForUpdate;
-use crate::{
-    config::DeckConfigKey,
-    decks::{FilteredDeck, FilteredSearchOrder, FilteredSearchTerm},
-    error::{CustomStudyError, FilteredDeckError},
-    pb::{
-        self as pb,
-        custom_study_request::{cram::CramKind, Cram, Value as CustomStudyValue},
-    },
-    prelude::*,
-    search::{JoinSearches, Negated, PropertyKind, RatingKind, SearchNode, StateKind},
-};
+use crate::config::DeckConfigKey;
+use crate::decks::tree::get_deck_in_tree;
+use crate::decks::tree::sum_deck_tree_node;
+use crate::decks::FilteredDeck;
+use crate::decks::FilteredSearchOrder;
+use crate::decks::FilteredSearchTerm;
+use crate::error::CustomStudyError;
+use crate::error::FilteredDeckError;
+use crate::prelude::*;
+use crate::search::JoinSearches;
+use crate::search::Negated;
+use crate::search::PropertyKind;
+use crate::search::RatingKind;
+use crate::search::SearchNode;
+use crate::search::StateKind;
 
 impl Collection {
-    pub fn custom_study(&mut self, input: pb::CustomStudyRequest) -> Result<OpOutput<()>> {
+    pub fn custom_study(
+        &mut self,
+        input: anki_proto::scheduler::CustomStudyRequest,
+    ) -> Result<OpOutput<()>> {
         self.transact(Op::CreateCustomStudy, |col| col.custom_study_inner(input))
     }
 
     pub fn custom_study_defaults(
         &mut self,
         deck_id: DeckId,
-    ) -> Result<pb::CustomStudyDefaultsResponse> {
+    ) -> Result<anki_proto::scheduler::CustomStudyDefaultsResponse> {
         // daily counts
-        let deck = self.get_deck(deck_id)?.ok_or(AnkiError::NotFound)?;
+        let deck = self.get_deck(deck_id)?.or_not_found(deck_id)?;
         let normal = deck.normal()?;
         let extend_new = normal.extend_new;
         let extend_review = normal.extend_review;
-        let subtree = self
-            .deck_tree(Some(TimestampSecs::now()))?
-            .get_deck(deck_id)
-            .ok_or(AnkiError::NotFound)?;
+
+        let subtree = get_deck_in_tree(self.deck_tree(Some(TimestampSecs::now()))?, deck_id)
+            .or_not_found(deck_id)?;
         let v3 = self.get_config_bool(BoolKey::Sched2021);
-        let available_new_including_children = subtree.sum(|node| node.new_uncapped);
-        let available_review_including_children = subtree.sum(|node| node.review_uncapped);
+        let available_new_including_children =
+            sum_deck_tree_node(&subtree, |node| node.new_uncapped);
+        let available_review_including_children =
+            sum_deck_tree_node(&subtree, |node| node.review_uncapped);
         let (
             available_new,
             available_new_in_children,
@@ -70,11 +82,11 @@ impl Collection {
         );
         let mut all_tags: Vec<_> = self.all_tags_in_deck(deck_id)?.into_iter().collect();
         all_tags.sort_unstable();
-        let tags: Vec<pb::custom_study_defaults_response::Tag> = all_tags
+        let tags: Vec<anki_proto::scheduler::custom_study_defaults_response::Tag> = all_tags
             .into_iter()
             .map(|tag| {
                 let tag = tag.into_inner();
-                pb::custom_study_defaults_response::Tag {
+                anki_proto::scheduler::custom_study_defaults_response::Tag {
                     include: include_tags.contains(&tag),
                     exclude: exclude_tags.contains(&tag),
                     name: tag,
@@ -82,7 +94,7 @@ impl Collection {
             })
             .collect();
 
-        Ok(pb::CustomStudyDefaultsResponse {
+        Ok(anki_proto::scheduler::CustomStudyDefaultsResponse {
             tags,
             extend_new,
             extend_review,
@@ -95,21 +107,21 @@ impl Collection {
 }
 
 impl Collection {
-    fn custom_study_inner(&mut self, input: pb::CustomStudyRequest) -> Result<()> {
+    fn custom_study_inner(
+        &mut self,
+        input: anki_proto::scheduler::CustomStudyRequest,
+    ) -> Result<()> {
         let mut deck = self
             .storage
             .get_deck(input.deck_id.into())?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(input.deck_id)?;
 
-        match input
-            .value
-            .ok_or_else(|| AnkiError::invalid_input("missing oneof value"))?
-        {
+        match input.value.or_invalid("missing oneof value")? {
             CustomStudyValue::NewLimitDelta(delta) => {
                 let today = self.current_due_day(0)?;
                 self.extend_limits(today, self.usn()?, deck.id, delta, 0)?;
                 if delta > 0 {
-                    deck = self.storage.get_deck(deck.id)?.ok_or(AnkiError::NotFound)?;
+                    deck = self.storage.get_deck(deck.id)?.or_not_found(deck.id)?;
                     let original = deck.clone();
                     deck.normal_mut()?.extend_new = delta as u32;
                     self.update_deck_inner(&mut deck, original, self.usn()?)?;
@@ -120,7 +132,7 @@ impl Collection {
                 let today = self.current_due_day(0)?;
                 self.extend_limits(today, self.usn()?, deck.id, 0, delta)?;
                 if delta > 0 {
-                    deck = self.storage.get_deck(deck.id)?.ok_or(AnkiError::NotFound)?;
+                    deck = self.storage.get_deck(deck.id)?.or_not_found(deck.id)?;
                     let original = deck.clone();
                     deck.normal_mut()?.extend_review = delta as u32;
                     self.update_deck_inner(&mut deck, original, self.usn()?)?;
@@ -162,11 +174,7 @@ impl Collection {
         let human_name = self.tr.custom_study_custom_study_session().to_string();
 
         if let Some(did) = self.get_deck_id(&human_name)? {
-            if !self
-                .get_deck(did)?
-                .ok_or(AnkiError::NotFound)?
-                .is_filtered()
-            {
+            if !self.get_deck(did)?.or_not_found(did)?.is_filtered() {
                 return Err(CustomStudyError::ExistingDeck.into());
             }
             id = did;
@@ -181,7 +189,12 @@ impl Collection {
         self.add_or_update_filtered_deck_inner(deck)
             .map(|_| ())
             .map_err(|err| {
-                if err == AnkiError::FilteredDeckError(FilteredDeckError::SearchReturnedNoCards) {
+                if matches!(
+                    err,
+                    AnkiError::FilteredDeckError {
+                        source: FilteredDeckError::SearchReturnedNoCards
+                    }
+                ) {
                     CustomStudyError::NoMatchingCards.into()
                 } else {
                     err
@@ -291,18 +304,16 @@ fn tags_to_nodes(tags_to_include: &[String], tags_to_exclude: &[String]) -> Sear
 
 #[cfg(test)]
 mod test {
+    use anki_proto::scheduler::custom_study_request::cram::CramKind;
+    use anki_proto::scheduler::custom_study_request::Cram;
+    use anki_proto::scheduler::custom_study_request::Value;
+    use anki_proto::scheduler::CustomStudyRequest;
+
     use super::*;
-    use crate::{
-        collection::open_test_collection,
-        pb::{
-            scheduler::custom_study_request::{cram::CramKind, Cram, Value},
-            CustomStudyRequest,
-        },
-    };
 
     #[test]
     fn tag_remembering() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
@@ -352,9 +363,9 @@ mod test {
                 deck_id: 1,
                 value: Some(Value::Cram(cram.clone())),
             }),
-            Err(AnkiError::CustomStudyError(
-                CustomStudyError::NoMatchingCards
-            ))
+            Err(AnkiError::CustomStudyError {
+                source: CustomStudyError::NoMatchingCards
+            })
         );
         assert_eq!(
             &get_defaults(&mut col)?,

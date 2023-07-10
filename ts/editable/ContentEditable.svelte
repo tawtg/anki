@@ -14,7 +14,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import type { MirrorAction } from "../sveltelib/dom-mirror";
     import type { SetupInputHandlerAction } from "../sveltelib/input-handler";
     import type { ContentEditableAPI } from "./content-editable";
-    import { preventBuiltinShortcuts, useFocusHandler } from "./content-editable";
+    import {
+        fixRTLKeyboardNav,
+        preventBuiltinShortcuts,
+        useFocusHandler,
+    } from "./content-editable";
 
     export let resolve: (editable: HTMLElement) => void;
 
@@ -37,9 +41,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 <anki-editable
     contenteditable="true"
+    role="textbox"
+    tabindex="0"
     use:resolve
     use:setupFocusHandling
     use:preventBuiltinShortcuts
+    use:fixRTLKeyboardNav
     use:mirrorAction={mirrorOptions}
     use:inputHandlerAction={{}}
     on:focus

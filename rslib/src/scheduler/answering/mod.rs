@@ -8,23 +8,24 @@ mod relearning;
 mod review;
 mod revlog;
 
-use rand::{prelude::*, rngs::StdRng};
+use rand::prelude::*;
+use rand::rngs::StdRng;
 use revlog::RevlogEntryPartial;
 
-use super::{
-    states::{
-        steps::LearningSteps, CardState, FilteredState, NormalState, SchedulingStates, StateContext,
-    },
-    timespan::answer_button_time_collapsible,
-    timing::SchedTimingToday,
-};
-use crate::{
-    card::CardQueue,
-    deckconfig::{DeckConfig, LeechAction},
-    decks::Deck,
-    pb,
-    prelude::*,
-};
+use super::queue::BuryMode;
+use super::states::steps::LearningSteps;
+use super::states::CardState;
+use super::states::FilteredState;
+use super::states::NormalState;
+use super::states::SchedulingStates;
+use super::states::StateContext;
+use super::timespan::answer_button_time_collapsible;
+use super::timing::SchedTimingToday;
+use crate::card::CardQueue;
+use crate::deckconfig::DeckConfig;
+use crate::deckconfig::LeechAction;
+use crate::decks::Deck;
+use crate::prelude::*;
 
 #[derive(Copy, Clone)]
 pub enum Rating {
@@ -116,12 +117,11 @@ impl CardStateUpdater {
                 if let CardState::Filtered(filtered) = &current {
                     match filtered {
                         FilteredState::Preview(_) => {
-                            return Err(AnkiError::invalid_input(
-                                "should set finished=true, not return different state",
-                            ));
+                            invalid_input!("should set finished=true, not return different state")
                         }
                         FilteredState::Rescheduling(_) => {
-                            // card needs to be removed from normal filtered deck, then scheduled normally
+                            // card needs to be removed from normal filtered deck, then scheduled
+                            // normally
                             self.card.remove_from_filtered_deck_before_reschedule();
                         }
                     }
@@ -166,13 +166,11 @@ impl CardStateUpdater {
     }
 
     fn ensure_filtered(&self) -> Result<()> {
-        if self.card.original_deck_id.0 == 0 {
-            Err(AnkiError::invalid_input(
-                "card answering can't transition into filtered state",
-            ))
-        } else {
-            Ok(())
-        }
+        require!(
+            self.card.original_deck_id.0 != 0,
+            "card answering can't transition into filtered state",
+        );
+        Ok(())
     }
 }
 
@@ -190,7 +188,7 @@ impl Rating {
 impl Collection {
     /// Return the next states that will be applied for each answer button.
     pub fn get_scheduling_states(&mut self, cid: CardId) -> Result<SchedulingStates> {
-        let card = self.storage.get_card(cid)?.ok_or(AnkiError::NotFound)?;
+        let card = self.storage.get_card(cid)?.or_not_found(cid)?;
         let ctx = self.card_state_updater(card)?;
         let current = ctx.current_card_state();
         let state_ctx = ctx.state_context();
@@ -198,7 +196,7 @@ impl Collection {
     }
 
     /// Describe the next intervals, to display on the answer buttons.
-    pub fn describe_next_states(&mut self, choices: SchedulingStates) -> Result<Vec<String>> {
+    pub fn describe_next_states(&mut self, choices: &SchedulingStates) -> Result<Vec<String>> {
         let collapse_time = self.learn_ahead_secs();
         let now = TimestampSecs::now();
         let timing = self.timing_for_timestamp(now)?;
@@ -254,19 +252,19 @@ impl Collection {
         let card = self
             .storage
             .get_card(answer.card_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(answer.card_id)?;
         let original = card.clone();
         let usn = self.usn()?;
 
         let mut updater = self.card_state_updater(card)?;
         answer.cap_answer_secs(updater.config.inner.cap_answer_time_to_secs);
         let current_state = updater.current_card_state();
-        if current_state != answer.current_state {
-            return Err(AnkiError::invalid_input(format!(
-                "card was modified: {:#?} {:#?}",
-                current_state, answer.current_state,
-            )));
-        }
+        require!(
+            current_state == answer.current_state,
+            "card was modified: {current_state:#?} {:#?}",
+            answer.current_state,
+        );
+
         let revlog_partial = updater.apply_study_state(current_state, answer.new_state)?;
         self.add_partial_revlog(revlog_partial, usn, answer)?;
 
@@ -287,16 +285,10 @@ impl Collection {
     }
 
     fn maybe_bury_siblings(&mut self, card: &Card, config: &DeckConfig) -> Result<()> {
-        if config.inner.bury_new || config.inner.bury_reviews {
-            self.bury_siblings(
-                card.id,
-                card.note_id,
-                config.inner.bury_new,
-                config.inner.bury_reviews,
-                config.inner.bury_interday_learning,
-            )?;
+        let bury_mode = BuryMode::from_deck_config(config);
+        if bury_mode.any_burying() {
+            self.bury_siblings(card, card.note_id, bury_mode)?;
         }
-
         Ok(())
     }
 
@@ -334,7 +326,7 @@ impl Collection {
         self.update_deck_stats(
             updater.timing.days_elapsed,
             usn,
-            pb::UpdateStatsRequest {
+            anki_proto::scheduler::UpdateStatsRequest {
                 deck_id: updater.deck.id.0,
                 new_delta,
                 review_delta,
@@ -348,7 +340,7 @@ impl Collection {
         let deck = self
             .storage
             .get_deck(card.deck_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(card.deck_id)?;
         let config = self.home_deck_config(deck.config_id(), card.original_deck_id)?;
         Ok(CardStateUpdater {
             fuzz_seed: get_fuzz_seed(&card),
@@ -371,8 +363,8 @@ impl Collection {
             let home_deck = self
                 .storage
                 .get_deck(home_deck_id)?
-                .ok_or(AnkiError::NotFound)?;
-            home_deck.config_id().ok_or(AnkiError::NotFound)?
+                .or_not_found(home_deck_id)?;
+            home_deck.config_id().or_invalid("home deck is filtered")?
         };
 
         Ok(self.storage.get_deck_config(config_id)?.unwrap_or_default())
@@ -453,9 +445,9 @@ fn get_fuzz_factor(seed: Option<u64>) -> Option<f32> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        card::CardType, collection::open_test_collection, deckconfig::ReviewMix, search::SortMode,
-    };
+    use crate::card::CardType;
+    use crate::deckconfig::ReviewMix;
+    use crate::search::SortMode;
 
     fn current_state(col: &mut Collection, card_id: CardId) -> CardState {
         col.get_scheduling_states(card_id).unwrap().current
@@ -465,7 +457,7 @@ mod test {
     // state we applied to it
     #[test]
     fn state_application() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         if col.timing_today()?.near_cutoff() {
             return Ok(());
         }
@@ -580,7 +572,7 @@ mod test {
     }
 
     fn v3_test_collection(cards: usize) -> Result<(Collection, Vec<CardId>)> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         for _ in 0..cards {
             let mut note = Note::new(&nt);

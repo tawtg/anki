@@ -4,17 +4,16 @@
 mod card;
 mod custom_study;
 
-use crate::{
-    config::{ConfigKey, SchedulerVersion},
-    decks::{FilteredDeck, FilteredSearchTerm},
-    error::FilteredDeckError,
-    prelude::*,
-    search::{
-        writer::{deck_search, normalize_search},
-        SortMode,
-    },
-    storage::card::filtered::order_and_limit_for_search,
-};
+use crate::config::ConfigKey;
+use crate::config::SchedulerVersion;
+use crate::decks::FilteredDeck;
+use crate::decks::FilteredSearchTerm;
+use crate::error::FilteredDeckError;
+use crate::prelude::*;
+use crate::search::writer::deck_search;
+use crate::search::writer::normalize_search;
+use crate::search::SortMode;
+use crate::storage::card::filtered::order_and_limit_for_search;
 
 /// Contains the parts of a filtered deck required for modifying its settings in
 /// the UI.
@@ -33,8 +32,8 @@ pub(crate) struct DeckFilterContext<'a> {
 }
 
 impl Collection {
-    /// Get an existing filtered deck, or create a new one if `deck_id` is 0. The new deck
-    /// will not be added to the DB.
+    /// Get an existing filtered deck, or create a new one if `deck_id` is 0.
+    /// The new deck will not be added to the DB.
     pub fn get_or_create_filtered_deck(
         &mut self,
         deck_id: DeckId,
@@ -42,16 +41,16 @@ impl Collection {
         let deck = if deck_id.0 == 0 {
             self.new_filtered_deck_for_adding()?
         } else {
-            self.storage.get_deck(deck_id)?.ok_or(AnkiError::NotFound)?
+            self.storage.get_deck(deck_id)?.or_not_found(deck_id)?
         };
 
         deck.try_into()
     }
 
-    /// If the provided `deck_id` is 0, add provided deck to the DB, and rebuild it. If the
-    /// searches are invalid or do not match anything, adding is aborted.
-    /// If an existing deck is provided, it will be updated. Invalid searches or an empty
-    /// match will abort the update.
+    /// If the provided `deck_id` is 0, add provided deck to the DB, and rebuild
+    /// it. If the searches are invalid or do not match anything, adding is
+    /// aborted. If an existing deck is provided, it will be updated.
+    /// Invalid searches or an empty match will abort the update.
     /// Returns the deck_id, which will have changed if the id was 0.
     pub fn add_or_update_filtered_deck(
         &mut self,
@@ -71,7 +70,7 @@ impl Collection {
     // Unlike the old Python code, this also marks the cards as modified.
     pub fn rebuild_filtered_deck(&mut self, did: DeckId) -> Result<OpOutput<usize>> {
         self.transact(Op::RebuildFilteredDeck, |col| {
-            let deck = col.get_deck(did)?.ok_or(AnkiError::NotFound)?;
+            let deck = col.get_deck(did)?.or_not_found(did)?;
             col.rebuild_filtered_deck_inner(&deck, col.usn()?)
         })
     }
@@ -170,10 +169,7 @@ impl Collection {
             apply_update_to_filtered_deck(&mut deck, update);
             self.add_deck_inner(&mut deck, usn)?;
         } else {
-            let original = self
-                .storage
-                .get_deck(update.id)?
-                .ok_or(AnkiError::NotFound)?;
+            let original = self.storage.get_deck(update.id)?.or_not_found(update.id)?;
             deck = original.clone();
             apply_update_to_filtered_deck(&mut deck, update);
             self.update_deck_inner(&mut deck, original, usn)?;
@@ -241,14 +237,13 @@ impl TryFrom<Deck> for FilteredDeckForUpdate {
 
     fn try_from(value: Deck) -> Result<Self, Self::Error> {
         let human_name = value.human_name();
-        if let DeckKind::Filtered(filtered) = value.kind {
-            Ok(FilteredDeckForUpdate {
+        match value.kind {
+            DeckKind::Filtered(filtered) => Ok(FilteredDeckForUpdate {
                 id: value.id,
                 human_name,
                 config: filtered,
-            })
-        } else {
-            Err(AnkiError::invalid_input("not filtered"))
+            }),
+            _ => invalid_input!("not filtered"),
         }
     }
 }

@@ -9,12 +9,13 @@ use crate::prelude::*;
 #[strum(serialize_all = "camelCase")]
 pub enum I32ConfigKey {
     CsvDuplicateResolution,
+    MatchScope,
 }
 
 impl Collection {
     pub fn get_config_i32(&self, key: I32ConfigKey) -> i32 {
         #[allow(clippy::match_single_binding)]
-        self.get_config_optional(key).unwrap_or_else(|| match key {
+        self.get_config_optional(key).unwrap_or(match key {
             _other => 0,
         })
     }

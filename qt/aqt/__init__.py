@@ -12,19 +12,20 @@ if sys.version_info[0] < 3 or sys.version_info[1] < 9:
 try:
     "テスト".encode(sys.getfilesystemencoding())
 except UnicodeEncodeError as exc:
-    raise Exception("Anki requires a UTF-8 locale.") from exc
+    print("Anki requires a UTF-8 locale.")
+    print("Please Google 'how to change locale on [your Linux distro]'")
+    sys.exit(1)
+
+# if sync server enabled, bypass the rest of the startup
+if "--syncserver" in sys.argv:
+    from anki.syncserver import run_sync_server
+
+    # does not return
+    run_sync_server()
 
 from .package import packaged_build_setup
 
 packaged_build_setup()
-
-# syncserver needs to be run before Qt loaded
-if "--syncserver" in sys.argv:
-    from anki.syncserver import serve
-
-    serve()
-    sys.exit(0)
-
 
 import argparse
 import builtins
@@ -101,7 +102,6 @@ from aqt import stats, about, preferences, mediasync  # isort:skip
 
 
 class DialogManager:
-
     _dialogs: dict[str, list] = {
         "AddCards": [addcards.AddCards, None],
         "AddonsDialog": [addons.AddonsDialog, None],
@@ -145,7 +145,7 @@ class DialogManager:
             return None
 
         # ask all windows to close and await a reply
-        for (name, (creator, instance)) in self._dialogs.items():
+        for name, (creator, instance) in self._dialogs.items():
             if not instance:
                 continue
 
@@ -239,9 +239,8 @@ def setupLangAndBackend(
         lang = force or pm.meta["defaultLang"]
     lang = anki.lang.lang_to_disk_lang(lang)
 
-    if not firstTime:
-        # set active language
-        anki.lang.set_lang(lang)
+    # set active language
+    anki.lang.set_lang(lang)
 
     # switch direction for RTL languages
     if anki.lang.is_rtl(lang):
@@ -271,7 +270,6 @@ def setupLangAndBackend(
 
 
 class AnkiApp(QApplication):
-
     # Single instance support on Win32/Linux
     ##################################################
 
@@ -345,16 +343,29 @@ class AnkiApp(QApplication):
     ##################################################
 
     def eventFilter(self, src: Any, evt: QEvent) -> bool:
-        if evt.type() == QEvent.Type.HoverEnter:
-            if isinstance(src, QPushButton):
-                # TODO: apply drop-shadow with setGraphicsEffect(QGraphicsDropShadowEffect)
-                # issue: can't access attributes of QClassProxy (Qt5-compat)
+        pointer_classes = (
+            QPushButton,
+            QCheckBox,
+            QRadioButton,
+            QMenu,
+            QSlider,
+            # classes with PyQt5 compatibility proxy
+            without_qt5_compat_wrapper(QToolButton),
+            without_qt5_compat_wrapper(QTabBar),
+        )
+        if evt.type() in [QEvent.Type.Enter, QEvent.Type.HoverEnter]:
+            if (isinstance(src, pointer_classes) and src.isEnabled()) or (
+                isinstance(src, without_qt5_compat_wrapper(QComboBox))
+                and not src.isEditable()
+            ):
                 self.setOverrideCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             else:
                 self.restoreOverrideCursor()
             return False
 
-        elif evt.type() == QEvent.Type.HoverLeave or isinstance(evt, QCloseEvent):
+        elif evt.type() in [QEvent.Type.HoverLeave, QEvent.Type.Leave] or isinstance(
+            evt, QCloseEvent
+        ):
             self.restoreOverrideCursor()
             return False
 
@@ -464,7 +475,6 @@ PROFILE_CODE = os.environ.get("ANKI_PROFILE_CODE")
 
 
 def write_profile_results() -> None:
-
     profiler.disable()
     profile = os.path.join(os.environ.get("BUILD_WORKSPACE_DIRECTORY", ""), "anki.prof")
     profiler.dump_stats(profile)
@@ -510,29 +520,46 @@ def _run(argv: Optional[list[str]] = None, exec: bool = True) -> Optional[AnkiAp
         return None
 
     if PROFILE_CODE:
-
         profiler = cProfile.Profile()
         profiler.enable()
 
-    if (
-        getattr(sys, "frozen", False)
-        and (os.getenv("QT_QPA_PLATFORM") == "wayland" or os.getenv("WAYLAND_DISPLAY"))
-        and not os.getenv("ANKI_WAYLAND")
-    ):
-        # users need to opt in to wayland support, given the issues it has
-        print("Wayland support is disabled by default due to bugs:")
-        print("https://github.com/ankitects/anki/issues/1767")
-        print("You can force it on with an env var: ANKI_WAYLAND=1")
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    packaged = getattr(sys, "frozen", False)
+    x11_available = os.getenv("DISPLAY")
+    wayland_configured = qtmajor > 5 and (
+        os.getenv("QT_QPA_PLATFORM") == "wayland" or os.getenv("WAYLAND_DISPLAY")
+    )
+    wayland_forced = os.getenv("ANKI_WAYLAND")
 
-    # default to specified/system language before getting user's preference so that we can localize some more strings
-    lang = anki.lang.get_def_lang(opts.lang)
-    anki.lang.set_lang(lang[1])
+    if packaged and wayland_configured:
+        if wayland_forced or not x11_available:
+            # Work around broken fractional scaling in Wayland
+            # https://bugreports.qt.io/browse/QTBUG-113574
+            os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "RoundPreferFloor"
+            if not x11_available:
+                print(
+                    "Trying to use X11, but it is not available. Falling back to Wayland, which has some bugs:"
+                )
+                print("https://github.com/ankitects/anki/issues/1767")
+        else:
+            # users need to opt in to wayland support, given the issues it has
+            print("Wayland support is disabled by default due to bugs:")
+            print("https://github.com/ankitects/anki/issues/1767")
+            print("You can force it on with an env var: ANKI_WAYLAND=1")
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
 
     # profile manager
+    i18n_setup = False
     pm = None
     try:
-        pm = ProfileManager(opts.base)
+        base_folder = ProfileManager.get_created_base_folder(opts.base)
+        Collection.initialize_backend_logging(str(base_folder / "anki.log"))
+
+        # default to specified/system language before getting user's preference so that we can localize some more strings
+        lang = anki.lang.get_def_lang(opts.lang)
+        anki.lang.set_lang(lang[1])
+        i18n_setup = True
+
+        pm = ProfileManager(base_folder)
         pmLoadResult = pm.setupMeta()
     except:
         # will handle below
@@ -571,11 +598,14 @@ def _run(argv: Optional[list[str]] = None, exec: bool = True) -> Optional[AnkiAp
         return None
 
     if not pm:
-        QMessageBox.critical(
-            None,
-            tr.qt_misc_error(),
-            tr.profiles_could_not_create_data_folder(),
-        )
+        if i18n_setup:
+            QMessageBox.critical(
+                None,
+                tr.qt_misc_error(),
+                tr.profiles_could_not_create_data_folder(),
+            )
+        else:
+            QMessageBox.critical(None, "Startup Failed", "Unable to create data folder")
         return None
 
     # disable icons on mac; this must be done before window created

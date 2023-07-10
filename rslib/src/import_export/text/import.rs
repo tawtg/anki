@@ -1,41 +1,42 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::NameOrId;
-use crate::{
-    card::{CardQueue, CardType},
-    config::I32ConfigKey,
-    import_export::{
-        text::{
-            DupeResolution, ForeignCard, ForeignData, ForeignNote, ForeignNotetype, ForeignTemplate,
-        },
-        ImportProgress, IncrementableProgress, NoteLog,
-    },
-    notes::{field_checksum, normalize_field},
-    notetype::{CardGenContext, CardTemplate, NoteField, NotetypeConfig},
-    prelude::*,
-    text::strip_html_preserving_media_filenames,
-};
+use crate::card::CardQueue;
+use crate::card::CardType;
+use crate::config::I32ConfigKey;
+use crate::import_export::text::DupeResolution;
+use crate::import_export::text::ForeignCard;
+use crate::import_export::text::ForeignData;
+use crate::import_export::text::ForeignNote;
+use crate::import_export::text::ForeignNotetype;
+use crate::import_export::text::ForeignTemplate;
+use crate::import_export::text::MatchScope;
+use crate::import_export::ImportProgress;
+use crate::import_export::NoteLog;
+use crate::notes::field_checksum;
+use crate::notes::normalize_field;
+use crate::notetype::CardGenContext;
+use crate::notetype::CardTemplate;
+use crate::notetype::NoteField;
+use crate::prelude::*;
+use crate::progress::ThrottlingProgressHandler;
+use crate::text::strip_html_preserving_media_filenames;
 
 impl ForeignData {
     pub fn import(
         self,
         col: &mut Collection,
-        progress_fn: impl 'static + FnMut(ImportProgress, bool) -> bool,
+        mut progress: ThrottlingProgressHandler<ImportProgress>,
     ) -> Result<OpOutput<NoteLog>> {
-        let mut progress = IncrementableProgress::new(progress_fn);
-        progress.call(ImportProgress::File)?;
+        progress.set(ImportProgress::File)?;
         col.transact(Op::Import, |col| {
-            col.set_config_i32_inner(
-                I32ConfigKey::CsvDuplicateResolution,
-                self.dupe_resolution as i32,
-            )?;
+            self.update_config(col)?;
             let mut ctx = Context::new(&self, col)?;
             ctx.import_foreign_notetypes(self.notetypes)?;
             ctx.import_foreign_notes(
@@ -46,15 +47,22 @@ impl ForeignData {
             )
         })
     }
+
+    fn update_config(&self, col: &mut Collection) -> Result<()> {
+        col.set_config_i32_inner(
+            I32ConfigKey::CsvDuplicateResolution,
+            self.dupe_resolution as i32,
+        )?;
+        col.set_config_i32_inner(I32ConfigKey::MatchScope, self.match_scope as i32)?;
+        Ok(())
+    }
 }
 
-impl NoteLog {
-    fn new(dupe_resolution: DupeResolution, found_notes: u32) -> Self {
-        Self {
-            dupe_resolution: dupe_resolution as i32,
-            found_notes,
-            ..Default::default()
-        }
+fn new_note_log(dupe_resolution: DupeResolution, found_notes: u32) -> NoteLog {
+    NoteLog {
+        dupe_resolution: dupe_resolution as i32,
+        found_notes,
+        ..Default::default()
     }
 }
 
@@ -68,7 +76,7 @@ struct Context<'a> {
     today: u32,
     dupe_resolution: DupeResolution,
     card_gen_ctxs: HashMap<(NotetypeId, DeckId), CardGenContext<Arc<Notetype>>>,
-    existing_checksums: HashMap<(NotetypeId, u32), Vec<NoteId>>,
+    existing_checksums: ExistingChecksums,
     existing_guids: HashMap<String, NoteId>,
 }
 
@@ -76,6 +84,37 @@ struct DeckIdsByNameOrId {
     ids: HashSet<DeckId>,
     names: HashMap<String, DeckId>,
     default: Option<DeckId>,
+}
+
+/// Notes in the collection indexed by notetype, checksum and optionally deck.
+/// With deck, a note will be included in as many entries as its cards
+/// have different original decks.
+#[derive(Debug)]
+enum ExistingChecksums {
+    ByNotetype(HashMap<(NotetypeId, u32), Vec<NoteId>>),
+    ByNotetypeAndDeck(HashMap<(NotetypeId, u32, DeckId), Vec<NoteId>>),
+}
+
+impl ExistingChecksums {
+    fn new(col: &mut Collection, match_scope: MatchScope) -> Result<Self> {
+        match match_scope {
+            MatchScope::Notetype => col
+                .storage
+                .all_notes_by_type_and_checksum()
+                .map(Self::ByNotetype),
+            MatchScope::NotetypeAndDeck => col
+                .storage
+                .all_notes_by_type_checksum_and_deck()
+                .map(Self::ByNotetypeAndDeck),
+        }
+    }
+
+    fn get(&self, notetype: NotetypeId, checksum: u32, deck: DeckId) -> Option<&Vec<NoteId>> {
+        match self {
+            Self::ByNotetype(map) => map.get(&(notetype, checksum)),
+            Self::ByNotetypeAndDeck(map) => map.get(&(notetype, checksum, deck)),
+        }
+    }
 }
 
 struct NoteContext<'a> {
@@ -147,7 +186,7 @@ impl<'a> Context<'a> {
             col.notetype_by_name_or_id(&data.default_notetype)?,
         );
         let deck_ids = DeckIdsByNameOrId::new(col, &data.default_deck)?;
-        let existing_checksums = col.storage.all_notes_by_type_and_checksum()?;
+        let existing_checksums = ExistingChecksums::new(col, data.match_scope)?;
         let existing_guids = col.storage.all_notes_by_guid()?;
 
         Ok(Self {
@@ -189,10 +228,10 @@ impl<'a> Context<'a> {
         notes: Vec<ForeignNote>,
         global_tags: &[String],
         updated_tags: &[String],
-        progress: &mut IncrementableProgress<ImportProgress>,
+        progress: &mut ThrottlingProgressHandler<ImportProgress>,
     ) -> Result<NoteLog> {
         let mut incrementor = progress.incrementor(ImportProgress::Notes);
-        let mut log = NoteLog::new(self.dupe_resolution, notes.len() as u32);
+        let mut log = new_note_log(self.dupe_resolution, notes.len() as u32);
         for foreign in notes {
             incrementor.increment()?;
             if foreign.first_field_is_the_empty_string() {
@@ -242,7 +281,7 @@ impl<'a> Context<'a> {
         updated_tags: &'tags [String],
     ) -> Result<NoteContext<'tags>> {
         self.prepare_foreign_note(&mut note)?;
-        let dupes = self.find_duplicates(&notetype, &note)?;
+        let dupes = self.find_duplicates(&notetype, &note, deck_id)?;
         Ok(NoteContext {
             note,
             dupes,
@@ -258,11 +297,16 @@ impl<'a> Context<'a> {
         self.col.canonify_foreign_tags(note, self.usn)
     }
 
-    fn find_duplicates(&self, notetype: &Notetype, note: &ForeignNote) -> Result<Vec<Duplicate>> {
+    fn find_duplicates(
+        &self,
+        notetype: &Notetype,
+        note: &ForeignNote,
+        deck_id: DeckId,
+    ) -> Result<Vec<Duplicate>> {
         if note.guid.is_empty() {
             if let Some(nids) = note
                 .checksum()
-                .and_then(|csum| self.existing_checksums.get(&(notetype.id, csum)))
+                .and_then(|csum| self.existing_checksums.get(notetype.id, csum, deck_id))
             {
                 return self.get_first_field_dupes(note, nids);
             }
@@ -276,7 +320,7 @@ impl<'a> Context<'a> {
         self.col
             .storage
             .get_note(nid)?
-            .ok_or(AnkiError::NotFound)
+            .or_not_found(nid)
             .map(|dupe| Duplicate::new(dupe, original, false))
     }
 
@@ -292,15 +336,15 @@ impl<'a> Context<'a> {
     fn import_note(&mut self, ctx: NoteContext, log: &mut NoteLog) -> Result<()> {
         match self.dupe_resolution {
             _ if !ctx.is_dupe() => self.add_note(ctx, log)?,
-            DupeResolution::Add if ctx.is_guid_dupe() => {
+            DupeResolution::Duplicate if ctx.is_guid_dupe() => {
                 log.duplicate.push(ctx.note.into_log_note())
             }
-            DupeResolution::Add if !ctx.has_first_field() => {
+            DupeResolution::Duplicate if !ctx.has_first_field() => {
                 log.empty_first_field.push(ctx.note.into_log_note())
             }
-            DupeResolution::Add => self.add_note(ctx, log)?,
+            DupeResolution::Duplicate => self.add_note(ctx, log)?,
             DupeResolution::Update => self.update_with_note(ctx, log)?,
-            DupeResolution::Ignore => log.first_field_match.push(ctx.note.into_log_note()),
+            DupeResolution::Preserve => log.first_field_match.push(ctx.note.into_log_note()),
         }
         Ok(())
     }
@@ -446,9 +490,7 @@ impl Collection {
     }
 
     fn get_full_duplicates(&self, note: &ForeignNote, dupe_ids: &[NoteId]) -> Result<Vec<Note>> {
-        let first_field = note
-            .first_field_stripped()
-            .ok_or_else(|| AnkiError::invalid_input("no first field"))?;
+        let first_field = note.first_field_stripped().or_invalid("no first field")?;
         dupe_ids
             .iter()
             .filter_map(|&dupe_id| self.storage.get_note(dupe_id).transpose())
@@ -523,7 +565,8 @@ impl ForeignNote {
             .map(|field| strip_html_preserving_media_filenames(field.as_str()))
     }
 
-    /// If the first field is set, returns its checksum. Field is expected to be normalized.
+    /// If the first field is set, returns its checksum. Field is expected to be
+    /// normalized.
     fn checksum(&self) -> Option<u32> {
         self.first_field_stripped()
             .map(|field| field_checksum(&field))
@@ -565,9 +608,9 @@ impl ForeignNotetype {
                 .map(ForeignTemplate::into_native)
                 .collect(),
             config: if self.is_cloze {
-                NotetypeConfig::new_cloze()
+                Notetype::new_cloze_config()
             } else {
-                NotetypeConfig::new()
+                Notetype::new_config()
             },
             ..Notetype::default()
         }
@@ -583,7 +626,8 @@ impl ForeignTemplate {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::collection::open_test_collection;
+    use crate::tests::DeckAdder;
+    use crate::tests::NoteAdder;
 
     impl ForeignData {
         fn with_defaults() -> Self {
@@ -604,28 +648,31 @@ mod test {
 
     #[test]
     fn should_always_add_note_if_dupe_mode_is_add() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut data = ForeignData::with_defaults();
         data.add_note(&["same", "old"]);
-        data.dupe_resolution = DupeResolution::Add;
+        data.dupe_resolution = DupeResolution::Duplicate;
 
-        data.clone().import(&mut col, |_, _| true).unwrap();
-        data.import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.clone().import(&mut col, progress).unwrap();
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
         assert_eq!(col.storage.notes_table_len(), 2);
     }
 
     #[test]
     fn should_add_or_ignore_note_if_dupe_mode_is_ignore() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut data = ForeignData::with_defaults();
         data.add_note(&["same", "old"]);
-        data.dupe_resolution = DupeResolution::Ignore;
-
-        data.clone().import(&mut col, |_, _| true).unwrap();
+        data.dupe_resolution = DupeResolution::Preserve;
+        let progress = col.new_progress_handler();
+        data.clone().import(&mut col, progress).unwrap();
         assert_eq!(col.storage.notes_table_len(), 1);
 
         data.notes[0].fields[1].replace("new".to_string());
-        data.import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
         let notes = col.storage.get_all_notes();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].fields()[1], "old");
@@ -633,33 +680,35 @@ mod test {
 
     #[test]
     fn should_update_or_add_note_if_dupe_mode_is_update() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut data = ForeignData::with_defaults();
         data.add_note(&["same", "old"]);
         data.dupe_resolution = DupeResolution::Update;
-
-        data.clone().import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.clone().import(&mut col, progress).unwrap();
         assert_eq!(col.storage.notes_table_len(), 1);
 
         data.notes[0].fields[1].replace("new".to_string());
-        data.import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
         assert_eq!(col.storage.get_all_notes()[0].fields()[1], "new");
     }
 
     #[test]
     fn should_keep_old_field_content_if_no_new_one_is_supplied() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut data = ForeignData::with_defaults();
         data.add_note(&["same", "unchanged"]);
         data.add_note(&["same", "unchanged"]);
         data.dupe_resolution = DupeResolution::Update;
-
-        data.clone().import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.clone().import(&mut col, progress).unwrap();
         assert_eq!(col.storage.notes_table_len(), 2);
 
         data.notes[0].fields[1] = None;
         data.notes[1].fields.pop();
-        data.import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
         let notes = col.storage.get_all_notes();
         assert_eq!(notes[0].fields(), &["same", "unchanged"]);
         assert_eq!(notes[0].fields(), &["same", "unchanged"]);
@@ -667,18 +716,22 @@ mod test {
 
     #[test]
     fn should_recognize_normalized_duplicate_only_if_normalization_is_enabled() {
-        let mut col = open_test_collection();
-        col.add_new_note_with_fields("Basic", &["神", "old"]);
+        let mut col = Collection::new();
+        NoteAdder::basic(&mut col)
+            .fields(&["神", "old"])
+            .add(&mut col);
         let mut data = ForeignData::with_defaults();
         data.dupe_resolution = DupeResolution::Update;
         data.add_note(&["神", "new"]);
+        let progress = col.new_progress_handler();
 
-        data.clone().import(&mut col, |_, _| true).unwrap();
+        data.clone().import(&mut col, progress).unwrap();
         assert_eq!(col.storage.get_all_notes()[0].fields(), &["神", "new"]);
 
         col.set_config_bool(BoolKey::NormalizeNoteText, false, false)
             .unwrap();
-        data.import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
         let notes = col.storage.get_all_notes();
         assert_eq!(notes[0].fields(), &["神", "new"]);
         assert_eq!(notes[1].fields(), &["神", "new"]);
@@ -686,25 +739,48 @@ mod test {
 
     #[test]
     fn should_add_global_tags() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut data = ForeignData::with_defaults();
         data.add_note(&["foo"]);
         data.notes[0].tags.replace(vec![String::from("bar")]);
         data.global_tags = vec![String::from("baz")];
-
-        data.import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
         assert_eq!(col.storage.get_all_notes()[0].tags, ["bar", "baz"]);
     }
 
     #[test]
     fn should_match_note_with_same_guid() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut data = ForeignData::with_defaults();
         data.add_note(&["foo"]);
         data.notes[0].tags.replace(vec![String::from("bar")]);
         data.global_tags = vec![String::from("baz")];
-
-        data.import(&mut col, |_, _| true).unwrap();
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
         assert_eq!(col.storage.get_all_notes()[0].tags, ["bar", "baz"]);
+    }
+
+    #[test]
+    fn should_only_update_duplicates_in_same_deck_if_limit_is_enabled() {
+        let mut col = Collection::new();
+        let other_deck_id = DeckAdder::new("other").add(&mut col).id;
+        NoteAdder::basic(&mut col)
+            .fields(&["foo", "old"])
+            .add(&mut col);
+        NoteAdder::basic(&mut col)
+            .fields(&["foo", "old"])
+            .deck(other_deck_id)
+            .add(&mut col);
+        let mut data = ForeignData::with_defaults();
+        data.match_scope = MatchScope::NotetypeAndDeck;
+        data.add_note(&["foo", "new"]);
+        let progress = col.new_progress_handler();
+        data.import(&mut col, progress).unwrap();
+        let notes = col.storage.get_all_notes();
+        // same deck, should be updated
+        assert_eq!(notes[0].fields()[1], "new");
+        // other deck, should be unchanged
+        assert_eq!(notes[1].fields()[1], "old");
     }
 }

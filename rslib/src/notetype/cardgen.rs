@@ -1,22 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Deref,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::ops::Deref;
 
 use itertools::Itertools;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
 
 use super::Notetype;
-use crate::{
-    cloze::add_cloze_numbers_in_string, notetype::NotetypeKind, prelude::*,
-    template::ParsedTemplate,
-};
+use crate::cloze::add_cloze_numbers_in_string;
+use crate::notetype::NotetypeKind;
+use crate::prelude::*;
+use crate::template::ParsedTemplate;
 
 /// Info about an existing card required when generating new cards
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AlreadyGeneratedCardInfo {
     pub id: CardId,
     pub nid: NoteId,
@@ -39,8 +40,8 @@ pub(crate) struct SingleCardGenContext {
     target_deck_id: Option<DeckId>,
 }
 
-/// Info required to determine which cards should be generated when note added/updated,
-/// and where they should be placed.
+/// Info required to determine which cards should be generated when note
+/// added/updated, and where they should be placed.
 pub(crate) struct CardGenContext<N: Deref<Target = Notetype>> {
     pub usn: Usn,
     pub notetype: N,
@@ -74,8 +75,9 @@ impl<N: Deref<Target = Notetype>> CardGenContext<N> {
         }
     }
 
-    /// If template[ord] generates a non-empty question given nonempty_fields, return the provided
-    /// deck id, or an overriden one. If question is empty, return None.
+    /// If template[ord] generates a non-empty question given nonempty_fields,
+    /// return the provided deck id, or an overridden one. If question is
+    /// empty, return None.
     fn is_nonempty(&self, card_ord: usize, nonempty_fields: &HashSet<&str>) -> bool {
         let card = &self.cards[card_ord];
         let template = match card.template {
@@ -178,7 +180,7 @@ pub(super) fn group_generated_cards_by_note(
     out
 }
 
-#[derive(Debug, PartialEq, Default)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub(crate) struct ExtractedCardInfo {
     // if set, the due position new cards should be given
     pub due: Option<u32>,
@@ -325,7 +327,8 @@ impl Collection {
         }
     }
 
-    /// If deck ID does not exist or points to a filtered deck, fall back on default.
+    /// If deck ID does not exist or points to a filtered deck, fall back on
+    /// default.
     fn deck_for_adding(&mut self, did: Option<DeckId>) -> Result<(DeckId, DeckConfigId)> {
         if let Some(did) = did {
             if let Some(deck) = self.deck_conf_if_normal(did)? {
@@ -339,7 +342,7 @@ impl Collection {
     fn default_deck_conf(&mut self) -> Result<(DeckId, DeckConfigId)> {
         // currently hard-coded to 1, we could create this as needed in the future
         self.deck_conf_if_normal(DeckId(1))?
-            .ok_or_else(|| AnkiError::invalid_input("invalid default deck"))
+            .or_invalid("invalid default deck")
     }
 
     /// If deck exists and and is a normal deck, return its ID and config

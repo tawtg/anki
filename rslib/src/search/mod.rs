@@ -3,35 +3,39 @@
 
 mod builder;
 mod parser;
+mod service;
 mod sqlwriter;
 pub(crate) mod writer;
 
 use std::borrow::Cow;
 
-pub use builder::{JoinSearches, Negated, SearchBuilder};
-pub use parser::{
-    parse as parse_search, Node, PropertyKind, RatingKind, SearchNode, StateKind, TemplateKind,
-};
-use rusqlite::{params_from_iter, types::FromSql};
-use sqlwriter::{RequiredTable, SqlWriter};
+pub use builder::JoinSearches;
+pub use builder::Negated;
+pub use builder::SearchBuilder;
+pub use parser::parse as parse_search;
+pub use parser::Node;
+pub use parser::PropertyKind;
+pub use parser::RatingKind;
+pub use parser::SearchNode;
+pub use parser::StateKind;
+pub use parser::TemplateKind;
+use rusqlite::params_from_iter;
+use rusqlite::types::FromSql;
+use sqlwriter::RequiredTable;
+use sqlwriter::SqlWriter;
 pub use writer::replace_search_node;
 
-use crate::{
-    browser_table::Column,
-    card::{Card, CardId, CardType},
-    collection::Collection,
-    error::Result,
-    notes::NoteId,
-    prelude::AnkiError,
-};
+use crate::browser_table::Column;
+use crate::card::CardType;
+use crate::prelude::*;
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ReturnItemType {
     Cards,
     Notes,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SortMode {
     NoOrder,
     Builtin { column: Column, reverse: bool },
@@ -333,12 +337,7 @@ fn write_order(
         ReturnItemType::Cards => card_order_from_sort_column(column),
         ReturnItemType::Notes => note_order_from_sort_column(column),
     };
-    if order.is_empty() {
-        return Err(AnkiError::invalid_input(format!(
-            "Can't sort {:?} by {:?}.",
-            item_type, column
-        )));
-    }
+    require!(!order.is_empty(), "Can't sort {item_type:?} by {column:?}.");
     if reverse {
         sql.push_str(
             &order

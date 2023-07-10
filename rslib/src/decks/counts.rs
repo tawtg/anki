@@ -2,7 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 use std::collections::HashMap;
 
-use crate::{pb, prelude::*};
+use crate::prelude::*;
 
 #[derive(Debug)]
 pub(crate) struct DueCounts {
@@ -42,11 +42,11 @@ impl Collection {
     pub(crate) fn counts_for_deck_today(
         &mut self,
         did: DeckId,
-    ) -> Result<pb::CountsForDeckTodayResponse> {
+    ) -> Result<anki_proto::scheduler::CountsForDeckTodayResponse> {
         let today = self.current_due_day(0)?;
-        let mut deck = self.storage.get_deck(did)?.ok_or(AnkiError::NotFound)?;
+        let mut deck = self.storage.get_deck(did)?.or_not_found(did)?;
         deck.reset_stats_if_day_changed(today);
-        Ok(pb::CountsForDeckTodayResponse {
+        Ok(anki_proto::scheduler::CountsForDeckTodayResponse {
             new: deck.common.new_studied,
             review: deck.common.review_studied,
         })

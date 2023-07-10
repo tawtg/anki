@@ -1,31 +1,28 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+pub(crate) mod service;
 pub(crate) mod undo;
 
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
+use anki_proto::notes::note_fields_check_response::State as NoteFieldsState;
 use itertools::Itertools;
-use num_integer::Integer;
+use sha1::Digest;
+use sha1::Sha1;
 
-use crate::{
-    cloze::contains_cloze,
-    decks::DeckId,
-    define_newtype,
-    error::{AnkiError, Result},
-    notetype::{CardGenContext, NoteField, Notetype, NotetypeId},
-    ops::StateChanges,
-    pb,
-    pb::note_fields_check_response::State as NoteFieldsState,
-    prelude::*,
-    template::field_is_empty,
-    text::{ensure_string_in_nfc, normalize_to_nfc, strip_html_preserving_media_filenames},
-    timestamp::TimestampSecs,
-    types::Usn,
-};
+use crate::cloze::contains_cloze;
+use crate::define_newtype;
+use crate::notetype::CardGenContext;
+use crate::notetype::NoteField;
+use crate::ops::StateChanges;
+use crate::prelude::*;
+use crate::template::field_is_empty;
+use crate::text::ensure_string_in_nfc;
+use crate::text::normalize_to_nfc;
+use crate::text::strip_html_preserving_media_filenames;
 
 define_newtype!(NoteId, i64);
 
@@ -37,7 +34,7 @@ pub(crate) struct TransformNoteOutput {
     pub update_tags: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Note {
     pub id: NoteId,
     pub guid: String,
@@ -60,11 +57,7 @@ impl Note {
     }
 
     pub fn set_field(&mut self, idx: usize, text: impl Into<String>) -> Result<()> {
-        if idx >= self.fields.len() {
-            return Err(AnkiError::invalid_input(
-                "field idx out of range".to_string(),
-            ));
-        }
+        require!(idx < self.fields.len(), "field idx out of range");
 
         self.fields[idx] = text.into();
         self.mark_dirty();
@@ -78,7 +71,7 @@ impl Collection {
         self.transact(Op::AddNote, |col| {
             let nt = col
                 .get_notetype(note.notetype_id)?
-                .ok_or_else(|| AnkiError::invalid_input("missing note type"))?;
+                .or_invalid("missing note type")?;
             let last_deck = col.get_last_deck_added_to_for_notetype(note.notetype_id);
             let ctx = CardGenContext::new(nt.as_ref(), last_deck, col.usn()?);
             let norm = col.get_config_bool(BoolKey::NormalizeNoteText);
@@ -108,7 +101,7 @@ impl Collection {
 
 /// Information required for updating tags while leaving note content alone.
 /// Tags are stored in their DB form, separated by spaces.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct NoteTags {
     pub id: NoteId,
     pub mtime: TimestampSecs,
@@ -124,10 +117,10 @@ impl NoteTags {
 }
 
 impl Note {
-    pub(crate) fn new(notetype: &Notetype) -> Self {
+    pub fn new(notetype: &Notetype) -> Self {
         Note {
             id: NoteId(0),
-            guid: guid(),
+            guid: base91_u64(),
             notetype_id: notetype.id,
             mtime: TimestampSecs(0),
             usn: Usn(0),
@@ -163,7 +156,7 @@ impl Note {
         }
     }
 
-    pub(crate) fn fields_mut(&mut self) -> &mut Vec<String> {
+    pub fn fields_mut(&mut self) -> &mut Vec<String> {
         self.mark_dirty();
         &mut self.fields
     }
@@ -176,15 +169,13 @@ impl Note {
 
     /// Prepare note for saving to the database. Does not mark it as modified.
     pub(crate) fn prepare_for_update(&mut self, nt: &Notetype, normalize_text: bool) -> Result<()> {
-        assert!(nt.id == self.notetype_id);
+        assert_eq!(nt.id, self.notetype_id);
         let notetype_field_count = nt.fields.len().max(1);
-        if notetype_field_count != self.fields.len() {
-            return Err(AnkiError::invalid_input(format!(
-                "note has {} fields, expected {}",
-                self.fields.len(),
-                notetype_field_count
-            )));
-        }
+        require!(
+            notetype_field_count == self.fields.len(),
+            "note has {} fields, expected {notetype_field_count}",
+            self.fields.len()
+        );
 
         for field in self.fields_mut() {
             normalize_field(field, normalize_text);
@@ -267,9 +258,9 @@ pub(crate) fn normalize_field(field: &mut String, normalize_text: bool) {
     }
 }
 
-impl From<Note> for pb::Note {
+impl From<Note> for anki_proto::notes::Note {
     fn from(n: Note) -> Self {
-        pb::Note {
+        anki_proto::notes::Note {
             id: n.id.0,
             guid: n.guid,
             notetype_id: n.notetype_id.0,
@@ -281,8 +272,8 @@ impl From<Note> for pb::Note {
     }
 }
 
-impl From<pb::Note> for Note {
-    fn from(n: pb::Note) -> Self {
+impl From<anki_proto::notes::Note> for Note {
+    fn from(n: anki_proto::notes::Note) -> Self {
         Note {
             id: NoteId(n.id),
             guid: n.guid,
@@ -300,24 +291,32 @@ impl From<pb::Note> for Note {
 /// Text must be passed to strip_html_preserving_media_filenames() by
 /// caller prior to passing in here.
 pub(crate) fn field_checksum(text: &str) -> u32 {
-    let digest = sha1::Sha1::from(text).digest().bytes();
+    let mut hash = Sha1::new();
+    hash.update(text);
+    let digest = hash.finalize();
     u32::from_be_bytes(digest[..4].try_into().unwrap())
 }
 
-pub(crate) fn guid() -> String {
+pub(crate) fn base91_u64() -> String {
     anki_base91(rand::random())
 }
 
-fn anki_base91(mut n: u64) -> String {
-    let table = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\
-0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~";
+fn anki_base91(n: u64) -> String {
+    to_base_n(
+        n,
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\
+0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~",
+    )
+}
+
+pub fn to_base_n(mut n: u64, table: &[u8]) -> String {
     let mut buf = String::new();
     while n > 0 {
-        let (q, r) = n.div_rem(&(table.len() as u64));
+        let tablelen = table.len() as u64;
+        let (q, r) = (n / tablelen, n % tablelen);
         buf.push(table[r as usize] as char);
         n = q;
     }
-
     buf.chars().rev().collect()
 }
 
@@ -351,8 +350,7 @@ impl Collection {
         self.set_current_notetype_id(note.notetype_id)
     }
 
-    #[cfg(test)]
-    pub(crate) fn update_note(&mut self, note: &mut Note) -> Result<OpOutput<()>> {
+    pub fn update_note(&mut self, note: &mut Note) -> Result<OpOutput<()>> {
         self.transact(Op::UpdateNote, |col| col.update_note_inner(note))
     }
 
@@ -390,14 +388,14 @@ impl Collection {
     }
 
     pub(crate) fn update_note_inner(&mut self, note: &mut Note) -> Result<()> {
-        let mut existing_note = self.storage.get_note(note.id)?.ok_or(AnkiError::NotFound)?;
+        let mut existing_note = self.storage.get_note(note.id)?.or_not_found(note.id)?;
         if !note_differs_from_db(&mut existing_note, note) {
             // nothing to do
             return Ok(());
         }
         let nt = self
             .get_notetype(note.notetype_id)?
-            .ok_or_else(|| AnkiError::invalid_input("missing note type"))?;
+            .or_invalid("missing note type")?;
         let last_deck = self.get_last_deck_added_to_for_notetype(note.notetype_id);
         let ctx = CardGenContext::new(nt.as_ref(), last_deck, self.usn()?);
         let norm = self.get_config_bool(BoolKey::NormalizeNoteText);
@@ -493,9 +491,7 @@ impl Collection {
         let usn = self.usn()?;
 
         for (ntid, group) in &nids_by_notetype.into_iter().group_by(|tup| tup.0) {
-            let nt = self
-                .get_notetype(ntid)?
-                .ok_or_else(|| AnkiError::invalid_input("missing note type"))?;
+            let nt = self.get_notetype(ntid)?.or_invalid("missing note type")?;
 
             let mut genctx = None;
             for (_, nid) in group {
@@ -545,7 +541,7 @@ impl Collection {
     /// Check if the note's first field is empty or a duplicate. Then for cloze
     /// notetypes, check if there is a cloze in a non-cloze field or if there's
     /// no cloze at all. For other notetypes, just check if there's a cloze.
-    pub(crate) fn note_fields_check(&mut self, note: &Note) -> Result<NoteFieldsState> {
+    pub fn note_fields_check(&mut self, note: &Note) -> Result<NoteFieldsState> {
         Ok(if let Some(text) = note.fields.get(0) {
             let field1 = if self.get_config_bool(BoolKey::NormalizeNoteText) {
                 normalize_to_nfc(text)
@@ -584,7 +580,7 @@ impl Collection {
     fn field_cloze_check(&mut self, note: &Note) -> Result<NoteFieldsState> {
         let notetype = self
             .get_notetype(note.notetype_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(note.notetype_id)?;
         let cloze_fields = notetype.cloze_fields();
         let mut has_cloze = false;
         let extraneous_cloze = note.fields.iter().enumerate().find_map(|(i, field)| {
@@ -632,11 +628,13 @@ fn note_differs_from_db(existing_note: &mut Note, note: &mut Note) -> bool {
 
 #[cfg(test)]
 mod test {
-    use super::{anki_base91, field_checksum};
-    use crate::{
-        collection::open_test_collection, config::BoolKey, decks::DeckId, error::Result,
-        prelude::*, search::SortMode,
-    };
+    use super::anki_base91;
+    use super::field_checksum;
+    use crate::config::BoolKey;
+    use crate::decks::DeckId;
+    use crate::error::Result;
+    use crate::prelude::*;
+    use crate::search::SortMode;
 
     #[test]
     fn test_base91() {
@@ -655,7 +653,7 @@ mod test {
 
     #[test]
     fn adding_cards() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col
             .get_notetype_by_name("basic (and reversed card)")?
             .unwrap();
@@ -703,7 +701,7 @@ mod test {
 
     #[test]
     fn normalization() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
@@ -735,7 +733,7 @@ mod test {
 
     #[test]
     fn undo() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col
             .get_notetype_by_name("basic (and reversed card)")?
             .unwrap();
@@ -747,7 +745,7 @@ mod test {
                 col.storage.db_scalar::<u32>("select count() from graves")?,
                 0
             );
-            assert!(!col.get_next_card()?.is_some());
+            assert!(col.get_next_card()?.is_none());
             Ok(())
         };
 
@@ -786,7 +784,7 @@ mod test {
                 col.storage.db_scalar::<u32>("select count() from graves")?,
                 3
             );
-            assert!(!col.get_next_card()?.is_some());
+            assert!(col.get_next_card()?.is_none());
             Ok(())
         };
 

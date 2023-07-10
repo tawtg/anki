@@ -5,15 +5,18 @@ pub mod csv;
 mod import;
 mod json;
 
-use serde_derive::{Deserialize, Serialize};
+use anki_proto::import_export::csv_metadata::DupeResolution;
+use anki_proto::import_export::csv_metadata::MatchScope;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::LogNote;
-use crate::pb::csv_metadata::DupeResolution;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ForeignData {
     dupe_resolution: DupeResolution,
+    match_scope: MatchScope,
     default_deck: NameOrId,
     default_notetype: NameOrId,
     notes: Vec<ForeignNote>,
@@ -43,7 +46,7 @@ pub struct ForeignCard {
     pub lapses: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignNotetype {
     name: String,
     fields: Vec<String>,
@@ -52,7 +55,7 @@ pub struct ForeignNotetype {
     is_cloze: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignTemplate {
     name: String,
     qfmt: String,

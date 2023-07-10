@@ -1,8 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_bool_from_anything;
-use serde_derive::Deserialize;
 use strum::IntoStaticStr;
 
 use crate::prelude::*;
@@ -21,17 +21,18 @@ pub enum BoolKey {
     CollapseToday,
     FutureDueShowBacklog,
     HideAudioPlayButtons,
+    IgnoreAccentsInSearch,
     InterruptAudioWhenAnswering,
+    NewCardsIgnoreReviewLimit,
     PasteImagesAsPng,
     PasteStripsFormatting,
     PreviewBothSides,
-    Sched2021,
-    IgnoreAccentsInSearch,
     RestorePositionBrowser,
     RestorePositionReviewer,
     ResetCountsBrowser,
     ResetCountsReviewer,
     RandomOrderReposition,
+    Sched2021,
     ShiftPositionOfExistingCards,
 
     #[strum(to_string = "normalize_note_text")]

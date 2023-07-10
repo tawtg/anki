@@ -4,12 +4,18 @@
 use std::borrow::Cow;
 
 use lazy_static::lazy_static;
-use pct_str::{IriReserved, PctStr, PctString};
-use regex::{Captures, Regex};
+use percent_encoding_iri::percent_decode_str;
+use percent_encoding_iri::utf8_percent_encode;
+use percent_encoding_iri::AsciiSet;
+use percent_encoding_iri::CONTROLS;
+use regex::Captures;
+use regex::Regex;
 use unicase::eq as uni_eq;
-use unicode_normalization::{
-    char::is_combining_mark, is_nfc, is_nfkd_quick, IsNormalized, UnicodeNormalization,
-};
+use unicode_normalization::char::is_combining_mark;
+use unicode_normalization::is_nfc;
+use unicode_normalization::is_nfkd_quick;
+use unicode_normalization::IsNormalized;
+use unicode_normalization::UnicodeNormalization;
 
 pub trait Trimming {
     fn trim(self) -> Self;
@@ -56,6 +62,10 @@ impl<'a, B: ?Sized + 'a + ToOwned> CowMapping<'a, B> for Cow<'a, B> {
     }
 }
 
+pub(crate) fn strip_utf8_bom(s: &str) -> &str {
+    s.strip_prefix('\u{feff}').unwrap_or(s)
+}
+
 #[derive(Debug, PartialEq)]
 pub enum AvTag {
     SoundOrVideo(String),
@@ -91,7 +101,7 @@ lazy_static! {
         "#
     ).unwrap();
 
-    pub(crate) static ref HTML_MEDIA_TAGS: Regex = Regex::new(
+    pub static ref HTML_MEDIA_TAGS: Regex = Regex::new(
         r#"(?xsi)
             # the start of the image, audio, or object tag
             <\b(?:img|audio|object)\b[^>]+\b(?:src|data)\b=
@@ -158,13 +168,15 @@ lazy_static! {
     /// Strings, src and data attributes with a leading underscore.
     static ref UNDERSCORED_REFERENCES: Regex = Regex::new(
         r#"(?x)
-                "(_[^"]+)"        # double quoted
-            |                     # or
-                '(_[^']+)'        # single quoted string
-            |                     # or
-                \b(?:src|data)    # a 'src' or 'data' attribute
-                =                 # followed by
-                (_[^ >]+)         # an unquoted value
+                \[sound:(_[^]]+)\]  # a filename in an Anki sound tag
+            |                       # or
+                "(_[^"]+)"          # a double quoted
+            |                       # or
+                '(_[^']+)'          # single quoted string
+            |                       # or
+                \b(?:src|data)      # a 'src' or 'data' attribute
+                =                   # followed by
+                (_[^ >]+)           # an unquoted value
     "#).unwrap();
 }
 
@@ -274,7 +286,7 @@ pub(crate) fn extract_media_refs(text: &str) -> Vec<MediaRef> {
 
 /// Calls `replacer` for every media reference in `text`, and optionally
 /// replaces it with something else. [None] if no reference was found.
-pub(crate) fn replace_media_refs(
+pub fn replace_media_refs(
     text: &str,
     mut replacer: impl FnMut(&str) -> Option<String>,
 ) -> Option<String> {
@@ -302,29 +314,22 @@ pub(crate) fn replace_media_refs(
 pub(crate) fn extract_underscored_css_imports(text: &str) -> Vec<&str> {
     UNDERSCORED_CSS_IMPORTS
         .captures_iter(text)
-        .map(|caps| {
-            caps.get(1)
-                .or_else(|| caps.get(2))
-                .or_else(|| caps.get(3))
-                .or_else(|| caps.get(4))
-                .or_else(|| caps.get(5))
-                .unwrap()
-                .as_str()
-        })
+        .map(extract_match)
         .collect()
 }
 
 pub(crate) fn extract_underscored_references(text: &str) -> Vec<&str> {
     UNDERSCORED_REFERENCES
         .captures_iter(text)
-        .map(|caps| {
-            caps.get(1)
-                .or_else(|| caps.get(2))
-                .or_else(|| caps.get(3))
-                .unwrap()
-                .as_str()
-        })
+        .map(extract_match)
         .collect()
+}
+
+/// Returns the first matching group as a str. This is intended for regexes
+/// where exactly one group matches, and will panic for matches without matching
+/// groups.
+fn extract_match(caps: Captures) -> &str {
+    caps.iter().skip(1).find_map(|g| g).unwrap().as_str()
 }
 
 pub fn strip_html_preserving_media_filenames(html: &str) -> Cow<str> {
@@ -487,25 +492,26 @@ lazy_static! {
     pub(crate) static ref REMOTE_FILENAME: Regex = Regex::new("(?i)^https?://").unwrap();
 }
 
+/// https://url.spec.whatwg.org/#fragment-percent-encode-set
+const FRAGMENT_QUERY_UNION: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'#');
+
 /// IRI-encode unescaped local paths in HTML fragment.
 pub(crate) fn encode_iri_paths(unescaped_html: &str) -> Cow<str> {
     transform_html_paths(unescaped_html, |fname| {
-        PctString::encode(fname.chars(), IriReserved::Segment)
-            .into_string()
-            .into()
+        utf8_percent_encode(fname, FRAGMENT_QUERY_UNION).into()
     })
 }
 
 /// URI-decode escaped local paths in HTML fragment.
 pub(crate) fn decode_iri_paths(escaped_html: &str) -> Cow<str> {
     transform_html_paths(escaped_html, |fname| {
-        match PctStr::new(fname) {
-            Ok(s) => s.decode().into(),
-            Err(_e) => {
-                // invalid percent encoding; return unchanged
-                fname.into()
-            }
-        }
+        percent_decode_str(fname).decode_utf8_lossy()
     })
 }
 
@@ -620,5 +626,22 @@ mod test {
         let mut s = "日本語".to_string();
         truncate_to_char_boundary(&mut s, 1);
         assert_eq!(&s, "");
+    }
+
+    #[test]
+    fn iri_encoding() {
+        for (input, output) in [
+            ("foo.jpg", "foo.jpg"),
+            ("bar baz", "bar%20baz"),
+            ("sub/path.jpg", "sub/path.jpg"),
+            ("日本語", "日本語"),
+            ("a=b", "a=b"),
+            ("a&b", "a&b"),
+        ] {
+            assert_eq!(
+                &encode_iri_paths(&format!("<img src=\"{input}\">")),
+                &format!("<img src=\"{output}\">")
+            );
+        }
     }
 }

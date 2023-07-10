@@ -3,14 +3,24 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import {
+        DeckConfig_Config_NewCardGatherPriority as GatherOrder,
+        DeckConfig_Config_NewCardSortOrder as SortOrder,
+    } from "@tslib/anki/deck_config_pb";
+    import * as tr from "@tslib/ftl";
+    import { HelpPage } from "@tslib/help-page";
+    import type Carousel from "bootstrap/js/dist/carousel";
+    import type Modal from "bootstrap/js/dist/modal";
+
     import DynamicallySlottable from "../components/DynamicallySlottable.svelte";
     import Item from "../components/Item.svelte";
-    import * as tr from "../lib/ftl";
-    import { DeckConfig } from "../lib/proto";
+    import TitledContainer from "../components/TitledContainer.svelte";
     import EnumSelectorRow from "./EnumSelectorRow.svelte";
+    import HelpModal from "./HelpModal.svelte";
     import type { DeckOptionsState } from "./lib";
+    import SettingTitle from "./SettingTitle.svelte";
     import { reviewMixChoices } from "./strings";
-    import TitledContainer from "./TitledContainer.svelte";
+    import type { DeckOption } from "./types";
 
     export let state: DeckOptionsState;
     export let api: Record<string, never>;
@@ -43,29 +53,28 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         tr.deckConfigSortOrderAscendingEase(),
         tr.deckConfigSortOrderDescendingEase(),
         tr.deckConfigSortOrderRelativeOverdueness(),
+        tr.deckConfigSortOrderRandom(),
     ];
 
-    const GatherOrder = DeckConfig.DeckConfig.Config.NewCardGatherPriority;
-    const SortOrder = DeckConfig.DeckConfig.Config.NewCardSortOrder;
     let disabledNewSortOrders: number[] = [];
     $: {
         switch ($config.newCardGatherPriority) {
-            case GatherOrder.NEW_CARD_GATHER_PRIORITY_RANDOM_NOTES:
+            case GatherOrder.RANDOM_NOTES:
                 disabledNewSortOrders = [
-                    // same as NEW_CARD_SORT_ORDER_TEMPLATE
-                    SortOrder.NEW_CARD_SORT_ORDER_TEMPLATE_THEN_RANDOM,
-                    // same as NEW_CARD_SORT_ORDER_NO_SORT
-                    SortOrder.NEW_CARD_SORT_ORDER_RANDOM_NOTE_THEN_TEMPLATE,
+                    // same as TEMPLATE
+                    SortOrder.TEMPLATE_THEN_RANDOM,
+                    // same as NO_SORT
+                    SortOrder.RANDOM_NOTE_THEN_TEMPLATE,
                 ];
                 break;
-            case GatherOrder.NEW_CARD_GATHER_PRIORITY_RANDOM_CARDS:
+            case GatherOrder.RANDOM_CARDS:
                 disabledNewSortOrders = [
-                    // same as NEW_CARD_SORT_ORDER_TEMPLATE
-                    SortOrder.NEW_CARD_SORT_ORDER_TEMPLATE_THEN_RANDOM,
+                    // same as TEMPLATE
+                    SortOrder.TEMPLATE_THEN_RANDOM,
                     // not useful if siblings are not gathered together
-                    SortOrder.NEW_CARD_SORT_ORDER_RANDOM_NOTE_THEN_TEMPLATE,
-                    // same as NEW_CARD_SORT_ORDER_NO_SORT
-                    SortOrder.NEW_CARD_SORT_ORDER_RANDOM_CARD,
+                    SortOrder.RANDOM_NOTE_THEN_TEMPLATE,
+                    // same as NO_SORT
+                    SortOrder.RANDOM_CARD,
                 ];
                 break;
             default:
@@ -84,19 +93,66 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             $config.newCardSortOrder = 0;
         }
     }
+
+    const settings = {
+        newGatherPriority: {
+            title: tr.deckConfigNewGatherPriority(),
+            help: tr.deckConfigNewGatherPriorityTooltip2() + currentDeck,
+        },
+        newCardSortOrder: {
+            title: tr.deckConfigNewCardSortOrder(),
+            help: tr.deckConfigNewCardSortOrderTooltip2() + currentDeck,
+        },
+        newReviewPriority: {
+            title: tr.deckConfigNewReviewPriority(),
+            help: tr.deckConfigNewReviewPriorityTooltip() + currentDeck,
+        },
+        interdayStepPriority: {
+            title: tr.deckConfigInterdayStepPriority(),
+            help: tr.deckConfigInterdayStepPriorityTooltip() + currentDeck,
+        },
+        reviewSortOrder: {
+            title: tr.deckConfigReviewSortOrder(),
+            help: tr.deckConfigReviewSortOrderTooltip() + currentDeck,
+        },
+    };
+    const helpSections = Object.values(settings) as DeckOption[];
+
+    let modal: Modal;
+    let carousel: Carousel;
+
+    function openHelpModal(index: number): void {
+        modal.show();
+        carousel.to(index);
+    }
 </script>
 
 <TitledContainer title={tr.deckConfigOrderingTitle()}>
+    <HelpModal
+        title={tr.deckConfigOrderingTitle()}
+        url={HelpPage.DeckOptions.displayOrder}
+        slot="tooltip"
+        {helpSections}
+        on:mount={(e) => {
+            modal = e.detail.modal;
+            carousel = e.detail.carousel;
+        }}
+    />
     <DynamicallySlottable slotHost={Item} {api}>
         <Item>
             <EnumSelectorRow
                 bind:value={$config.newCardGatherPriority}
                 defaultValue={defaults.newCardGatherPriority}
                 choices={newGatherPriorityChoices}
-                markdownTooltip={tr.deckConfigNewGatherPriorityTooltip_2() +
-                    currentDeck}
             >
-                {tr.deckConfigNewGatherPriority()}
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(
+                            Object.keys(settings).indexOf("newGatherPriority"),
+                        )}
+                >
+                    {settings.newGatherPriority.title}
+                </SettingTitle>
             </EnumSelectorRow>
         </Item>
 
@@ -106,9 +162,15 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 defaultValue={defaults.newCardSortOrder}
                 choices={newSortOrderChoices}
                 disabled={disabledNewSortOrders}
-                markdownTooltip={tr.deckConfigNewCardSortOrderTooltip_2() + currentDeck}
             >
-                {tr.deckConfigNewCardSortOrder()}
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(
+                            Object.keys(settings).indexOf("newCardSortOrder"),
+                        )}
+                >
+                    {settings.newCardSortOrder.title}
+                </SettingTitle>
             </EnumSelectorRow>
         </Item>
 
@@ -117,9 +179,15 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 bind:value={$config.newMix}
                 defaultValue={defaults.newMix}
                 choices={reviewMixChoices()}
-                markdownTooltip={tr.deckConfigNewReviewPriorityTooltip() + currentDeck}
             >
-                {tr.deckConfigNewReviewPriority()}
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(
+                            Object.keys(settings).indexOf("newReviewPriority"),
+                        )}
+                >
+                    {settings.newReviewPriority.title}
+                </SettingTitle>
             </EnumSelectorRow>
         </Item>
 
@@ -128,10 +196,15 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 bind:value={$config.interdayLearningMix}
                 defaultValue={defaults.interdayLearningMix}
                 choices={reviewMixChoices()}
-                markdownTooltip={tr.deckConfigInterdayStepPriorityTooltip() +
-                    currentDeck}
             >
-                {tr.deckConfigInterdayStepPriority()}
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(
+                            Object.keys(settings).indexOf("interdayStepPriority"),
+                        )}
+                >
+                    {settings.interdayStepPriority.title}
+                </SettingTitle>
             </EnumSelectorRow>
         </Item>
 
@@ -140,9 +213,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 bind:value={$config.reviewOrder}
                 defaultValue={defaults.reviewOrder}
                 choices={reviewOrderChoices}
-                markdownTooltip={tr.deckConfigReviewSortOrderTooltip() + currentDeck}
             >
-                {tr.deckConfigReviewSortOrder()}
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(Object.keys(settings).indexOf("reviewSortOrder"))}
+                >
+                    {settings.reviewSortOrder.title}
+                </SettingTitle>
             </EnumSelectorRow>
         </Item>
     </DynamicallySlottable>

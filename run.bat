@@ -1,7 +1,10 @@
 @echo off
 pushd "%~dp0"
-call tools\setup-env.bat
 
 set PYTHONWARNINGS=default
-bazel run %BUILDARGS% //qt:runanki -k -- %* || exit /b 1
+set PYTHONPYCACHEPREFIX=out\pycache
+set ANKIDEV=1
+
+call tools\ninja pylib qt extract:win_amd64_audio || exit /b 1
+.\out\pyenv\scripts\python tools\run.py %* || exit /b 1
 popd

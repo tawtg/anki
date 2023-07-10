@@ -3,22 +3,20 @@
 
 //! Updating configs in bulk, from the deck options screen.
 
-use std::{
-    collections::{HashMap, HashSet},
-    iter,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::iter;
 
-use crate::{
-    config::StringKey,
-    decks::NormalDeck,
-    pb,
-    pb::{
-        deck::normal::DayLimit,
-        deck_configs_for_update::{current_deck::Limits, ConfigWithExtra, CurrentDeck},
-    },
-    prelude::*,
-    search::{JoinSearches, SearchNode},
-};
+use anki_proto::deck_config::deck_configs_for_update::current_deck::Limits;
+use anki_proto::deck_config::deck_configs_for_update::ConfigWithExtra;
+use anki_proto::deck_config::deck_configs_for_update::CurrentDeck;
+use anki_proto::decks::deck::normal::DayLimit;
+
+use crate::config::StringKey;
+use crate::decks::NormalDeck;
+use crate::prelude::*;
+use crate::search::JoinSearches;
+use crate::search::SearchNode;
 
 #[derive(Debug, Clone)]
 pub struct UpdateDeckConfigsRequest {
@@ -29,6 +27,7 @@ pub struct UpdateDeckConfigsRequest {
     pub apply_to_children: bool,
     pub card_state_customizer: String,
     pub limits: Limits,
+    pub new_cards_ignore_review_limit: bool,
 }
 
 impl Collection {
@@ -36,8 +35,8 @@ impl Collection {
     pub fn get_deck_configs_for_update(
         &mut self,
         deck: DeckId,
-    ) -> Result<pb::DeckConfigsForUpdate> {
-        Ok(pb::DeckConfigsForUpdate {
+    ) -> Result<anki_proto::deck_config::DeckConfigsForUpdate> {
+        Ok(anki_proto::deck_config::DeckConfigsForUpdate {
             all_config: self.get_deck_config_with_extra_for_update()?,
             current_deck: Some(self.get_current_deck_for_update(deck)?),
             defaults: Some(DeckConfig::default().into()),
@@ -46,8 +45,8 @@ impl Collection {
                 .get_collection_timestamps()?
                 .schema_changed_since_sync(),
             v3_scheduler: self.get_config_bool(BoolKey::Sched2021),
-            have_addons: false,
             card_state_customizer: self.get_config_string(StringKey::CardStateCustomizer),
+            new_cards_ignore_review_limit: self.get_config_bool(BoolKey::NewCardsIgnoreReviewLimit),
         })
     }
 
@@ -88,7 +87,7 @@ impl Collection {
     }
 
     fn get_current_deck_for_update(&mut self, deck: DeckId) -> Result<CurrentDeck> {
-        let deck = self.get_deck(deck)?.ok_or(AnkiError::NotFound)?;
+        let deck = self.get_deck(deck)?.or_not_found(deck)?;
         let normal = deck.normal()?;
         let today = self.timing_today()?.days_elapsed;
 
@@ -100,7 +99,7 @@ impl Collection {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
-            limits: Some(normal.to_limits(today)),
+            limits: Some(normal_deck_to_limits(normal, today)),
         })
     }
 
@@ -119,9 +118,7 @@ impl Collection {
     }
 
     fn update_deck_configs_inner(&mut self, mut input: UpdateDeckConfigsRequest) -> Result<()> {
-        if input.configs.is_empty() {
-            return Err(AnkiError::invalid_input("config not provided"));
-        }
+        require!(!input.configs.is_empty(), "config not provided");
         let configs_before_update = self.storage.get_deck_config_map()?;
         let mut configs_after_update = configs_before_update.clone();
 
@@ -142,7 +139,7 @@ impl Collection {
             let deck = self
                 .storage
                 .get_deck(input.target_deck_id)?
-                .ok_or(AnkiError::NotFound)?;
+                .or_not_found(input.target_deck_id)?;
             self.storage
                 .child_decks(&deck)?
                 .iter()
@@ -168,13 +165,14 @@ impl Collection {
                     .map(|c| c.inner.new_card_insert_order())
                     .unwrap_or_default();
 
-                // if a selected (sub)deck, or its old config was removed, update deck to point to new config
+                // if a selected (sub)deck, or its old config was removed, update deck to point
+                // to new config
                 let current_config_id = if selected_deck_ids.contains(&deck.id)
                     || !configs_after_update.contains_key(&previous_config_id)
                 {
                     let mut updated = deck.clone();
                     updated.normal_mut()?.config_id = selected_config.id.0;
-                    updated.normal_mut()?.update_limits(&input.limits, today);
+                    update_deck_limits(updated.normal_mut()?, &input.limits, today);
                     self.update_deck_inner(&mut updated, deck, usn)?;
                     selected_config.id
                 } else {
@@ -195,12 +193,17 @@ impl Collection {
         }
 
         self.set_config_string_inner(StringKey::CardStateCustomizer, &input.card_state_customizer)?;
+        self.set_config_bool_inner(
+            BoolKey::NewCardsIgnoreReviewLimit,
+            input.new_cards_ignore_review_limit,
+        )?;
 
         Ok(())
     }
 
-    /// Adjust the remaining steps of cards in the given deck according to the config change.
-    fn adjust_remaining_steps_in_deck(
+    /// Adjust the remaining steps of cards in the given deck according to the
+    /// config change.
+    pub(crate) fn adjust_remaining_steps_in_deck(
         &mut self,
         deck: DeckId,
         previous_config: Option<&DeckConfig>,
@@ -233,30 +236,28 @@ impl Collection {
     }
 }
 
-impl NormalDeck {
-    fn to_limits(&self, today: u32) -> Limits {
-        Limits {
-            review: self.review_limit,
-            new: self.new_limit,
-            review_today: self.review_limit_today.map(|limit| limit.limit),
-            new_today: self.new_limit_today.map(|limit| limit.limit),
-            review_today_active: self
-                .review_limit_today
-                .map(|limit| limit.today == today)
-                .unwrap_or_default(),
-            new_today_active: self
-                .new_limit_today
-                .map(|limit| limit.today == today)
-                .unwrap_or_default(),
-        }
+fn normal_deck_to_limits(deck: &NormalDeck, today: u32) -> Limits {
+    Limits {
+        review: deck.review_limit,
+        new: deck.new_limit,
+        review_today: deck.review_limit_today.map(|limit| limit.limit),
+        new_today: deck.new_limit_today.map(|limit| limit.limit),
+        review_today_active: deck
+            .review_limit_today
+            .map(|limit| limit.today == today)
+            .unwrap_or_default(),
+        new_today_active: deck
+            .new_limit_today
+            .map(|limit| limit.today == today)
+            .unwrap_or_default(),
     }
+}
 
-    fn update_limits(&mut self, limits: &Limits, today: u32) {
-        self.review_limit = limits.review;
-        self.new_limit = limits.new;
-        update_day_limit(&mut self.review_limit_today, limits.review_today, today);
-        update_day_limit(&mut self.new_limit_today, limits.new_today, today);
-    }
+fn update_deck_limits(deck: &mut NormalDeck, limits: &Limits, today: u32) {
+    deck.review_limit = limits.review;
+    deck.new_limit = limits.new;
+    update_day_limit(&mut deck.review_limit_today, limits.review_today, today);
+    update_day_limit(&mut deck.new_limit_today, limits.new_today, today);
 }
 
 fn update_day_limit(day_limit: &mut Option<DayLimit>, new_limit: Option<u32>, today: u32) {
@@ -272,17 +273,13 @@ fn update_day_limit(day_limit: &mut Option<DayLimit>, new_limit: Option<u32>, to
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        collection::open_test_collection,
-        deckconfig::NewCardInsertOrder,
-        tests::{
-            open_test_collection_with_learning_card, open_test_collection_with_relearning_card,
-        },
-    };
+    use crate::deckconfig::NewCardInsertOrder;
+    use crate::tests::open_test_collection_with_learning_card;
+    use crate::tests::open_test_collection_with_relearning_card;
 
     #[test]
     fn updating() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note1 = nt.new_note();
         col.add_note(&mut note1, DeckId(1))?;
@@ -292,8 +289,9 @@ mod test {
             col.add_note(&mut note, DeckId(1))?;
         }
 
-        // add the key so it doesn't trigger a change below
+        // add the keys so it doesn't trigger a change below
         col.set_config_string_inner(StringKey::CardStateCustomizer, "")?;
+        col.set_config_bool_inner(BoolKey::NewCardsIgnoreReviewLimit, false)?;
 
         // pretend we're in sync
         let stamps = col.storage.get_collection_timestamps()?;
@@ -326,6 +324,7 @@ mod test {
             apply_to_children: false,
             card_state_customizer: "".to_string(),
             limits: Limits::default(),
+            new_cards_ignore_review_limit: false,
         };
         assert!(!col.update_deck_configs(input.clone())?.changes.had_change());
 

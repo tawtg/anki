@@ -1,2 +1,3 @@
-usage
-
+usage/*
+!usage/no-deprecate.json
+mobile-repo

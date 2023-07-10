@@ -1,23 +1,26 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    collections::{HashMap, HashSet},
-    iter,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::iter;
 
 use prost::Message;
-use rusqlite::{named_params, params, Row};
+use rusqlite::named_params;
+use rusqlite::params;
+use rusqlite::Row;
 use unicase::UniCase;
 
 use super::SqliteStorage;
-use crate::{
-    card::CardQueue,
-    config::SchedulerVersion,
-    decks::{immediate_parent_name, DeckCommon, DeckKindContainer, DeckSchema11, DueCounts},
-    error::DbErrorKind,
-    prelude::*,
-};
+use crate::card::CardQueue;
+use crate::config::SchedulerVersion;
+use crate::decks::immediate_parent_name;
+use crate::decks::DeckCommon;
+use crate::decks::DeckKindContainer;
+use crate::decks::DeckSchema11;
+use crate::decks::DueCounts;
+use crate::error::DbErrorKind;
+use crate::prelude::*;
 
 fn row_to_deck(row: &Row) -> Result<Deck> {
     let common = DeckCommon::decode(row.get_ref_unwrap(4).as_blob()?)?;
@@ -153,7 +156,7 @@ impl SqliteStorage {
 
     // caller should ensure name unique
     pub(crate) fn add_deck(&self, deck: &mut Deck) -> Result<()> {
-        assert!(deck.id.0 == 0);
+        assert_eq!(deck.id.0, 0);
         deck.id.0 = self
             .db
             .prepare(include_str!("alloc_id.sql"))?
@@ -167,9 +170,7 @@ impl SqliteStorage {
     }
 
     pub(crate) fn update_deck(&self, deck: &Deck) -> Result<()> {
-        if deck.id.0 == 0 {
-            return Err(AnkiError::invalid_input("deck with id 0"));
-        }
+        require!(deck.id.0 != 0, "deck with id 0");
         let mut stmt = self.db.prepare_cached(include_str!("update_deck.sql"))?;
         let mut common = vec![];
         deck.common.encode(&mut common)?;
@@ -187,21 +188,14 @@ impl SqliteStorage {
             deck.id
         ])?;
 
-        if count == 0 {
-            Err(AnkiError::invalid_input(
-                "update_deck() called with non-existent deck",
-            ))
-        } else {
-            Ok(())
-        }
+        require!(count != 0, "update_deck() called with non-existent deck");
+        Ok(())
     }
 
     /// Used for syncing&undo; will keep existing ID. Shouldn't be used to add
     /// new decks locally, since it does not allocate an id.
     pub(crate) fn add_or_update_deck_with_existing_id(&self, deck: &Deck) -> Result<()> {
-        if deck.id.0 == 0 {
-            return Err(AnkiError::invalid_input("deck with id 0"));
-        }
+        require!(deck.id.0 != 0, "deck with id 0");
         let mut stmt = self
             .db
             .prepare_cached(include_str!("add_or_update_deck.sql"))?;
@@ -263,7 +257,7 @@ impl SqliteStorage {
     }
 
     pub(crate) fn deck_with_children(&self, deck_id: DeckId) -> Result<Vec<Deck>> {
-        let deck = self.get_deck(deck_id)?.ok_or(AnkiError::NotFound)?;
+        let deck = self.get_deck(deck_id)?.or_not_found(deck_id)?;
         let prefix_start = format!("{}\x1f", deck.name);
         let prefix_end = format!("{}\x20", deck.name);
         iter::once(Ok(deck))
@@ -278,7 +272,8 @@ impl SqliteStorage {
             .collect()
     }
 
-    /// Return the parents of `child`, with the most immediate parent coming first.
+    /// Return the parents of `child`, with the most immediate parent coming
+    /// first.
     pub(crate) fn parent_decks(&self, child: &Deck) -> Result<Vec<Deck>> {
         let mut decks: Vec<Deck> = vec![];
         while let Some(parent_name) = immediate_parent_name(
@@ -382,7 +377,9 @@ impl SqliteStorage {
         let usn = self.usn(server)?;
         let decks = self
             .get_schema11_decks()
-            .map_err(|e| AnkiError::JsonError(format!("decoding decks: {}", e)))?;
+            .map_err(|e| AnkiError::JsonError {
+                info: format!("decoding decks: {}", e),
+            })?;
         let mut names = HashSet::new();
         for (_id, deck) in decks {
             let oldname = deck.name().to_string();
@@ -407,7 +404,7 @@ impl SqliteStorage {
 
     pub(crate) fn downgrade_decks_from_schema15(&self) -> Result<()> {
         let decks = self.get_all_decks_as_schema11()?;
-        self.set_schema11_decks(decks)
+        self.set_schema11_decks(&decks)
     }
 
     fn get_schema11_decks(&self) -> Result<HashMap<DeckId, DeckSchema11>> {
@@ -423,8 +420,8 @@ impl SqliteStorage {
         Ok(decks)
     }
 
-    pub(crate) fn set_schema11_decks(&self, decks: HashMap<DeckId, DeckSchema11>) -> Result<()> {
-        let json = serde_json::to_string(&decks)?;
+    pub(crate) fn set_schema11_decks(&self, decks: &HashMap<DeckId, DeckSchema11>) -> Result<()> {
+        let json = crate::serde::schema11_to_string(decks)?;
         self.db.execute("update col set decks = ?", [json])?;
         Ok(())
     }

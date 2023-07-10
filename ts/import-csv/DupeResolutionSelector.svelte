@@ -3,27 +3,32 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import { CsvMetadata_DupeResolution as DupeResolution } from "@tslib/anki/import_export_pb";
+    import * as tr from "@tslib/ftl";
+
     import Col from "../components/Col.svelte";
     import Row from "../components/Row.svelte";
-    import * as tr from "../lib/ftl";
-    import { ImportExport } from "../lib/proto";
+    import Select from "../components/Select.svelte";
+    import SelectOption from "../components/SelectOption.svelte";
 
-    export let dupeResolution: ImportExport.CsvMetadata.DupeResolution;
+    export let dupeResolution: DupeResolution;
 
     const dupeResolutions = [
         {
-            value: ImportExport.CsvMetadata.DupeResolution.UPDATE,
+            value: DupeResolution.UPDATE,
             label: tr.importingUpdate(),
         },
         {
-            value: ImportExport.CsvMetadata.DupeResolution.ADD,
+            value: DupeResolution.DUPLICATE,
             label: tr.importingDuplicate(),
         },
         {
-            value: ImportExport.CsvMetadata.DupeResolution.IGNORE,
+            value: DupeResolution.PRESERVE,
             label: tr.importingPreserve(),
         },
     ];
+
+    $: label = dupeResolutions.find((r) => r.value === dupeResolution)?.label;
 </script>
 
 <Row --cols={2}>
@@ -31,11 +36,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         {tr.importingExistingNotes()}
     </Col>
     <Col --col-size={1}>
-        <!-- svelte-ignore a11y-no-onchange -->
-        <select class="form-select" bind:value={dupeResolution}>
+        <Select bind:value={dupeResolution} {label}>
             {#each dupeResolutions as { label, value }}
-                <option {value}>{label}</option>
+                <SelectOption {value}>{label}</SelectOption>
             {/each}
-        </select>
+        </Select>
     </Col>
 </Row>

@@ -8,11 +8,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         Placement,
         ReferenceElement,
     } from "@floating-ui/dom";
-    import { createEventDispatcher, onDestroy } from "svelte";
+    import type { Callback } from "@tslib/typing";
+    import { singleCallback } from "@tslib/typing";
+    import { createEventDispatcher, onDestroy, setContext } from "svelte";
     import type { ActionReturn } from "svelte/action";
+    import { writable } from "svelte/store";
 
-    import type { Callback } from "../lib/typing";
-    import { singleCallback } from "../lib/typing";
     import isClosingClick from "../sveltelib/closing-click";
     import isClosingKeyup from "../sveltelib/closing-keyup";
     import type { EventPredicateResult } from "../sveltelib/event-predicate";
@@ -23,13 +24,21 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import type { PositionAlgorithm } from "../sveltelib/position/position-algorithm";
     import positionFloating from "../sveltelib/position/position-floating";
     import subscribeToUpdates from "../sveltelib/subscribe-updates";
+    import { floatingKey } from "./context-keys";
     import FloatingArrow from "./FloatingArrow.svelte";
 
     export let portalTarget: HTMLElement | null = null;
 
-    export let placement: Placement | Placement[] | "auto" = "bottom";
+    let placement: Placement = "bottom";
+    export { placement as preferredPlacement };
+
+    /* Used by Popover to set animation direction depending on placement */
+    const placementPromise = writable(undefined as Promise<Placement> | undefined);
+    setContext(floatingKey, placementPromise);
+
     export let offset = 5;
-    export let shift = 5;
+    /* 30px box shadow from elevation(8) */
+    export let shift = 30;
     export let inline = false;
     export let hideIfEscaped = false;
     export let hideIfReferenceHidden = false;
@@ -52,7 +61,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         hideCallback: (reason: string) => dispatch("close", { reason }),
     });
 
-    let autoAction: ActionReturn = {};
+    let autoAction: ActionReturn<any> = {};
 
     $: {
         positionCurried;
@@ -61,6 +70,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     export let closeOnInsideClick = false;
     export let keepOnKeyup = false;
+    export let hideArrow = false;
 
     export let reference: ReferenceElement | undefined = undefined;
     let floating: FloatingElement;
@@ -69,8 +79,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         reference: ReferenceElement,
         floating: FloatingElement,
         position: PositionAlgorithm,
-    ): Promise<void> {
-        return position(reference, floating);
+    ): Promise<Placement> {
+        const promise = position(reference, floating);
+        $placementPromise = promise;
+        return promise;
     }
 
     async function position(
@@ -78,8 +90,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             reference: ReferenceElement,
             floating: FloatingElement,
             position: PositionAlgorithm,
-        ) => Promise<void> = applyPosition,
-    ): Promise<void> {
+        ) => Promise<Placement> = applyPosition,
+    ): Promise<Placement | void> {
         if (reference && floating) {
             return callback(reference, floating, positionCurried);
         }
@@ -94,9 +106,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         callback: PositioningCallback,
     ): Callback {
         const innerFloating = floating;
-        return callback(reference, innerFloating, () =>
-            positionCurried(reference, innerFloating),
-        );
+        return callback(reference, innerFloating, () => {
+            $placementPromise = positionCurried(reference, innerFloating);
+        });
     }
 
     let cleanup: Callback | null = null;
@@ -170,25 +182,27 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     {/if}
 {/if}
 
-<div bind:this={floating} class="floating" use:portal={portalTarget}>
+<div bind:this={floating} class="floating" class:show use:portal={portalTarget}>
     {#if show}
-        <slot name="floating" />
+        <slot name="floating" {position} />
     {/if}
 
     <div bind:this={arrow} class="floating-arrow" hidden={!show}>
-        <FloatingArrow />
+        {#if !hideArrow}
+            <FloatingArrow />
+        {/if}
     </div>
 </div>
 
 <style lang="scss">
-    @use "sass/elevation" as elevation;
-
+    span.floating-reference {
+        line-height: 1;
+    }
     .floating {
         position: absolute;
         border-radius: 5px;
 
         z-index: 890;
-        @include elevation.elevation(8);
 
         &-arrow {
             position: absolute;

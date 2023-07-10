@@ -7,49 +7,56 @@ mod emptycards;
 mod fields;
 mod notetypechange;
 mod render;
+mod restore;
 mod schema11;
 mod schemachange;
-mod stock;
+mod service;
+pub(crate) mod stock;
 mod templates;
 pub(crate) mod undo;
 
-use std::{
-    collections::{HashMap, HashSet},
-    iter::FromIterator,
-    sync::Arc,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::iter::FromIterator;
+use std::sync::Arc;
 
-pub(crate) use cardgen::{AlreadyGeneratedCardInfo, CardGenContext};
+pub use anki_proto::notetypes::notetype::config::card_requirement::Kind as CardRequirementKind;
+pub use anki_proto::notetypes::notetype::config::CardRequirement;
+pub use anki_proto::notetypes::notetype::config::Kind as NotetypeKind;
+pub use anki_proto::notetypes::notetype::field::Config as NoteFieldConfig;
+pub use anki_proto::notetypes::notetype::template::Config as CardTemplateConfig;
+pub use anki_proto::notetypes::notetype::Config as NotetypeConfig;
+pub use anki_proto::notetypes::notetype::Field as NoteFieldProto;
+pub use anki_proto::notetypes::notetype::Template as CardTemplateProto;
+pub use anki_proto::notetypes::Notetype as NotetypeProto;
+pub(crate) use cardgen::AlreadyGeneratedCardInfo;
+pub(crate) use cardgen::CardGenContext;
 pub use fields::NoteField;
 use lazy_static::lazy_static;
-pub use notetypechange::{ChangeNotetypeInput, NotetypeChangeInfo};
+pub use notetypechange::ChangeNotetypeInput;
+pub use notetypechange::NotetypeChangeInfo;
 use regex::Regex;
 pub(crate) use render::RenderCardOutput;
-pub use schema11::{CardTemplateSchema11, NoteFieldSchema11, NotetypeSchema11};
+pub use schema11::CardTemplateSchema11;
+pub use schema11::NoteFieldSchema11;
+pub use schema11::NotetypeSchema11;
 pub use stock::all_stock_notetypes;
 pub use templates::CardTemplate;
 use unicase::UniCase;
 
-pub use crate::pb::{
-    notetype::{
-        config::{
-            card_requirement::Kind as CardRequirementKind, CardRequirement, Kind as NotetypeKind,
-        },
-        field::Config as NoteFieldConfig,
-        template::Config as CardTemplateConfig,
-        Config as NotetypeConfig, Field as NoteFieldProto, Template as CardTemplateProto,
-    },
-    Notetype as NotetypeProto,
-};
-use crate::{
-    define_newtype,
-    error::{CardTypeError, CardTypeErrorDetails},
-    prelude::*,
-    search::{JoinSearches, Node, SearchNode},
-    storage::comma_separated_ids,
-    template::{FieldRequirements, ParsedTemplate},
-    text::ensure_string_in_nfc,
-};
+use crate::define_newtype;
+use crate::error::CardTypeError;
+use crate::error::CardTypeErrorDetails;
+use crate::error::CardTypeSnafu;
+use crate::error::MissingClozeSnafu;
+use crate::prelude::*;
+use crate::search::JoinSearches;
+use crate::search::Node;
+use crate::search::SearchNode;
+use crate::storage::comma_separated_ids;
+use crate::template::FieldRequirements;
+use crate::template::ParsedTemplate;
+use crate::text::ensure_string_in_nfc;
 
 define_newtype!(NotetypeId, i64);
 
@@ -90,13 +97,13 @@ impl Default for Notetype {
             usn: Usn(0),
             fields: vec![],
             templates: vec![],
-            config: NotetypeConfig::new(),
+            config: Notetype::new_config(),
         }
     }
 }
 
-impl NotetypeConfig {
-    pub(crate) fn new() -> Self {
+impl Notetype {
+    pub(crate) fn new_config() -> NotetypeConfig {
         NotetypeConfig {
             css: DEFAULT_CSS.into(),
             latex_pre: DEFAULT_LATEX_HEADER.into(),
@@ -105,8 +112,8 @@ impl NotetypeConfig {
         }
     }
 
-    pub(crate) fn new_cloze() -> Self {
-        let mut config = Self::new();
+    pub(crate) fn new_cloze_config() -> NotetypeConfig {
+        let mut config = Self::new_config();
         config.css += DEFAULT_CLOZE_CSS;
         config.kind = NotetypeKind::Cloze as i32;
         config
@@ -127,7 +134,7 @@ impl Notetype {
             self.templates.get(card_ord as usize)
         };
 
-        template.ok_or(AnkiError::NotFound)
+        template.or_not_found(card_ord)
     }
 }
 
@@ -159,7 +166,7 @@ impl Collection {
             let original = col
                 .storage
                 .get_notetype(notetype.id)?
-                .ok_or(AnkiError::NotFound)?;
+                .or_not_found(notetype.id)?;
             let usn = col.usn()?;
             notetype.set_modified(usn);
             col.add_or_update_notetype_with_existing_id_inner(
@@ -171,8 +178,8 @@ impl Collection {
         })
     }
 
-    /// Used to support the current importing code; does not mark notetype as modified,
-    /// and does not support undo.
+    /// Used to support the current importing code; does not mark notetype as
+    /// modified, and does not support undo.
     pub fn add_or_update_notetype_with_existing_id(
         &mut self,
         notetype: &mut Notetype,
@@ -241,15 +248,13 @@ impl Collection {
     /// Return the notetype used by `note_ids`, or an error if not exactly 1
     /// notetype is in use.
     pub fn get_single_notetype_of_notes(&mut self, note_ids: &[NoteId]) -> Result<NotetypeId> {
-        if note_ids.is_empty() {
-            return Err(AnkiError::NotFound);
-        }
+        require!(!note_ids.is_empty(), "no note id provided");
 
         let nids_node: Node = SearchNode::NoteIds(comma_separated_ids(note_ids)).into();
         let note1 = self
             .storage
             .get_note(*note_ids.first().unwrap())?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(note_ids[0])?;
 
         if self
             .search_notes_unordered(note1.notetype_id.and(nids_node))?
@@ -357,12 +362,11 @@ impl Notetype {
                 // provided ordinal not on any existing field; cap to bounds
                 self.config
                     .sort_field_idx
-                    .max(0)
-                    .min((self.fields.len() - 1) as u32)
+                    .clamp(0, (self.fields.len() - 1) as u32)
             });
     }
 
-    fn ensure_template_fronts_unique(&self) -> Result<()> {
+    fn ensure_template_fronts_unique(&self) -> Result<(), CardTypeError> {
         lazy_static! {
             static ref CARD_TAG: Regex = Regex::new(r"\{\{\s*Card\s*\}\}").unwrap();
         }
@@ -371,11 +375,11 @@ impl Notetype {
         for (index, card) in self.templates.iter().enumerate() {
             if let Some(old_index) = map.insert(&card.config.q_format, index) {
                 if !CARD_TAG.is_match(&card.config.q_format) {
-                    return Err(AnkiError::CardTypeError(CardTypeError {
+                    return Err(CardTypeError {
                         notetype: self.name.clone(),
                         ordinal: index,
-                        details: CardTypeErrorDetails::Duplicate(old_index),
-                    }));
+                        source: CardTypeErrorDetails::Duplicate { index: old_index },
+                    });
                 }
             }
         }
@@ -388,32 +392,32 @@ impl Notetype {
     fn ensure_valid_parsed_templates(
         &self,
         templates: &[(Option<ParsedTemplate>, Option<ParsedTemplate>)],
-    ) -> Result<()> {
-        if let Some((invalid_index, details)) =
-            templates.iter().enumerate().find_map(|(index, sides)| {
-                if let (Some(q), Some(a)) = sides {
-                    let q_fields = q.all_referenced_field_names();
-                    if q_fields.is_empty() {
-                        Some((index, CardTypeErrorDetails::NoFrontField))
-                    } else if self
-                        .unknown_field_name(q_fields.union(&a.all_referenced_field_names()))
-                    {
-                        Some((index, CardTypeErrorDetails::NoSuchField))
-                    } else {
-                        None
-                    }
-                } else {
-                    Some((index, CardTypeErrorDetails::TemplateError))
-                }
-            })
-        {
-            Err(AnkiError::CardTypeError(CardTypeError {
-                notetype: self.name.clone(),
-                ordinal: invalid_index,
-                details,
-            }))
-        } else {
+    ) -> Result<(), CardTypeError> {
+        for (ordinal, sides) in templates.iter().enumerate() {
+            self.ensure_valid_parsed_card_templates(sides)
+                .context(CardTypeSnafu {
+                    notetype: &self.name,
+                    ordinal,
+                })?;
+        }
+        Ok(())
+    }
+
+    fn ensure_valid_parsed_card_templates(
+        &self,
+        sides: &(Option<ParsedTemplate>, Option<ParsedTemplate>),
+    ) -> Result<(), CardTypeErrorDetails> {
+        if let (Some(q), Some(a)) = sides {
+            let q_fields = q.all_referenced_field_names();
+            if q_fields.is_empty() {
+                return Err(CardTypeErrorDetails::NoFrontField);
+            }
+            if self.unknown_field_name(q_fields.union(&a.all_referenced_field_names())) {
+                return Err(CardTypeErrorDetails::NoSuchField);
+            }
             Ok(())
+        } else {
+            Err(CardTypeErrorDetails::TemplateParseError)
         }
     }
 
@@ -435,15 +439,15 @@ impl Notetype {
     fn ensure_cloze_if_cloze_notetype(
         &self,
         parsed_templates: &[(Option<ParsedTemplate>, Option<ParsedTemplate>)],
-    ) -> Result<()> {
+    ) -> Result<(), CardTypeError> {
         if self.is_cloze() && missing_cloze_filter(parsed_templates) {
-            return Err(AnkiError::CardTypeError(CardTypeError {
-                notetype: self.name.clone(),
-                ordinal: 0,
-                details: CardTypeErrorDetails::MissingCloze,
-            }));
+            MissingClozeSnafu.fail().context(CardTypeSnafu {
+                notetype: &self.name,
+                ordinal: 0usize,
+            })
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     pub(crate) fn normalize_names(&mut self) {
@@ -474,19 +478,13 @@ impl Notetype {
         existing: Option<&Notetype>,
         skip_checks: bool,
     ) -> Result<()> {
-        if self.fields.is_empty() {
-            return Err(AnkiError::invalid_input("1 field required"));
-        }
-        if self.templates.is_empty() {
-            return Err(AnkiError::invalid_input("1 template required"));
-        }
+        require!(!self.fields.is_empty(), "1 field required");
+        require!(!self.templates.is_empty(), "1 template required");
         let bad_chars = |c| c == '"';
         if self.name.contains(bad_chars) {
             self.name = self.name.replace(bad_chars, "");
         }
-        if self.name.is_empty() {
-            return Err(AnkiError::invalid_input("Empty note type name"));
-        }
+        require!(!self.name.is_empty(), "Empty notetype name");
         self.normalize_names();
         self.fix_field_names()?;
         self.fix_template_names()?;
@@ -505,11 +503,19 @@ impl Notetype {
         }
         self.config.reqs = reqs;
         if !skip_checks {
-            self.ensure_template_fronts_unique()?;
-            self.ensure_valid_parsed_templates(&parsed_templates)?;
-            self.ensure_cloze_if_cloze_notetype(&parsed_templates)?;
+            self.check_templates(parsed_templates)?;
         }
 
+        Ok(())
+    }
+
+    fn check_templates(
+        &self,
+        parsed_templates: Vec<(Option<ParsedTemplate>, Option<ParsedTemplate>)>,
+    ) -> Result<()> {
+        self.ensure_template_fronts_unique()
+            .and(self.ensure_valid_parsed_templates(&parsed_templates))
+            .and(self.ensure_cloze_if_cloze_notetype(&parsed_templates))?;
         Ok(())
     }
 
@@ -597,8 +603,9 @@ impl Notetype {
         matches!(self.config.kind(), NotetypeKind::Cloze)
     }
 
-    /// Return all clozable fields. A field is clozable when it belongs to a cloze
-    /// notetype and a 'cloze' filter is applied to it in the template.
+    /// Return all clozable fields. A field is clozable when it belongs to a
+    /// cloze notetype and a 'cloze' filter is applied to it in the
+    /// template.
     pub(crate) fn cloze_fields(&self) -> HashSet<usize> {
         if !self.is_cloze() {
             HashSet::new()
@@ -614,7 +621,8 @@ impl Notetype {
     }
 }
 
-/// True if the slice is empty or either template of the first tuple doesn't have a cloze field.
+/// True if the slice is empty or either template of the first tuple doesn't
+/// have a cloze field.
 fn missing_cloze_filter(
     parsed_templates: &[(Option<ParsedTemplate>, Option<ParsedTemplate>)],
 ) -> bool {

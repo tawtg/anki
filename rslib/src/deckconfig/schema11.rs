@@ -3,17 +3,24 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize as DeTrait, Deserializer};
+use serde::Deserialize as DeTrait;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
 use serde_aux::field_attributes::deserialize_number_from_string;
-use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde_repr::Deserialize_repr;
+use serde_repr::Serialize_repr;
 use serde_tuple::Serialize_tuple;
 
-use super::{
-    DeckConfig, DeckConfigId, DeckConfigInner, NewCardInsertOrder, INITIAL_EASE_FACTOR_THOUSANDS,
-};
-use crate::{serde::default_on_invalid, timestamp::TimestampSecs, types::Usn};
+use super::DeckConfig;
+use super::DeckConfigId;
+use super::DeckConfigInner;
+use super::NewCardInsertOrder;
+use super::INITIAL_EASE_FACTOR_THOUSANDS;
+use crate::serde::default_on_invalid;
+use crate::timestamp::TimestampSecs;
+use crate::types::Usn;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -41,7 +48,6 @@ pub struct DeckConfSchema11 {
 
     // 2021 scheduler options: these were not in schema 11, but we need to persist them
     // so the settings are not lost on upgrade/downgrade.
-    // NOTE: if adding new ones, make sure to update clear_other_duplicates()
     #[serde(default)]
     new_mix: i32,
     #[serde(default)]
@@ -80,7 +86,7 @@ pub struct NewConfSchema11 {
     other: HashMap<String, Value>,
 }
 
-#[derive(Serialize_tuple, Debug, PartialEq, Clone)]
+#[derive(Serialize_tuple, Debug, PartialEq, Eq, Clone)]
 pub struct NewCardIntervals {
     good: u16,
     easy: u16,
@@ -120,7 +126,7 @@ where
         .unwrap_or_default())
 }
 
-#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Clone)]
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, Clone)]
 #[repr(u8)]
 pub enum NewCardOrderSchema11 {
     Random = 0,
@@ -154,10 +160,12 @@ pub struct RevConfSchema11 {
     other: HashMap<String, Value>,
 }
 
-#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Clone)]
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, Clone)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum LeechAction {
     Suspend = 0,
+    #[default]
     TagOnly = 1,
 }
 
@@ -174,12 +182,6 @@ pub struct LapseConfSchema11 {
 
     #[serde(flatten)]
     other: HashMap<String, Value>,
-}
-
-impl Default for LeechAction {
-    fn default() -> Self {
-        LeechAction::TagOnly
-    }
 }
 
 impl Default for RevConfSchema11 {
@@ -332,7 +334,6 @@ impl From<DeckConfig> for DeckConfSchema11 {
             top_other = Default::default();
         } else {
             top_other = serde_json::from_slice(&c.inner.other).unwrap_or_default();
-            clear_other_duplicates(&mut top_other);
             if let Some(new) = top_other.remove("new") {
                 let val: HashMap<String, Value> = serde_json::from_value(new).unwrap_or_default();
                 new_other = val;
@@ -355,7 +356,7 @@ impl From<DeckConfig> for DeckConfSchema11 {
             usn: c.usn,
             max_taken: i.cap_answer_time_to_secs as i32,
             autoplay: !i.disable_autoplay,
-            timer: if i.show_timer { 1 } else { 0 },
+            timer: i.show_timer.into(),
             replayq: !i.skip_question_when_replaying_answer,
             dynamic: false,
             new: NewConfSchema11 {
@@ -406,31 +407,11 @@ impl From<DeckConfig> for DeckConfSchema11 {
     }
 }
 
-fn clear_other_duplicates(top_other: &mut HashMap<String, Value>) {
-    // Older clients may have received keys from a newer client when
-    // syncing, which get bundled into `other`. If they then upgrade, then
-    // downgrade their collection to schema11, serde will serialize the
-    // new default keys, but then add them again from `other`, leading
-    // to the keys being duplicated in the resulting json - which older
-    // clients then can't read. So we need to strip out any new keys we
-    // add.
-    for key in &[
-        "newMix",
-        "newPerDayMinimum",
-        "interdayLearningMix",
-        "reviewOrder",
-        "newSortOrder",
-        "newGatherPriority",
-        "buryInterdayLearning",
-    ] {
-        top_other.remove(*key);
-    }
-}
-
 #[cfg(test)]
 mod test {
     use serde::de::IntoDeserializer;
-    use serde_json::{json, Value};
+    use serde_json::json;
+    use serde_json::Value;
 
     use super::*;
 

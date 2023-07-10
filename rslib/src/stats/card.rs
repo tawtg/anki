@@ -1,33 +1,31 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{
-    card::{CardQueue, CardType},
-    pb,
-    prelude::*,
-    revlog::RevlogEntry,
-};
+use crate::card::CardQueue;
+use crate::card::CardType;
+use crate::prelude::*;
+use crate::revlog::RevlogEntry;
 
 impl Collection {
-    pub fn card_stats(&mut self, cid: CardId) -> Result<pb::CardStatsResponse> {
-        let card = self.storage.get_card(cid)?.ok_or(AnkiError::NotFound)?;
+    pub fn card_stats(&mut self, cid: CardId) -> Result<anki_proto::stats::CardStatsResponse> {
+        let card = self.storage.get_card(cid)?.or_not_found(cid)?;
         let note = self
             .storage
             .get_note(card.note_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(card.note_id)?;
         let nt = self
             .get_notetype(note.notetype_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(note.notetype_id)?;
         let deck = self
             .storage
             .get_deck(card.deck_id)?
-            .ok_or(AnkiError::NotFound)?;
+            .or_not_found(card.deck_id)?;
         let revlog = self.storage.get_revlog_entries_for_card(card.id)?;
 
         let (average_secs, total_secs) = average_and_total_secs_strings(&revlog);
         let (due_date, due_position) = self.due_date_and_position(&card)?;
 
-        Ok(pb::CardStatsResponse {
+        Ok(anki_proto::stats::CardStatsResponse {
             card_id: card.id.into(),
             note_id: card.note_id.into(),
             deck: deck.human_name(),
@@ -45,6 +43,7 @@ impl Collection {
             card_type: nt.get_template(card.template_idx)?.name.clone(),
             notetype: nt.name.clone(),
             revlog: revlog.iter().rev().map(stats_revlog_entry).collect(),
+            custom_data: card.custom_data,
         })
     }
 
@@ -92,8 +91,10 @@ fn average_and_total_secs_strings(revlog: &[RevlogEntry]) -> (f32, f32) {
     }
 }
 
-fn stats_revlog_entry(entry: &RevlogEntry) -> pb::card_stats_response::StatsRevlogEntry {
-    pb::card_stats_response::StatsRevlogEntry {
+fn stats_revlog_entry(
+    entry: &RevlogEntry,
+) -> anki_proto::stats::card_stats_response::StatsRevlogEntry {
+    anki_proto::stats::card_stats_response::StatsRevlogEntry {
         time: entry.id.as_secs().0,
         review_kind: entry.review_kind.into(),
         button_chosen: entry.button_chosen as u32,
@@ -106,11 +107,11 @@ fn stats_revlog_entry(entry: &RevlogEntry) -> pb::card_stats_response::StatsRevl
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, search::SortMode};
+    use crate::search::SortMode;
 
     #[test]
     fn stats() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();

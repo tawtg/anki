@@ -6,23 +6,29 @@ mod decks;
 mod media;
 mod notes;
 
-use std::{collections::HashSet, fs::File, io, path::Path};
+use std::collections::HashSet;
+use std::fs::File;
+use std::path::Path;
 
+use anki_io::new_tempfile;
+use anki_io::open_file;
+use anki_io::FileIoSnafu;
+use anki_io::FileOp;
 pub(crate) use notes::NoteMeta;
 use rusqlite::OptionalExtension;
 use tempfile::NamedTempFile;
 use zip::ZipArchive;
-use zstd::stream::copy_decode;
 
-use crate::{
-    collection::CollectionBuilder,
-    import_export::{
-        gather::ExchangeData, package::Meta, ImportProgress, IncrementableProgress, NoteLog,
-    },
-    media::MediaManager,
-    prelude::*,
-    search::SearchNode,
-};
+use super::super::meta::MetaExt;
+use crate::collection::CollectionBuilder;
+use crate::import_export::gather::ExchangeData;
+use crate::import_export::package::Meta;
+use crate::import_export::ImportProgress;
+use crate::import_export::NoteLog;
+use crate::media::MediaManager;
+use crate::prelude::*;
+use crate::progress::ThrottlingProgressHandler;
+use crate::search::SearchNode;
 
 struct Context<'a> {
     target_col: &'a mut Collection,
@@ -31,20 +37,17 @@ struct Context<'a> {
     meta: Meta,
     data: ExchangeData,
     usn: Usn,
-    progress: IncrementableProgress<ImportProgress>,
+    progress: ThrottlingProgressHandler<ImportProgress>,
 }
 
 impl Collection {
-    pub fn import_apkg(
-        &mut self,
-        path: impl AsRef<Path>,
-        progress_fn: impl 'static + FnMut(ImportProgress, bool) -> bool,
-    ) -> Result<OpOutput<NoteLog>> {
-        let file = File::open(path)?;
+    pub fn import_apkg(&mut self, path: impl AsRef<Path>) -> Result<OpOutput<NoteLog>> {
+        let file = open_file(path)?;
         let archive = ZipArchive::new(file)?;
+        let progress = self.new_progress_handler();
 
         self.transact(Op::Import, |col| {
-            let mut ctx = Context::new(archive, col, progress_fn)?;
+            let mut ctx = Context::new(archive, col, progress)?;
             ctx.import()
         })
     }
@@ -54,11 +57,9 @@ impl<'a> Context<'a> {
     fn new(
         mut archive: ZipArchive<File>,
         target_col: &'a mut Collection,
-        progress_fn: impl 'static + FnMut(ImportProgress, bool) -> bool,
+        mut progress: ThrottlingProgressHandler<ImportProgress>,
     ) -> Result<Self> {
-        let mut progress = IncrementableProgress::new(progress_fn);
-        progress.call(ImportProgress::Extracting)?;
-        let media_manager = MediaManager::new(&target_col.media_folder, &target_col.media_db)?;
+        let media_manager = target_col.media()?;
         let meta = Meta::from_archive(&mut archive)?;
         let data = ExchangeData::gather_from_archive(
             &mut archive,
@@ -83,7 +84,8 @@ impl<'a> Context<'a> {
         let mut media_map = self.prepare_media()?;
         let note_imports = self.import_notes_and_notetypes(&mut media_map)?;
         let keep_filtered = self.data.enables_filtered_decks();
-        let imported_decks = self.import_decks_and_configs(keep_filtered)?;
+        let contains_scheduling = self.data.contains_scheduling();
+        let imported_decks = self.import_decks_and_configs(keep_filtered, contains_scheduling)?;
         self.import_cards_and_revlog(&note_imports.id_map, &imported_decks, keep_filtered)?;
         self.copy_media(&mut media_map)?;
         Ok(note_imports.log)
@@ -95,14 +97,15 @@ impl ExchangeData {
         archive: &mut ZipArchive<File>,
         meta: &Meta,
         search: impl TryIntoSearch,
-        progress: &mut IncrementableProgress<ImportProgress>,
+        progress: &mut ThrottlingProgressHandler<ImportProgress>,
         with_scheduling: bool,
     ) -> Result<Self> {
         let tempfile = collection_to_tempfile(meta, archive)?;
         let mut col = CollectionBuilder::new(tempfile.path()).build()?;
+        col.maybe_fix_invalid_ids()?;
         col.maybe_upgrade_scheduler()?;
 
-        progress.call(ImportProgress::Gathering)?;
+        progress.set(ImportProgress::Gathering)?;
         let mut data = ExchangeData::default();
         data.gather_data(&mut col, search, with_scheduling)?;
 
@@ -112,12 +115,15 @@ impl ExchangeData {
     fn enables_filtered_decks(&self) -> bool {
         // Earlier versions relied on the importer handling filtered decks by converting
         // them into regular ones, so there is no guarantee that all original decks
-        // are included.
-        self.contains_scheduling() && self.contains_all_original_decks()
+        // are included. And the legacy exporter included the default deck config, so we
+        // can't use it to determine if scheduling is included.
+        self.contains_scheduling()
+            && self.contains_all_original_decks()
+            && !self.deck_configs.is_empty()
     }
 
     fn contains_scheduling(&self) -> bool {
-        !(self.revlog.is_empty() && self.deck_configs.is_empty())
+        !self.revlog.is_empty()
     }
 
     fn contains_all_original_decks(&self) -> bool {
@@ -130,13 +136,12 @@ impl ExchangeData {
 
 fn collection_to_tempfile(meta: &Meta, archive: &mut ZipArchive<File>) -> Result<NamedTempFile> {
     let mut zip_file = archive.by_name(meta.collection_filename())?;
-    let mut tempfile = NamedTempFile::new()?;
-    if meta.zstd_compressed() {
-        copy_decode(zip_file, &mut tempfile)
-    } else {
-        io::copy(&mut zip_file, &mut tempfile).map(|_| ())
-    }
-    .map_err(|err| AnkiError::file_io_error(err, tempfile.path()))?;
+    let mut tempfile = new_tempfile()?;
+    meta.copy(&mut zip_file, &mut tempfile)
+        .with_context(|_| FileIoSnafu {
+            path: tempfile.path(),
+            op: FileOp::copy(zip_file.name()),
+        })?;
 
     Ok(tempfile)
 }

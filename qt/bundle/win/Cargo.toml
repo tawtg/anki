@@ -1,14 +1,15 @@
 [package]
-edition = "2021"
 name = "makeinstall"
-version = "0.1.0"
-authors = ["Ankitects Pty Ltd and contributors"]
-license = "AGPL-3.0-or-later"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
 
 [dependencies]
-anyhow = "1.0.53"
-glob = "0.3.0"
-slog = "2.7.0"
-slog-term = "2.8.0"
-tugger-windows-codesign = "0.6.0"
-walkdir = "2.3.2"
+anyhow.workspace = true
+camino.workspace = true
+clap.workspace = true
+tugger-windows-codesign.workspace = true
+walkdir.workspace = true

@@ -1,21 +1,24 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    ffi::OsStr,
-    fs::{read_dir, remove_file, DirEntry},
-    path::{Path, PathBuf},
-    thread::{self, JoinHandle},
-    time::SystemTime,
-};
+use std::ffi::OsStr;
+use std::fs::read_dir;
+use std::fs::remove_file;
+use std::fs::DirEntry;
+use std::path::Path;
+use std::path::PathBuf;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::SystemTime;
 
+use anki_io::read_locked_db_file;
+use anki_proto::config::preferences::BackupLimits;
 use chrono::prelude::*;
 use itertools::Itertools;
-use log::error;
+use tracing::error;
 
-use crate::{
-    import_export::package::export_colpkg_from_data, log, pb::preferences::BackupLimits, prelude::*,
-};
+use crate::import_export::package::export_colpkg_from_data;
+use crate::prelude::*;
 
 const BACKUP_FORMAT_STRING: &str = "backup-%Y-%m-%d-%H.%M.%S.colpkg";
 
@@ -34,13 +37,12 @@ impl Collection {
         if should_skip_backup(force, limits.minimum_interval_mins, backup_folder.as_ref())? {
             Ok(None)
         } else {
-            let log = self.log.clone();
             let tr = self.tr.clone();
             self.storage.checkpoint()?;
-            let col_data = std::fs::read(&self.col_path)?;
+            let col_data = read_locked_db_file(&self.col_path)?;
             self.update_last_backup_timestamp()?;
             Ok(Some(thread::spawn(move || {
-                backup_inner(&col_data, &backup_folder, limits, log, &tr)
+                backup_inner(&col_data, &backup_folder, limits, &tr)
             })))
         }
     }
@@ -83,30 +85,25 @@ fn backup_inner<P: AsRef<Path>>(
     col_data: &[u8],
     backup_folder: P,
     limits: BackupLimits,
-    log: Logger,
     tr: &I18n,
 ) -> Result<()> {
     write_backup(col_data, backup_folder.as_ref(), tr)?;
-    thin_backups(backup_folder, limits, &log)
+    thin_backups(backup_folder, limits)
 }
 
 fn write_backup<S: AsRef<OsStr>>(col_data: &[u8], backup_folder: S, tr: &I18n) -> Result<()> {
     let out_path =
-        Path::new(&backup_folder).join(&format!("{}", Local::now().format(BACKUP_FORMAT_STRING)));
-    export_colpkg_from_data(&out_path, col_data, tr)
+        Path::new(&backup_folder).join(format!("{}", Local::now().format(BACKUP_FORMAT_STRING)));
+    export_colpkg_from_data(out_path, col_data, tr)
 }
 
-fn thin_backups<P: AsRef<Path>>(
-    backup_folder: P,
-    limits: BackupLimits,
-    log: &Logger,
-) -> Result<()> {
+fn thin_backups<P: AsRef<Path>>(backup_folder: P, limits: BackupLimits) -> Result<()> {
     let backups =
         read_dir(backup_folder)?.filter_map(|entry| entry.ok().and_then(Backup::from_entry));
-    let obsolete_backups = BackupFilter::new(Local::today(), limits).obsolete_backups(backups);
+    let obsolete_backups = BackupFilter::new(Local::now(), limits).obsolete_backups(backups);
     for backup in obsolete_backups {
         if let Err(error) = remove_file(&backup.path) {
-            error!(log, "failed to remove {:?}: {error:?}", &backup.path);
+            error!("failed to remove {:?}: {error:?}", &backup.path);
         };
     }
 
@@ -119,7 +116,7 @@ fn datetime_from_file_name(file_name: &str) -> Option<DateTime<Local>> {
         .and_then(|datetime| Local.from_local_datetime(&datetime).latest())
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Backup {
     path: PathBuf,
     datetime: DateTime<Local>,
@@ -133,8 +130,8 @@ impl Backup {
 
     /// Serial week number, starting on Monday
     fn week(&self) -> i32 {
-        // Day 1 (01/01/01) was a Monday, meaning week rolled over on Sunday (when day % 7 == 0).
-        // We subtract 1 to shift the rollover to Monday.
+        // Day 1 (01/01/01) was a Monday, meaning week rolled over on Sunday (when day %
+        // 7 == 0). We subtract 1 to shift the rollover to Monday.
         (self.day() - 1) / 7
     }
 
@@ -167,7 +164,7 @@ struct BackupFilter {
     obsolete: Vec<Backup>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackupStage {
     Daily,
     Weekly,
@@ -175,7 +172,7 @@ enum BackupStage {
 }
 
 impl BackupFilter {
-    fn new(today: Date<Local>, limits: BackupLimits) -> Self {
+    fn new(today: DateTime<Local>, limits: BackupLimits) -> Self {
         Self {
             yesterday: today.num_days_from_ce() - 1,
             last_kept_day: i32::MAX,
@@ -261,7 +258,10 @@ mod test {
             Backup {
                 datetime: Local
                     .from_local_datetime(
-                        &NaiveDate::from_num_days_from_ce($num_days_from_ce).and_hms(0, 0, 0),
+                        &NaiveDate::from_num_days_from_ce_opt($num_days_from_ce)
+                            .unwrap()
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap(),
                     )
                     .latest()
                     .unwrap(),
@@ -270,13 +270,19 @@ mod test {
         };
         ($year:expr, $month:expr, $day:expr) => {
             Backup {
-                datetime: Local.ymd($year, $month, $day).and_hms(0, 0, 0),
+                datetime: Local
+                    .with_ymd_and_hms($year, $month, $day, 0, 0, 0)
+                    .latest()
+                    .unwrap(),
                 path: PathBuf::new(),
             }
         };
         ($year:expr, $month:expr, $day:expr, $hour:expr, $min:expr, $sec:expr) => {
             Backup {
-                datetime: Local.ymd($year, $month, $day).and_hms($hour, $min, $sec),
+                datetime: Local
+                    .with_ymd_and_hms($year, $month, $day, $hour, $min, $sec)
+                    .latest()
+                    .unwrap(),
                 path: PathBuf::new(),
             }
         };
@@ -284,7 +290,10 @@ mod test {
 
     #[test]
     fn thinning_manual() {
-        let today = Local.ymd(2022, 2, 22);
+        let today = Local
+            .with_ymd_and_hms(2022, 2, 22, 0, 0, 0)
+            .latest()
+            .unwrap();
         let limits = BackupLimits {
             daily: 3,
             weekly: 2,
@@ -327,7 +336,10 @@ mod test {
 
     #[test]
     fn thinning_generic() {
-        let today = Local.ymd(2022, 1, 1);
+        let today = Local
+            .with_ymd_and_hms(2022, 1, 1, 0, 0, 0)
+            .latest()
+            .unwrap();
         let today_ce_days = today.num_days_from_ce();
         let limits = BackupLimits {
             // config defaults
@@ -356,7 +368,9 @@ mod test {
         // monthly backups from the last day of the month
         for _ in 0..limits.monthly {
             for backup in backup_iter.by_ref() {
-                if backup.datetime.date().month() != backup.datetime.date().succ().month() {
+                if backup.datetime.month()
+                    != backup.datetime.date_naive().succ_opt().unwrap().month()
+                {
                     break;
                 } else {
                     expected.push(backup.clone())

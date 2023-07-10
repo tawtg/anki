@@ -3,15 +3,15 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import { directionKey } from "@tslib/context-keys";
+    import * as tr from "@tslib/ftl";
+    import { removeStyleProperties } from "@tslib/styling";
     import { getContext } from "svelte";
     import { createEventDispatcher } from "svelte";
     import type { Readable } from "svelte/store";
 
     import ButtonGroup from "../../components/ButtonGroup.svelte";
     import IconButton from "../../components/IconButton.svelte";
-    import { directionKey } from "../../lib/context-keys";
-    import * as tr from "../../lib/ftl";
-    import { removeStyleProperties } from "../../lib/styling";
     import { floatLeftIcon, floatNoneIcon, floatRightIcon } from "./icons";
 
     export let image: HTMLImageElement;
@@ -36,8 +36,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             image.style.float = "left";
             setTimeout(() => dispatch("update"));
         }}
-        --border-left-radius="5px">{@html inlineStartIcon}</IconButton
+        --border-left-radius="5px"
     >
+        {@html inlineStartIcon}
+    </IconButton>
 
     <IconButton
         tooltip={tr.editingFloatNone()}
@@ -49,8 +51,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             image.style.float = "none";
             removeStyleProperties(image, "float");
             setTimeout(() => dispatch("update"));
-        }}>{@html floatNoneIcon}</IconButton
+        }}
     >
+        {@html floatNoneIcon}
+    </IconButton>
 
     <IconButton
         tooltip={tr.editingFloatRight()}
@@ -60,6 +64,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             image.style.float = "right";
             setTimeout(() => dispatch("update"));
         }}
-        --border-right-radius="5px">{@html inlineEndIcon}</IconButton
+        --border-right-radius="5px"
     >
+        {@html inlineEndIcon}
+    </IconButton>
 </ButtonGroup>

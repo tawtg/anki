@@ -1,18 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-use rusqlite::{params, Row};
+use rusqlite::params;
+use rusqlite::Row;
 
-use crate::{
-    error::Result,
-    import_export::package::NoteMeta,
-    notes::{Note, NoteId, NoteTags},
-    notetype::NotetypeId,
-    tags::{join_tags, split_tags},
-    timestamp::TimestampMillis,
-};
+use crate::import_export::package::NoteMeta;
+use crate::notes::NoteTags;
+use crate::prelude::*;
+use crate::tags::join_tags;
+use crate::tags::split_tags;
 
 pub(crate) fn split_fields(fields: &str) -> Vec<String> {
     fields.split('\x1f').map(Into::into).collect()
@@ -49,9 +48,10 @@ impl super::SqliteStorage {
             .collect()
     }
 
-    /// If fields have been modified, caller must call note.prepare_for_update() prior to calling this.
+    /// If fields have been modified, caller must call note.prepare_for_update()
+    /// prior to calling this.
     pub(crate) fn update_note(&self, note: &Note) -> Result<()> {
-        assert!(note.id.0 != 0);
+        assert_ne!(note.id.0, 0);
         let mut stmt = self.db.prepare_cached(include_str!("update.sql"))?;
         stmt.execute(params![
             note.guid,
@@ -68,7 +68,7 @@ impl super::SqliteStorage {
     }
 
     pub(crate) fn add_note(&self, note: &mut Note) -> Result<()> {
-        assert!(note.id.0 == 0);
+        assert_eq!(note.id.0, 0);
         let mut stmt = self.db.prepare_cached(include_str!("add.sql"))?;
         stmt.execute(params![
             TimestampMillis::now(),
@@ -103,7 +103,8 @@ impl super::SqliteStorage {
             .map_err(Into::into)
     }
 
-    /// Add or update the provided note, preserving ID. Used by the syncing code.
+    /// Add or update the provided note, preserving ID. Used by the syncing
+    /// code.
     pub(crate) fn add_or_update_note(&self, note: &Note) -> Result<()> {
         let mut stmt = self.db.prepare_cached(include_str!("add_or_update.sql"))?;
         stmt.execute(params![
@@ -150,7 +151,7 @@ impl super::SqliteStorage {
                     let fixed_flds: Vec<u8> = row.get(0)?;
                     let fixed_str = String::from_utf8_lossy(&fixed_flds);
                     self.db.execute(
-                        "update notes set flds = ? where id = ?",
+                        "update notes set flds = ?, sfld = '' where id = ?",
                         params![fixed_str, nid],
                     )
                 },
@@ -186,6 +187,22 @@ impl super::SqliteStorage {
             map.entry((row.get(0)?, row.get(1)?))
                 .or_insert_with(Vec::new)
                 .push(row.get(2)?);
+        }
+        Ok(map)
+    }
+
+    pub(crate) fn all_notes_by_type_checksum_and_deck(
+        &self,
+    ) -> Result<HashMap<(NotetypeId, u32, DeckId), Vec<NoteId>>> {
+        let mut map = HashMap::new();
+        let mut stmt = self
+            .db
+            .prepare(include_str!("notes_types_checksums_decks.sql"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            map.entry((row.get(1)?, row.get(2)?, row.get(3)?))
+                .or_insert_with(Vec::new)
+                .push(row.get(0)?);
         }
         Ok(map)
     }

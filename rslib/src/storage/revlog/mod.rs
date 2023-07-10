@@ -3,19 +3,17 @@
 
 use std::convert::TryFrom;
 
-use rusqlite::{
-    params,
-    types::{FromSql, FromSqlError, ValueRef},
-    Row,
-};
+use rusqlite::params;
+use rusqlite::types::FromSql;
+use rusqlite::types::FromSqlError;
+use rusqlite::types::ValueRef;
+use rusqlite::Row;
 
 use super::SqliteStorage;
-use crate::{
-    error::Result,
-    pb,
-    prelude::*,
-    revlog::{RevlogEntry, RevlogReviewKind},
-};
+use crate::error::Result;
+use crate::prelude::*;
+use crate::revlog::RevlogEntry;
+use crate::revlog::RevlogReviewKind;
 
 pub(crate) struct StudiedToday {
     pub cards: u32,
@@ -61,8 +59,8 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Adds the entry, if its id is unique. If it is not, and `uniquify` is true,
-    /// adds it with a new id. Returns the added id.
+    /// Adds the entry, if its id is unique. If it is not, and `uniquify` is
+    /// true, adds it with a new id. Returns the added id.
     /// (I.e., the option is safe to unwrap, if `uniquify` is true.)
     pub(crate) fn add_revlog_entry(
         &self,
@@ -95,7 +93,8 @@ impl SqliteStorage {
             .transpose()
     }
 
-    /// Only intended to be used by the undo code, as Anki can not sync revlog deletions.
+    /// Only intended to be used by the undo code, as Anki can not sync revlog
+    /// deletions.
     pub(crate) fn remove_revlog_entry(&self, id: RevlogId) -> Result<()> {
         self.db
             .prepare_cached("delete from revlog where id = ?")?
@@ -110,16 +109,16 @@ impl SqliteStorage {
             .collect()
     }
 
-    pub(crate) fn get_pb_revlog_entries_for_searched_cards(
+    pub(crate) fn get_revlog_entries_for_searched_cards_after_stamp(
         &self,
         after: TimestampSecs,
-    ) -> Result<Vec<pb::RevlogEntry>> {
+    ) -> Result<Vec<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(
                 include_str!("get.sql"),
                 " where cid in (select cid from search_cids) and id >= ?"
             ))?
-            .query_and_then([after.0 * 1000], |r| row_to_revlog_entry(r).map(Into::into))?
+            .query_and_then([after.0 * 1000], row_to_revlog_entry)?
             .collect()
     }
 
@@ -133,11 +132,7 @@ impl SqliteStorage {
             .collect()
     }
 
-    /// This includes entries from deleted cards.
-    pub(crate) fn get_all_revlog_entries(
-        &self,
-        after: TimestampSecs,
-    ) -> Result<Vec<pb::RevlogEntry>> {
+    pub(crate) fn get_all_revlog_entries(&self, after: TimestampSecs) -> Result<Vec<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where id >= ?"))?
             .query_and_then([after.0 * 1000], |r| row_to_revlog_entry(r).map(Into::into))?

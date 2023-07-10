@@ -4,12 +4,11 @@
 use std::collections::HashMap;
 
 use super::timing::local_minutes_west_for_stamp;
-use crate::{
-    card::{CardQueue, CardType},
-    config::SchedulerVersion,
-    prelude::*,
-    search::SortMode,
-};
+use crate::card::CardQueue;
+use crate::card::CardType;
+use crate::config::SchedulerVersion;
+use crate::prelude::*;
+use crate::search::SortMode;
 
 struct V1FilteredDeckInfo {
     /// True if the filtered deck had rescheduling enabled.
@@ -122,7 +121,7 @@ impl Collection {
         // enable new timezone code by default
         let created = self.storage.creation_stamp()?;
         if self.get_creation_utc_offset().is_none() {
-            self.set_creation_utc_offset(Some(local_minutes_west_for_stamp(created.0)))?;
+            self.set_creation_utc_offset(Some(local_minutes_west_for_stamp(created)?))?;
         }
 
         // force full sync

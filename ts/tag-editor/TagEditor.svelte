@@ -3,13 +3,14 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import { createEventDispatcher, tick } from "svelte";
+    import { createEventDispatcher, setContext, tick } from "svelte";
     import type { Writable } from "svelte/store";
     import { writable } from "svelte/store";
-
+    import { completeTag } from "@tslib/backend";
+    import Shortcut from "../components/Shortcut.svelte";
     import { execCommand } from "../domlib";
-    import { isArrowDown, isArrowUp } from "../lib/keys";
-    import { Tags, tags as tagsService } from "../lib/proto";
+    import { tagActionsShortcutsKey } from "@tslib/context-keys";
+    import { isArrowDown, isArrowUp } from "@tslib/keys";
     import { TagOptionsButton } from "./tag-options-button";
     import TagEditMode from "./TagEditMode.svelte";
     import TagInput from "./TagInput.svelte";
@@ -25,6 +26,15 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     export let tags: Writable<string[]>;
     export let keyCombination: string = "Control+Shift+T";
+
+    const selectAllShortcut = "Control+A";
+    const copyShortcut = "Control+C";
+    const removeShortcut = "Backspace";
+    setContext(tagActionsShortcutsKey, {
+        selectAllShortcut,
+        copyShortcut,
+        removeShortcut,
+    });
 
     let tagTypes: TagType[];
     function tagsToTagTypes(tags: string[]): void {
@@ -56,9 +66,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     let autocompleteDisabled: boolean = false;
 
     async function fetchSuggestions(input: string): Promise<string[]> {
-        const { tags } = await tagsService.completeTag(
-            Tags.CompleteTagRequest.create({ input, matchLimit: 500 }),
-        );
+        const { tags } = await completeTag({ input, matchLimit: 500 });
         return tags;
     }
 
@@ -66,7 +74,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     function updateSuggestions(): void {
         const activeTag = tagTypes[active!];
-        const activeName = activeTag.name;
+        const activeName = activeTag!.name;
 
         autocompleteDisabled = activeName.length === 0;
 
@@ -111,7 +119,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
     }
 
-    function appendEmptyTag(): void {
+    export function appendEmptyTag(): void {
         // used by tag badge and tag spacer
         deselect();
         const lastTag = tagTypes[tagTypes.length - 1];
@@ -382,6 +390,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     $: anyTagsSelected = tagTypes.some((tag) => tag.selected);
 </script>
 
+{#if anyTagsSelected}
+    <Shortcut keyCombination={selectAllShortcut} on:action={selectAllTags} />
+    <Shortcut keyCombination={copyShortcut} on:action={copySelectedTags} />
+    <Shortcut keyCombination={removeShortcut} on:action={deleteSelectedTags} />
+{/if}
+
 <div class="tag-editor" on:focusout={deselectIfLeave} bind:offsetHeight={height}>
     <TagOptionsButton
         bind:badgeHeight
@@ -391,6 +405,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         on:tagdelete={deleteSelectedTags}
         on:tagappend={appendEmptyTag}
         {keyCombination}
+        --icon-align="baseline"
     />
 
     {#each tagTypes as tag, index (tag.id)}
@@ -435,6 +450,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                         bind:name={activeName}
                         bind:input={activeInput}
                         on:focus={() => {
+                            dispatch("tagsFocused");
                             activeName = tag.name;
                             autocomplete = createAutocomplete();
                         }}
@@ -485,8 +501,19 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <style lang="scss">
     .tag-editor {
         display: flex;
+        flex-grow: 1;
         flex-flow: row wrap;
         align-items: flex-end;
+        background: var(--canvas-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--border-radius);
+        padding: 6px;
+        margin: 1px;
+
+        &:focus-within {
+            outline-offset: -1px;
+            outline: 2px solid var(--border-focus);
+        }
     }
 
     .tag-relative {
@@ -495,6 +522,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     .hide-tag :global(.tag) {
-        opacity: 0;
+        visibility: hidden;
     }
 </style>

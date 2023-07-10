@@ -1,18 +1,20 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
+use std::collections::HashMap;
 
-use super::{CardTemplate, Notetype, NotetypeKind};
-use crate::{
-    card::{Card, CardId},
-    collection::Collection,
-    error::{AnkiError, Result},
-    i18n::I18n,
-    notes::{Note, NoteId},
-    template::{field_is_empty, render_card, ParsedTemplate, RenderedNode},
-};
+use super::CardTemplate;
+use super::Notetype;
+use super::NotetypeKind;
+use crate::prelude::*;
+use crate::template::field_is_empty;
+use crate::template::render_card;
+use crate::template::ParsedTemplate;
+use crate::template::RenderCardRequest;
+use crate::template::RenderedNode;
 
+#[derive(Debug)]
 pub struct RenderCardOutput {
     pub qnodes: Vec<RenderedNode>,
     pub anodes: Vec<RenderedNode>,
@@ -20,49 +22,70 @@ pub struct RenderCardOutput {
     pub latex_svg: bool,
 }
 
+impl RenderCardOutput {
+    /// The question text. This is only valid to call when partial_render=false.
+    pub fn question(&self) -> Cow<str> {
+        match self.qnodes.as_slice() {
+            [RenderedNode::Text { text }] => text.into(),
+            _ => "not fully rendered".into(),
+        }
+    }
+
+    /// The answer text. This is only valid to call when partial_render=false.
+    pub fn answer(&self) -> Cow<str> {
+        match self.anodes.as_slice() {
+            [RenderedNode::Text { text }] => text.into(),
+            _ => "not fully rendered".into(),
+        }
+    }
+}
+
 impl Collection {
     /// Render an existing card saved in the database.
-    pub fn render_existing_card(&mut self, cid: CardId, browser: bool) -> Result<RenderCardOutput> {
-        let card = self
-            .storage
-            .get_card(cid)?
-            .ok_or_else(|| AnkiError::invalid_input("no such card"))?;
+    pub fn render_existing_card(
+        &mut self,
+        cid: CardId,
+        browser: bool,
+        partial_render: bool,
+    ) -> Result<RenderCardOutput> {
+        let card = self.storage.get_card(cid)?.or_invalid("no such card")?;
         let note = self
             .storage
             .get_note(card.note_id)?
-            .ok_or_else(|| AnkiError::invalid_input("no such note"))?;
+            .or_invalid("no such note")?;
         let nt = self
             .get_notetype(note.notetype_id)?
-            .ok_or_else(|| AnkiError::invalid_input("no such notetype"))?;
+            .or_invalid("no such notetype")?;
         let template = match nt.config.kind() {
             NotetypeKind::Normal => nt.templates.get(card.template_idx as usize),
             NotetypeKind::Cloze => nt.templates.get(0),
         }
-        .ok_or_else(|| AnkiError::invalid_input("missing template"))?;
+        .or_invalid("missing template")?;
 
-        self.render_card(&note, &card, &nt, template, browser)
+        self.render_card(&note, &card, &nt, template, browser, partial_render)
     }
 
     /// Render a card that may not yet have been added.
-    /// The provided ordinal will be used if the template has not yet been saved.
-    /// If fill_empty is set, note will be mutated.
+    /// The provided ordinal will be used if the template has not yet been
+    /// saved. If fill_empty is set, note will be mutated.
     pub fn render_uncommitted_card(
         &mut self,
         note: &mut Note,
         template: &CardTemplate,
         card_ord: u16,
         fill_empty: bool,
+        partial_render: bool,
     ) -> Result<RenderCardOutput> {
         let card = self.existing_or_synthesized_card(note.id, template.ord, card_ord)?;
         let nt = self
             .get_notetype(note.notetype_id)?
-            .ok_or_else(|| AnkiError::invalid_input("no such notetype"))?;
+            .or_invalid("no such notetype")?;
 
         if fill_empty {
             fill_empty_fields(note, &template.config.q_format, &nt, &self.tr);
         }
 
-        self.render_card(note, &card, &nt, template, false)
+        self.render_card(note, &card, &nt, template, false, partial_render)
     }
 
     fn existing_or_synthesized_card(
@@ -92,6 +115,7 @@ impl Collection {
         nt: &Notetype,
         template: &CardTemplate,
         browser: bool,
+        partial_render: bool,
     ) -> Result<RenderCardOutput> {
         let mut field_map = note.fields_map(&nt.fields);
 
@@ -112,15 +136,16 @@ impl Collection {
             )
         };
 
-        let (qnodes, anodes) = render_card(
+        let (qnodes, anodes) = render_card(RenderCardRequest {
             qfmt,
             afmt,
-            &field_map,
-            card.template_idx,
-            nt.is_cloze(),
+            field_map: &field_map,
+            card_ord: card.template_idx,
+            is_cloze: nt.is_cloze(),
             browser,
-            &self.tr,
-        )?;
+            tr: &self.tr,
+            partial_render,
+        })?;
         Ok(RenderCardOutput {
             qnodes,
             anodes,
@@ -178,5 +203,32 @@ fn fill_empty_fields(note: &mut Note, qfmt: &str, nt: &Notetype, tr: &I18n) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::collection::CollectionBuilder;
+
+    #[test]
+    fn can_render_fully() -> Result<()> {
+        let mut col = CollectionBuilder::default().build()?;
+        let nt = col.get_notetype_by_name("Basic")?.unwrap();
+        let mut note = Note::new(&nt);
+        note.set_field(0, "front")?;
+        note.set_field(1, "back")?;
+        let out: RenderCardOutput =
+            col.render_uncommitted_card(&mut note, &nt.templates[0], 0, false, false)?;
+        assert_eq!(&out.question(), "front");
+        assert_eq!(&out.answer(), "front\n\n<hr id=answer>\n\nback");
+
+        // should work even if unknown filters are encountered
+        let mut tmpl = nt.templates[0].clone();
+        tmpl.config.q_format = "{{some_filter:Front}}{{another_filter:}}".into();
+        let out = col.render_uncommitted_card(&mut note, &nt.templates[0], 0, false, false)?;
+        assert_eq!(&out.question(), "front");
+
+        Ok(())
     }
 }

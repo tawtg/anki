@@ -2,25 +2,35 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 pub mod backup;
+mod service;
 pub(crate) mod timestamps;
 mod transact;
 pub(crate) mod undo;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::fmt::Formatter;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use crate::{
-    browser_table,
-    decks::{Deck, DeckId},
-    error::Result,
-    i18n::I18n,
-    log::{default_logger, Logger},
-    notetype::{Notetype, NotetypeId},
-    scheduler::{queue::CardQueues, SchedulerInfo},
-    storage::{SchemaVersion, SqliteStorage},
-    timestamp::TimestampMillis,
-    types::Usn,
-    undo::UndoManager,
-};
+use anki_i18n::I18n;
+use anki_io::create_dir_all;
+
+use crate::browser_table;
+use crate::decks::Deck;
+use crate::decks::DeckId;
+use crate::error::Result;
+use crate::notetype::Notetype;
+use crate::notetype::NotetypeId;
+use crate::progress::ProgressState;
+use crate::scheduler::queue::CardQueues;
+use crate::scheduler::SchedulerInfo;
+use crate::storage::SchemaVersion;
+use crate::storage::SqliteStorage;
+use crate::timestamp::TimestampMillis;
+use crate::types::Usn;
+use crate::undo::UndoManager;
 
 #[derive(Default)]
 pub struct CollectionBuilder {
@@ -29,7 +39,10 @@ pub struct CollectionBuilder {
     media_db: Option<PathBuf>,
     server: Option<bool>,
     tr: Option<I18n>,
-    log: Option<Logger>,
+    check_integrity: bool,
+    // temporary option for AnkiDroid
+    force_schema11: Option<bool>,
+    progress_handler: Option<Arc<Mutex<ProgressState>>>,
 }
 
 impl CollectionBuilder {
@@ -41,7 +54,7 @@ impl CollectionBuilder {
         builder
     }
 
-    pub fn build(&self) -> Result<Collection> {
+    pub fn build(&mut self) -> Result<Collection> {
         let col_path = self
             .collection_path
             .clone()
@@ -50,18 +63,25 @@ impl CollectionBuilder {
         let server = self.server.unwrap_or_default();
         let media_folder = self.media_folder.clone().unwrap_or_default();
         let media_db = self.media_db.clone().unwrap_or_default();
-        let log = self.log.clone().unwrap_or_else(crate::log::terminal);
-
-        let storage = SqliteStorage::open_or_create(&col_path, &tr, server)?;
+        let force_schema11 = self.force_schema11.unwrap_or_default();
+        let storage = SqliteStorage::open_or_create(
+            &col_path,
+            &tr,
+            server,
+            self.check_integrity,
+            force_schema11,
+        )?;
         let col = Collection {
             storage,
             col_path,
             media_folder,
             media_db,
             tr,
-            log,
             server,
-            state: CollectionState::default(),
+            state: CollectionState {
+                progress: self.progress_handler.clone().unwrap_or_default(),
+                ..Default::default()
+            },
         };
 
         Ok(col)
@@ -78,6 +98,17 @@ impl CollectionBuilder {
         self
     }
 
+    /// For a `foo.anki2` file, use `foo.media` and `foo.mdb`. Mobile clients
+    /// use different paths, so the backend must continue to use
+    /// [set_media_paths].
+    pub fn with_desktop_media_paths(&mut self) -> &mut Self {
+        let col_path = self.collection_path.as_ref().unwrap();
+        let media_folder = col_path.with_extension("media");
+        create_dir_all(&media_folder).expect("creating media folder");
+        let media_db = col_path.with_extension("mdb");
+        self.set_media_paths(media_folder, media_db)
+    }
+
     pub fn set_server(&mut self, server: bool) -> &mut Self {
         self.server = Some(server);
         self
@@ -88,22 +119,22 @@ impl CollectionBuilder {
         self
     }
 
-    /// Directly set the logger.
-    pub fn set_logger(&mut self, log: Logger) -> &mut Self {
-        self.log = Some(log);
+    pub fn set_force_schema11(&mut self, force: bool) -> &mut Self {
+        self.force_schema11 = Some(force);
         self
     }
 
-    /// Log to the provided file.
-    pub fn set_log_file(&mut self, log_file: &str) -> Result<&mut Self, std::io::Error> {
-        self.set_logger(default_logger(Some(log_file))?);
-        Ok(self)
+    pub fn set_check_integrity(&mut self, check_integrity: bool) -> &mut Self {
+        self.check_integrity = check_integrity;
+        self
     }
-}
 
-#[cfg(test)]
-pub fn open_test_collection() -> Collection {
-    CollectionBuilder::default().build().unwrap()
+    /// If provided, progress info will be written to the provided mutex, and
+    /// can be tracked on a separate thread.
+    pub fn set_shared_progress_state(&mut self, state: Arc<Mutex<ProgressState>>) -> &mut Self {
+        self.progress_handler = Some(state);
+        self
+    }
 }
 
 #[derive(Debug, Default)]
@@ -120,18 +151,25 @@ pub struct CollectionState {
     /// The modification time at the last backup, so we don't create multiple
     /// identical backups.
     pub(crate) last_backup_modified: Option<TimestampMillis>,
+    pub(crate) progress: Arc<Mutex<ProgressState>>,
 }
 
 pub struct Collection {
-    pub(crate) storage: SqliteStorage,
-    #[allow(dead_code)]
+    pub storage: SqliteStorage,
     pub(crate) col_path: PathBuf,
     pub(crate) media_folder: PathBuf,
     pub(crate) media_db: PathBuf,
     pub(crate) tr: I18n,
-    pub(crate) log: Logger,
     pub(crate) server: bool,
     pub(crate) state: CollectionState,
+}
+
+impl Debug for Collection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Collection")
+            .field("col_path", &self.col_path)
+            .finish()
+    }
 }
 
 impl Collection {
@@ -141,16 +179,23 @@ impl Collection {
             .set_media_paths(self.media_folder.clone(), self.media_db.clone())
             .set_server(self.server)
             .set_tr(self.tr.clone())
-            .set_logger(self.log.clone());
+            .set_shared_progress_state(self.state.progress.clone());
         builder
     }
 
-    pub(crate) fn close(self, desired_version: Option<SchemaVersion>) -> Result<()> {
+    // A count of all changed rows since the collection was opened, which can be
+    // used to detect if the collection was modified or not.
+    pub fn changes_since_open(&self) -> u64 {
+        self.storage.db.changes()
+    }
+
+    pub fn close(self, desired_version: Option<SchemaVersion>) -> Result<()> {
         self.storage.close(desired_version)
     }
 
     pub(crate) fn usn(&self) -> Result<Usn> {
-        // if we cache this in the future, must make sure to invalidate cache when usn bumped in sync.finish()
+        // if we cache this in the future, must make sure to invalidate cache when usn
+        // bumped in sync.finish()
         self.storage.usn(self.server)
     }
 
@@ -176,5 +221,9 @@ impl Collection {
     pub(crate) fn clear_caches(&mut self) {
         self.state.deck_cache.clear();
         self.state.notetype_cache.clear();
+    }
+
+    pub fn tr(&self) -> &I18n {
+        &self.tr
     }
 }

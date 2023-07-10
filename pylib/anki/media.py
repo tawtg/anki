@@ -30,7 +30,6 @@ CheckMediaResponse = media_pb2.CheckMediaResponse
 
 
 class MediaManager(DeprecatedNamesMixin):
-
     sound_regexps = [r"(?i)(\[sound:(?P<fname>[^]]+)\])"]
     html_media_regexps = [
         # src element quoted case
@@ -102,14 +101,21 @@ class MediaManager(DeprecatedNamesMixin):
         return self.col._backend.add_media_file(desired_name=desired_fname, data=data)
 
     def add_extension_based_on_mime(self, fname: str, content_type: str) -> str:
-        "If jpg or png mime, add .png/.jpg if missing extension."
+        "Add extension based on mime for common audio and image format if missing extension."
         if not os.path.splitext(fname)[1]:
             # mimetypes is returning '.jpe' even after calling .init(), so we'll do
             # it manually instead
             type_map = {
+                "audio/mpeg": ".mp3",
+                "audio/ogg": ".oga",
+                "audio/opus": ".opus",
+                "audio/wav": ".wav",
+                "audio/webm": ".weba",
+                "audio/aac": ".aac",
                 "image/jpeg": ".jpg",
                 "image/png": ".png",
                 "image/svg+xml": ".svg",
+                "image/webp": ".webp",
             }
             if content_type in type_map:
                 fname += type_map[content_type]
@@ -186,10 +192,9 @@ class MediaManager(DeprecatedNamesMixin):
         """
         last_progress = time.time()
         checked = 0
-        for (nid, mid, flds) in self.col.db.execute(
+        for nid, mid, flds in self.col.db.execute(
             "select id, mid, flds from notes where flds like '%[%'"
         ):
-
             model = self.col.models.get(mid)
             _html, errors = render_latex_returning_errors(
                 flds, model, self.col, expand_clozes=True

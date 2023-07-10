@@ -4,23 +4,28 @@
 use std::sync::Arc;
 
 use itertools::Itertools;
-use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
+use strum::Display;
+use strum::EnumIter;
+use strum::EnumString;
+use strum::IntoEnumIterator;
 
-use crate::{
-    card::{CardQueue, CardType},
-    card_rendering::prettify_av_tags,
-    notetype::{CardTemplate, NotetypeKind},
-    pb,
-    prelude::*,
-    scheduler::{timespan::time_span, timing::SchedTimingToday},
-    template::RenderedNode,
-    text::html_to_text_line,
-};
+use crate::card::CardQueue;
+use crate::card::CardType;
+use crate::card_rendering::prettify_av_tags;
+use crate::notetype::CardTemplate;
+use crate::notetype::NotetypeKind;
+use crate::prelude::*;
+use crate::scheduler::timespan::time_span;
+use crate::scheduler::timing::SchedTimingToday;
+use crate::template::RenderedNode;
+use crate::text::html_to_text_line;
 
-#[derive(Debug, PartialEq, Clone, Copy, Display, EnumIter, EnumString)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Display, EnumIter, EnumString)]
 #[strum(serialize_all = "camelCase")]
+#[derive(Default)]
 pub enum Column {
     #[strum(serialize = "")]
+    #[default]
     Custom,
     Answer,
     CardMod,
@@ -47,12 +52,6 @@ pub enum Column {
     SortField,
     #[strum(serialize = "noteTags")]
     Tags,
-}
-
-impl Default for Column {
-    fn default() -> Self {
-        Column::Custom
-    }
 }
 
 struct RowContext {
@@ -182,8 +181,8 @@ impl Column {
         .into()
     }
 
-    pub fn default_order(self) -> pb::browser_columns::Sorting {
-        use pb::browser_columns::Sorting;
+    pub fn default_order(self) -> anki_proto::search::browser_columns::Sorting {
+        use anki_proto::search::browser_columns::Sorting;
         match self {
             Column::Question | Column::Answer | Column::Custom => Sorting::None,
             Column::SortField | Column::Tags | Column::Notetype | Column::Deck => {
@@ -205,8 +204,8 @@ impl Column {
         matches!(self, Self::Question | Self::Answer | Self::SortField)
     }
 
-    pub fn alignment(self) -> pb::browser_columns::Alignment {
-        use pb::browser_columns::Alignment;
+    pub fn alignment(self) -> anki_proto::search::browser_columns::Alignment {
+        use anki_proto::search::browser_columns::Alignment;
         match self {
             Self::Question
             | Self::Answer
@@ -221,36 +220,36 @@ impl Column {
 }
 
 impl Collection {
-    pub fn all_browser_columns(&self) -> pb::BrowserColumns {
-        let mut columns: Vec<pb::browser_columns::Column> = Column::iter()
+    pub fn all_browser_columns(&self) -> anki_proto::search::BrowserColumns {
+        let mut columns: Vec<anki_proto::search::browser_columns::Column> = Column::iter()
             .filter(|&c| c != Column::Custom)
             .map(|c| c.to_pb_column(&self.tr))
             .collect();
         columns.sort_by(|c1, c2| c1.cards_mode_label.cmp(&c2.cards_mode_label));
-        pb::BrowserColumns { columns }
+        anki_proto::search::BrowserColumns { columns }
     }
 
-    pub fn browser_row_for_id(&mut self, id: i64) -> Result<pb::BrowserRow> {
+    pub fn browser_row_for_id(&mut self, id: i64) -> Result<anki_proto::search::BrowserRow> {
         let notes_mode = self.get_config_bool(BoolKey::BrowserTableShowNotesMode);
         let columns = Arc::clone(
             self.state
                 .active_browser_columns
                 .as_ref()
-                .ok_or_else(|| AnkiError::invalid_input("Active browser columns not set."))?,
+                .or_invalid("Active browser columns not set.")?,
         );
         RowContext::new(self, id, notes_mode, card_render_required(&columns))?.browser_row(&columns)
     }
 
     fn get_note_maybe_with_fields(&self, id: NoteId, _with_fields: bool) -> Result<Note> {
-        // todo: After note.sort_field has been modified so it can be displayed in the browser,
-        // we can update note_field_str() and only load the note with fields if a card render is
-        // necessary (see #1082).
+        // todo: After note.sort_field has been modified so it can be displayed in the
+        // browser, we can update note_field_str() and only load the note with
+        // fields if a card render is necessary (see #1082).
         if true {
             self.storage.get_note(id)?
         } else {
             self.storage.get_note_without_fields(id)?
         }
-        .ok_or(AnkiError::NotFound)
+        .or_not_found(id)
     }
 }
 
@@ -258,13 +257,13 @@ impl RenderContext {
     fn new(col: &mut Collection, card: &Card, note: &Note, notetype: &Notetype) -> Self {
         match notetype
             .get_template(card.template_idx)
-            .and_then(|template| col.render_card(note, card, notetype, template, true))
+            .and_then(|template| col.render_card(note, card, notetype, template, true, true))
         {
             Ok(render) => RenderContext::Ok {
                 question: rendered_nodes_to_str(&render.qnodes),
                 answer_nodes: render.anodes,
             },
-            Err(err) => RenderContext::Err(err.localized_description(&col.tr)),
+            Err(err) => RenderContext::Err(err.message(&col.tr)),
         }
     }
 
@@ -312,12 +311,9 @@ impl RowContext {
         if notes_mode {
             note = col
                 .get_note_maybe_with_fields(NoteId(id), with_card_render)
-                .map_err(|e| {
-                    if e == AnkiError::NotFound {
-                        AnkiError::Deleted
-                    } else {
-                        e
-                    }
+                .map_err(|e| match e {
+                    AnkiError::NotFound { .. } => AnkiError::Deleted,
+                    _ => e,
                 })?;
             cards = col.storage.all_cards_of_note(note.id)?;
             if cards.is_empty() {
@@ -332,12 +328,14 @@ impl RowContext {
         }
         let notetype = col
             .get_notetype(note.notetype_id)?
-            .ok_or(AnkiError::NotFound)?;
-        let deck = col.get_deck(cards[0].deck_id)?.ok_or(AnkiError::NotFound)?;
+            .or_not_found(note.notetype_id)?;
+        let deck = col
+            .get_deck(cards[0].deck_id)?
+            .or_not_found(cards[0].deck_id)?;
         let original_deck = if cards[0].original_deck_id.0 != 0 {
             Some(
                 col.get_deck(cards[0].original_deck_id)?
-                    .ok_or(AnkiError::NotFound)?,
+                    .or_not_found(cards[0].original_deck_id)?,
             )
         } else {
             None
@@ -362,8 +360,8 @@ impl RowContext {
         })
     }
 
-    fn browser_row(&self, columns: &[Column]) -> Result<pb::BrowserRow> {
-        Ok(pb::BrowserRow {
+    fn browser_row(&self, columns: &[Column]) -> Result<anki_proto::search::BrowserRow> {
+        Ok(anki_proto::search::BrowserRow {
             cells: columns
                 .iter()
                 .map(|&column| self.get_cell(column))
@@ -374,8 +372,8 @@ impl RowContext {
         })
     }
 
-    fn get_cell(&self, column: Column) -> Result<pb::browser_row::Cell> {
-        Ok(pb::browser_row::Cell {
+    fn get_cell(&self, column: Column) -> Result<anki_proto::search::browser_row::Cell> {
+        Ok(anki_proto::search::browser_row::Cell {
             text: self.get_cell_text(column)?,
             is_rtl: self.get_is_rtl(column),
         })
@@ -395,7 +393,7 @@ impl RowContext {
             Column::Cards => self.cards_str()?,
             Column::NoteCreation => self.note_creation_str(),
             Column::SortField => self.note_field_str(),
-            Column::NoteMod => self.note.mtime.date_string(),
+            Column::NoteMod => self.note.mtime.date_and_time_string(),
             Column::Tags => self.note.tags.join(" "),
             Column::Notetype => self.notetype.name.to_owned(),
             Column::Custom => "".to_string(),
@@ -403,7 +401,9 @@ impl RowContext {
     }
 
     fn note_creation_str(&self) -> String {
-        TimestampMillis(self.note.id.into()).as_secs().date_string()
+        TimestampMillis(self.note.id.into())
+            .as_secs()
+            .date_and_time_string()
     }
 
     fn note_field_str(&self) -> String {
@@ -450,8 +450,9 @@ impl RowContext {
         }
     }
 
-    /// Returns the due date of the next due card that is not in a filtered deck, new, suspended or
-    /// buried or the empty string if there is no such card.
+    /// Returns the due date of the next due card that is not in a filtered
+    /// deck, new, suspended or buried or the empty string if there is no
+    /// such card.
     fn note_due_str(&self) -> String {
         self.cards
             .iter()
@@ -462,7 +463,8 @@ impl RowContext {
             .unwrap_or_else(|| "".into())
     }
 
-    /// Returns the average ease of the non-new cards or a hint if there aren't any.
+    /// Returns the average ease of the non-new cards or a hint if there aren't
+    /// any.
     fn ease_str(&self) -> String {
         let eases: Vec<u16> = self
             .cards
@@ -477,7 +479,8 @@ impl RowContext {
         }
     }
 
-    /// Returns the average interval of the review and relearn cards if there are any.
+    /// Returns the average interval of the review and relearn cards if there
+    /// are any.
     fn interval_str(&self) -> String {
         if !self.notes_mode {
             match self.cards[0].ctype {
@@ -509,7 +512,7 @@ impl RowContext {
             .map(|c| c.mtime)
             .max()
             .expect("cards missing from RowContext")
-            .date_string()
+            .date_and_time_string()
     }
 
     fn deck_str(&self) -> String {
@@ -547,8 +550,8 @@ impl RowContext {
         Ok(self.template()?.config.browser_font_size)
     }
 
-    fn get_row_color(&self) -> pb::browser_row::Color {
-        use pb::browser_row::Color;
+    fn get_row_color(&self) -> anki_proto::search::browser_row::Color {
+        use anki_proto::search::browser_row::Color;
         if self.notes_mode {
             if self.note.is_marked() {
                 Color::Marked
@@ -567,10 +570,12 @@ impl RowContext {
                 _ => {
                     if self.note.is_marked() {
                         Color::Marked
-                    } else if self.cards[0].queue == CardQueue::Suspended {
-                        Color::Suspended
                     } else {
-                        Color::Default
+                        match self.cards[0].queue {
+                            CardQueue::Suspended => Color::Suspended,
+                            CardQueue::UserBuried | CardQueue::SchedBuried => Color::Buried,
+                            _ => Color::Default,
+                        }
                     }
                 }
             }

@@ -1,20 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
+use anki_io::filename_is_safe;
 use itertools::Itertools;
 
-use super::{ExportProgress, IncrementableProgress};
-use crate::{
-    decks::immediate_parent_name,
-    io::filename_is_safe,
-    latex::extract_latex,
-    prelude::*,
-    revlog::RevlogEntry,
-    search::{CardTableGuard, NoteTableGuard},
-    text::{extract_media_refs, extract_underscored_css_imports, extract_underscored_references},
-};
+use super::ExportProgress;
+use crate::decks::immediate_parent_name;
+use crate::latex::extract_latex;
+use crate::prelude::*;
+use crate::progress::ThrottlingProgressHandler;
+use crate::revlog::RevlogEntry;
+use crate::search::CardTableGuard;
+use crate::search::NoteTableGuard;
+use crate::text::extract_media_refs;
+use crate::text::extract_underscored_css_imports;
+use crate::text::extract_underscored_references;
 
 #[derive(Debug, Default)]
 pub(super) struct ExchangeData {
@@ -58,7 +61,7 @@ impl ExchangeData {
 
     pub(super) fn gather_media_names(
         &mut self,
-        progress: &mut IncrementableProgress<ExportProgress>,
+        progress: &mut ThrottlingProgressHandler<ExportProgress>,
     ) -> Result<()> {
         let mut inserter = |name: String| {
             if filename_is_safe(&name) {
@@ -123,15 +126,19 @@ impl ExchangeData {
     }
 
     fn check_ids(&self) -> Result<()> {
-        let now = TimestampMillis::now().0;
-        self.cards
+        let tomorrow = TimestampMillis::now().adding_secs(86_400).0;
+        if self
+            .cards
             .iter()
             .map(|card| card.id.0)
             .chain(self.notes.iter().map(|note| note.id.0))
             .chain(self.revlog.iter().map(|entry| entry.id.0))
-            .any(|timestamp| timestamp > now)
-            .then(|| Err(AnkiError::InvalidId))
-            .unwrap_or(Ok(()))
+            .any(|timestamp| timestamp > tomorrow)
+        {
+            Err(AnkiError::InvalidId)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -193,8 +200,8 @@ impl Collection {
 
     /// If with_scheduling, also gather all original decks of cards in filtered
     /// decks, so they don't have to be converted to regular decks on import.
-    /// If not with_scheduling, skip exporting the default deck to avoid changing
-    /// the importing client's defaults.
+    /// If not with_scheduling, skip exporting the default deck to avoid
+    /// changing the importing client's defaults.
     fn gather_decks(&mut self, with_scheduling: bool) -> Result<Vec<Deck>> {
         let decks = if with_scheduling {
             self.storage.get_decks_and_original_for_search_cards()
@@ -254,7 +261,7 @@ impl Collection {
             .map(|config_id| {
                 self.storage
                     .get_deck_config(config_id)?
-                    .ok_or(AnkiError::NotFound)
+                    .or_not_found(config_id)
             })
             .collect()
     }
@@ -263,14 +270,14 @@ impl Collection {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, search::SearchNode};
+    use crate::search::SearchNode;
 
     #[test]
     fn should_gather_valid_notes() {
         let mut data = ExchangeData::default();
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
-        let note = col.add_new_note("Basic");
+        let note = NoteAdder::basic(&mut col).add(&mut col);
         data.gather_data(&mut col, SearchNode::WholeCollection, true)
             .unwrap();
 
@@ -280,10 +287,10 @@ mod test {
     #[test]
     fn should_err_if_note_has_invalid_id() {
         let mut data = ExchangeData::default();
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let now_micros = TimestampMillis::now().0 * 1000;
 
-        let mut note = col.add_new_note("Basic");
+        let mut note = NoteAdder::basic(&mut col).add(&mut col);
         note.id = NoteId(now_micros);
         col.add_note_only_with_id_undoable(&mut note).unwrap();
 

@@ -9,16 +9,19 @@ pub(crate) mod schema11;
 mod string;
 pub(crate) mod undo;
 
-use serde::{de::DeserializeOwned, Serialize};
-use serde_repr::{Deserialize_repr, Serialize_repr};
-use slog::warn;
+use anki_proto::config::preferences::BackupLimits;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_repr::Deserialize_repr;
+use serde_repr::Serialize_repr;
 use strum::IntoStaticStr;
 
-pub use self::{
-    bool::BoolKey, deck::DeckConfigKey, notetype::get_aux_notetype_config_key,
-    number::I32ConfigKey, string::StringKey,
-};
-use crate::{pb::preferences::BackupLimits, prelude::*};
+pub use self::bool::BoolKey;
+pub use self::deck::DeckConfigKey;
+pub use self::notetype::get_aux_notetype_config_key;
+pub use self::number::I32ConfigKey;
+pub use self::string::StringKey;
+use crate::prelude::*;
 
 /// Only used when updating/undoing.
 #[derive(Debug)]
@@ -67,7 +70,7 @@ pub(crate) enum ConfigKey {
     SchedulerVersion,
 }
 
-#[derive(PartialEq, Serialize_repr, Deserialize_repr, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Serialize_repr, Deserialize_repr, Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum SchedulerVersion {
     V1 = 1,
@@ -108,10 +111,8 @@ impl Collection {
         match self.storage.get_config_value(key) {
             Ok(Some(val)) => Some(val),
             Ok(None) => None,
-            Err(e) => {
-                warn!(self.log, "error accessing config key"; "key"=>key, "err"=>?e);
-                None
-            }
+            // If the key is missing or invalid, we use the default value.
+            Err(_) => None,
         }
     }
 
@@ -167,11 +168,13 @@ impl Collection {
         }
     }
 
-    pub(crate) fn get_configured_utc_offset(&self) -> Option<i32> {
+    /// In minutes west of UTC.
+    pub fn get_configured_utc_offset(&self) -> Option<i32> {
         self.get_config_optional(ConfigKey::LocalOffset)
     }
 
-    pub(crate) fn set_configured_utc_offset(&mut self, mins: i32) -> Result<()> {
+    /// In minutes west of UTC.
+    pub fn set_configured_utc_offset(&mut self, mins: i32) -> Result<()> {
         self.state.scheduler_info = None;
         self.set_config(ConfigKey::LocalOffset, &mins).map(|_| ())
     }
@@ -286,19 +289,15 @@ impl Collection {
 }
 
 // 2021 scheduler moves this into deck config
+#[derive(Default)]
 pub(crate) enum NewReviewMix {
+    #[default]
     Mix = 0,
     ReviewsFirst = 1,
     NewFirst = 2,
 }
 
-impl Default for NewReviewMix {
-    fn default() -> Self {
-        NewReviewMix::Mix
-    }
-}
-
-#[derive(PartialEq, Serialize_repr, Deserialize_repr, Clone, Copy)]
+#[derive(PartialEq, Eq, Serialize_repr, Deserialize_repr, Clone, Copy)]
 #[repr(u8)]
 pub(crate) enum Weekday {
     Sunday = 0,
@@ -309,17 +308,17 @@ pub(crate) enum Weekday {
 
 #[cfg(test)]
 mod test {
-    use crate::{collection::open_test_collection, decks::DeckId};
+    use super::*;
 
     #[test]
     fn defaults() {
-        let col = open_test_collection();
+        let col = Collection::new();
         assert_eq!(col.get_current_deck_id(), DeckId(1));
     }
 
     #[test]
     fn get_set() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         // missing key
         assert_eq!(col.get_config_optional::<Vec<i64>, _>("test"), None);
@@ -337,10 +336,7 @@ mod test {
         // invalid json
         col.storage
             .db
-            .execute(
-                "update config set val=? where key='test'",
-                &[b"xx".as_ref()],
-            )
+            .execute("update config set val=? where key='test'", [b"xx".as_ref()])
             .unwrap();
         assert_eq!(col.get_config_optional::<i64, _>("test"), None,);
     }

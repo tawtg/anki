@@ -1,30 +1,31 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    borrow::Cow,
-    fs, io,
-    io::Read,
-    path::{Path, PathBuf},
-    time,
-};
+use std::borrow::Cow;
+use std::fs;
+use std::io;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time;
 
+use anki_io::create_dir;
+use anki_io::open_file;
+use anki_io::write_file;
+use anki_io::FileIoError;
+use anki_io::FileIoSnafu;
+use anki_io::FileOp;
 use lazy_static::lazy_static;
 use regex::Regex;
+use sha1::Digest;
 use sha1::Sha1;
+use tracing::debug;
 use unic_ucd_category::GeneralCategory;
-use unicode_normalization::{is_nfc, UnicodeNormalization};
+use unicode_normalization::is_nfc;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::prelude::*;
-
-/// The maximum length we allow a filename to be. When combined
-/// with the rest of the path, the full path needs to be under ~240 chars
-/// on some platforms, and some filesystems like eCryptFS will increase
-/// the length of the filename.
-pub(super) static MAX_FILENAME_LENGTH: usize = 120;
-
-/// Media syncing does not support files over 100MiB.
-pub(super) static MEDIA_SYNC_FILESIZE_LIMIT: usize = 100 * 1024 * 1024;
+use crate::sync::media::MAX_MEDIA_FILENAME_LENGTH;
 
 lazy_static! {
     static ref WINDOWS_DEVICE_NAME: Regex = Regex::new(
@@ -51,7 +52,7 @@ lazy_static! {
             "#
     )
     .unwrap();
-    pub(super) static ref NONSYNCABLE_FILENAME: Regex = Regex::new(
+    pub(crate) static ref NONSYNCABLE_FILENAME: Regex = Regex::new(
         r#"(?xi)
             ^
             (:?
@@ -114,7 +115,7 @@ pub(crate) fn normalize_nfc_filename(mut fname: Cow<str>) -> Cow<str> {
         fname = format!("{}_", fname.as_ref()).into();
     }
 
-    if let Cow::Owned(o) = truncate_filename(fname.as_ref(), MAX_FILENAME_LENGTH) {
+    if let Cow::Owned(o) = truncate_filename(fname.as_ref(), MAX_MEDIA_FILENAME_LENGTH) {
         fname = o.into();
     }
 
@@ -155,14 +156,14 @@ pub(crate) fn filename_if_normalized(fname: &str) -> Option<Cow<str>> {
     }
 }
 
-/// Write desired_name into folder, renaming if existing file has different content.
-/// Returns the used filename.
+/// Write desired_name into folder, renaming if existing file has different
+/// content. Returns the used filename.
 pub fn add_data_to_folder_uniquely<'a, P>(
     folder: P,
     desired_name: &'a str,
     data: &[u8],
     sha1: Sha1Hash,
-) -> io::Result<Cow<'a, str>>
+) -> Result<Cow<'a, str>, FileIoError>
 where
     P: AsRef<Path>,
 {
@@ -173,7 +174,7 @@ where
     let existing_file_hash = existing_file_sha1(&target_path)?;
     if existing_file_hash.is_none() {
         // no file with that name exists yet
-        fs::write(&target_path, data)?;
+        write_file(&target_path, data)?;
         return Ok(normalized_name);
     }
 
@@ -186,14 +187,14 @@ where
     let hashed_name = add_hash_suffix_to_file_stem(normalized_name.as_ref(), &sha1);
     target_path.set_file_name(&hashed_name);
 
-    fs::write(&target_path, data)?;
+    write_file(&target_path, data)?;
     Ok(hashed_name.into())
 }
 
 /// Convert foo.jpg into foo-abcde12345679.jpg
 pub(crate) fn add_hash_suffix_to_file_stem(fname: &str, hash: &Sha1Hash) -> String {
     // when appending a hash to make unique, it will be 40 bytes plus the hyphen.
-    let max_len = MAX_FILENAME_LENGTH - 40 - 1;
+    let max_len = MAX_MEDIA_FILENAME_LENGTH - 40 - 1;
 
     let (stem, ext) = split_and_truncate_filename(fname, max_len);
 
@@ -251,7 +252,7 @@ fn split_and_truncate_filename(fname: &str, max_bytes: usize) -> (&str, &str) {
 }
 
 /// Return a substring on a valid UTF8 boundary.
-/// Based on a funtion in the Rust stdlib.
+/// Based on a function in the Rust stdlib.
 fn truncated_to_char_boundary(s: &str, mut max: usize) -> &str {
     if max >= s.len() {
         s
@@ -264,23 +265,21 @@ fn truncated_to_char_boundary(s: &str, mut max: usize) -> &str {
 }
 
 /// Return the SHA1 of a file if it exists, or None.
-fn existing_file_sha1(path: &Path) -> io::Result<Option<Sha1Hash>> {
+fn existing_file_sha1(path: &Path) -> Result<Option<Sha1Hash>, FileIoError> {
     match sha1_of_file(path) {
         Ok(o) => Ok(Some(o)),
-        Err(e) => {
-            if e.kind() == io::ErrorKind::NotFound {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        }
+        Err(e) if e.is_not_found() => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
 /// Return the SHA1 of a file, failing if it doesn't exist.
-pub(crate) fn sha1_of_file(path: &Path) -> io::Result<Sha1Hash> {
-    let mut file = fs::File::open(path)?;
-    sha1_of_reader(&mut file)
+pub(crate) fn sha1_of_file(path: &Path) -> Result<Sha1Hash, FileIoError> {
+    let mut file = open_file(path)?;
+    sha1_of_reader(&mut file).context(FileIoSnafu {
+        path,
+        op: FileOp::Read,
+    })
 }
 
 /// Return the SHA1 of a stream.
@@ -291,33 +290,28 @@ pub(crate) fn sha1_of_reader(reader: &mut impl Read) -> io::Result<Sha1Hash> {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => hasher.update(&buf[0..n]),
-            Err(e) => {
-                if e.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                } else {
-                    return Err(e);
-                }
-            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
         };
     }
-    Ok(hasher.digest().bytes())
+    Ok(hasher.finalize().into())
 }
 
 /// Return the SHA1 of provided data.
 pub(crate) fn sha1_of_data(data: &[u8]) -> Sha1Hash {
     let mut hasher = Sha1::new();
     hasher.update(data);
-    hasher.digest().bytes()
+    hasher.finalize().into()
 }
 
-pub(super) fn mtime_as_i64<P: AsRef<Path>>(path: P) -> io::Result<i64> {
+pub(crate) fn mtime_as_i64<P: AsRef<Path>>(path: P) -> io::Result<i64> {
     Ok(path
         .as_ref()
         .metadata()?
         .modified()?
         .duration_since(time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64)
+        .as_millis() as i64)
 }
 
 pub fn remove_files<S>(media_folder: &Path, files: &[S]) -> Result<()>
@@ -351,7 +345,13 @@ where
             .duration_since(time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        utime::set_file_times(&dst_path, secs, secs)?;
+        if let Err(err) = utime::set_file_times(&dst_path, secs, secs) {
+            // The libc utimes() call fails on (some? all?) Android devices. Since we don't
+            // do automatic expiry yet, we can safely ignore the error.
+            if !cfg!(target_os = "android") {
+                return Err(err.into());
+            }
+        }
     }
 
     Ok(())
@@ -359,10 +359,10 @@ where
 
 pub(super) fn trash_folder(media_folder: &Path) -> Result<PathBuf> {
     let trash_folder = media_folder.with_file_name("media.trash");
-    match fs::create_dir(&trash_folder) {
+    match create_dir(&trash_folder) {
         Ok(()) => Ok(trash_folder),
         Err(e) => {
-            if e.kind() == io::ErrorKind::AlreadyExists {
+            if e.source.kind() == io::ErrorKind::AlreadyExists {
                 Ok(trash_folder)
             } else {
                 Err(e.into())
@@ -371,7 +371,7 @@ pub(super) fn trash_folder(media_folder: &Path) -> Result<PathBuf> {
     }
 }
 
-pub(super) struct AddedFile {
+pub struct AddedFile {
     pub fname: String,
     pub sha1: Sha1Hash,
     pub mtime: i64,
@@ -382,11 +382,10 @@ pub(super) struct AddedFile {
 ///
 /// Because AnkiWeb did not previously enforce file name limits and invalid
 /// characters, we'll need to rename the file if it is not valid.
-pub(super) fn add_file_from_ankiweb(
+pub(crate) fn add_file_from_ankiweb(
     media_folder: &Path,
     fname: &str,
     data: &[u8],
-    log: &Logger,
 ) -> Result<AddedFile> {
     let sha1 = sha1_of_data(data);
     let normalized = normalize_filename(fname);
@@ -394,13 +393,17 @@ pub(super) fn add_file_from_ankiweb(
     // if the filename is already valid, we can write the file directly
     let (renamed_from, path) = if let Cow::Borrowed(_) = normalized {
         let path = media_folder.join(normalized.as_ref());
-        debug!(log, "write"; "fname" => normalized.as_ref());
-        fs::write(&path, data)?;
+        debug!(fname = normalized.as_ref(), "write");
+        write_file(&path, data)?;
         (None, path)
     } else {
         // ankiweb sent us a non-normalized filename, so we'll rename it
         let new_name = add_data_to_folder_uniquely(media_folder, fname, data, sha1)?;
-        debug!(log, "non-normalized filename received"; "fname"=>&fname, "rename_to"=>new_name.as_ref());
+        debug!(
+            fname,
+            rename_to = new_name.as_ref(),
+            "non-normalized filename received"
+        );
         (
             Some(fname.to_string()),
             media_folder.join(new_name.as_ref()),
@@ -417,19 +420,10 @@ pub(super) fn add_file_from_ankiweb(
     })
 }
 
-pub(super) fn data_for_file(media_folder: &Path, fname: &str) -> Result<Option<Vec<u8>>> {
-    let mut file = match fs::File::open(&media_folder.join(fname)) {
-        Ok(file) => file,
-        Err(e) => {
-            if e.kind() == io::ErrorKind::NotFound {
-                return Ok(None);
-            } else {
-                return Err(AnkiError::IoError(format!(
-                    "unable to read {}: {}",
-                    fname, e
-                )));
-            }
-        }
+pub(crate) fn data_for_file(media_folder: &Path, fname: &str) -> Result<Option<Vec<u8>>> {
+    let mut file = match open_file(media_folder.join(fname)) {
+        Err(e) if e.is_not_found() => return Ok(None),
+        res => res?,
     };
     let mut buf = vec![];
     file.read_to_end(&mut buf)?;
@@ -442,10 +436,13 @@ mod test {
 
     use tempfile::tempdir;
 
-    use crate::media::files::{
-        add_data_to_folder_uniquely, add_hash_suffix_to_file_stem, normalize_filename,
-        remove_files, sha1_of_data, truncate_filename, MAX_FILENAME_LENGTH,
-    };
+    use crate::media::files::add_data_to_folder_uniquely;
+    use crate::media::files::add_hash_suffix_to_file_stem;
+    use crate::media::files::normalize_filename;
+    use crate::media::files::remove_files;
+    use crate::media::files::sha1_of_data;
+    use crate::media::files::truncate_filename;
+    use crate::sync::media::MAX_MEDIA_FILENAME_LENGTH;
 
     #[test]
     fn normalize() {
@@ -458,9 +455,12 @@ mod test {
         assert_eq!(normalize_filename("test.").as_ref(), "test._");
         assert_eq!(normalize_filename("test ").as_ref(), "test _");
 
-        let expected_stem_len = MAX_FILENAME_LENGTH - ".jpg".len() - 1;
+        let expected_stem_len = MAX_MEDIA_FILENAME_LENGTH - ".jpg".len() - 1;
         assert_eq!(
-            normalize_filename(&format!("{}.jpg", "x".repeat(MAX_FILENAME_LENGTH * 2))),
+            normalize_filename(&format!(
+                "{}.jpg",
+                "x".repeat(MAX_MEDIA_FILENAME_LENGTH * 2)
+            )),
             "x".repeat(expected_stem_len) + ".jpg"
         );
     }
@@ -518,29 +518,32 @@ mod test {
 
     #[test]
     fn truncation() {
-        let one_less = "x".repeat(MAX_FILENAME_LENGTH - 1);
+        let one_less = "x".repeat(MAX_MEDIA_FILENAME_LENGTH - 1);
         assert_eq!(
-            truncate_filename(&one_less, MAX_FILENAME_LENGTH),
+            truncate_filename(&one_less, MAX_MEDIA_FILENAME_LENGTH),
             Cow::Borrowed(&one_less)
         );
-        let equal = "x".repeat(MAX_FILENAME_LENGTH);
+        let equal = "x".repeat(MAX_MEDIA_FILENAME_LENGTH);
         assert_eq!(
-            truncate_filename(&equal, MAX_FILENAME_LENGTH),
+            truncate_filename(&equal, MAX_MEDIA_FILENAME_LENGTH),
             Cow::Borrowed(&equal)
         );
-        let equal = format!("{}.jpg", "x".repeat(MAX_FILENAME_LENGTH - 4));
+        let equal = format!("{}.jpg", "x".repeat(MAX_MEDIA_FILENAME_LENGTH - 4));
         assert_eq!(
-            truncate_filename(&equal, MAX_FILENAME_LENGTH),
+            truncate_filename(&equal, MAX_MEDIA_FILENAME_LENGTH),
             Cow::Borrowed(&equal)
         );
-        let one_more = "x".repeat(MAX_FILENAME_LENGTH + 1);
+        let one_more = "x".repeat(MAX_MEDIA_FILENAME_LENGTH + 1);
         assert_eq!(
-            truncate_filename(&one_more, MAX_FILENAME_LENGTH),
-            Cow::<str>::Owned("x".repeat(MAX_FILENAME_LENGTH - 2))
+            truncate_filename(&one_more, MAX_MEDIA_FILENAME_LENGTH),
+            Cow::<str>::Owned("x".repeat(MAX_MEDIA_FILENAME_LENGTH - 2))
         );
         assert_eq!(
-            truncate_filename(&" ".repeat(MAX_FILENAME_LENGTH + 1), MAX_FILENAME_LENGTH),
-            Cow::<str>::Owned(format!("{}_", " ".repeat(MAX_FILENAME_LENGTH - 2)))
+            truncate_filename(
+                &" ".repeat(MAX_MEDIA_FILENAME_LENGTH + 1),
+                MAX_MEDIA_FILENAME_LENGTH
+            ),
+            Cow::<str>::Owned(format!("{}_", " ".repeat(MAX_MEDIA_FILENAME_LENGTH - 2)))
         );
     }
 }

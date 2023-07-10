@@ -4,6 +4,7 @@
 pub(crate) mod card;
 mod collection_timestamps;
 mod config;
+mod dbcheck;
 mod deck;
 mod deckconfig;
 mod graves;
@@ -19,10 +20,9 @@ mod upgrades;
 use std::fmt::Write;
 
 pub(crate) use sqlite::SqliteStorage;
-pub(crate) use sync::open_and_check_sqlite_file;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum SchemaVersion {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaVersion {
     V11,
     V18,
 }
@@ -34,7 +34,7 @@ impl SchemaVersion {
 }
 
 /// Write a list of IDs as '(x,y,...)' into the provided string.
-pub(crate) fn ids_to_string<D, I>(buf: &mut String, ids: I)
+pub fn ids_to_string<D, I>(buf: &mut String, ids: I)
 where
     D: std::fmt::Display,
     I: IntoIterator<Item = D>,
@@ -77,16 +77,16 @@ mod test {
     #[test]
     fn ids_string() {
         let mut s = String::new();
-        ids_to_string(&mut s, &[0; 0]);
+        ids_to_string(&mut s, [0; 0]);
         assert_eq!(s, "()");
         s.clear();
-        ids_to_string(&mut s, &[7]);
+        ids_to_string(&mut s, [7]);
         assert_eq!(s, "(7)");
         s.clear();
-        ids_to_string(&mut s, &[7, 6]);
+        ids_to_string(&mut s, [7, 6]);
         assert_eq!(s, "(7,6)");
         s.clear();
-        ids_to_string(&mut s, &[7, 6, 5]);
+        ids_to_string(&mut s, [7, 6, 5]);
         assert_eq!(s, "(7,6,5)");
         s.clear();
     }

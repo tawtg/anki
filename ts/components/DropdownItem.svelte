@@ -3,24 +3,23 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import { pageTheme } from "../sveltelib/theme";
-
     export let id: string | undefined = undefined;
     let className = "";
     export { className as class };
 
-    let buttonRef: HTMLButtonElement;
+    export let buttonRef: HTMLButtonElement | undefined = undefined;
 
     export let tooltip: string | undefined = undefined;
 
     export let active = false;
+    export let disabled = false;
+
+    const rtl: boolean = window.getComputedStyle(document.body).direction == "rtl";
 
     $: if (buttonRef && active) {
-        /* buttonRef.scrollIntoView({ behavior: "smooth", block: "start" }); */
-        /* TODO will not work on Gecko */
-        (buttonRef as any).scrollIntoViewIfNeeded({
+        buttonRef!.scrollIntoView({
             behavior: "smooth",
-            block: "start",
+            block: "nearest",
         });
     }
 
@@ -33,9 +32,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     tabindex={tabbable ? 0 : -1}
     class="dropdown-item {className}"
     class:active
-    class:btn-day={!$pageTheme.isDark}
-    class:btn-night={$pageTheme.isDark}
+    class:rtl
     title={tooltip}
+    {disabled}
     on:mouseenter
     on:focus
     on:keydown
@@ -46,36 +45,44 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 </button>
 
 <style lang="scss">
-    @use "sass/button-mixins" as button;
-
     button {
         display: flex;
         justify-content: start;
-
-        font-size: var(--dropdown-font-size, calc(0.8 * var(--base-font-size)));
+        width: 100%;
+        padding: 0.25rem 1rem;
+        white-space: nowrap;
+        font-size: var(--dropdown-font-size, small);
 
         background: none;
         box-shadow: none !important;
         border: none;
         border-radius: 0;
+        color: var(--fg);
 
-        &:active,
-        &.active {
-            background-color: button.$focus-color;
-            color: white;
+        &:hover:not([disabled]) {
+            background: var(--highlight-bg);
+            color: var(--highlight-fg);
         }
-    }
 
-    .btn-day {
-        color: black;
-    }
+        &[disabled] {
+            cursor: default;
+            color: var(--fg-disabled);
+        }
 
-    .btn-night {
-        color: white;
-
-        &:hover,
-        &:focus {
-            @include button.btn-night-base;
+        /* selection highlight */
+        &:not(.rtl) {
+            border-left: 3px solid transparent;
+        }
+        &.rtl {
+            border-right: 3px solid transparent;
+        }
+        &.active {
+            &:not(.rtl) {
+                border-left-color: var(--border-focus);
+            }
+            &.rtl {
+                border-right-color: var(--border-focus);
+            }
         }
     }
 </style>

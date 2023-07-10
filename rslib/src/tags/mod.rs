@@ -10,6 +10,7 @@ mod register;
 mod remove;
 mod rename;
 mod reparent;
+mod service;
 mod tree;
 pub(crate) mod undo;
 
@@ -17,7 +18,7 @@ use unicase::UniCase;
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tag {
     pub name: String,
     pub usn: Usn,

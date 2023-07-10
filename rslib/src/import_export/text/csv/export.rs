@@ -1,22 +1,27 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{borrow::Cow, collections::HashMap, fs::File, io::Write, sync::Arc};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::Write;
+use std::sync::Arc;
 
+use anki_proto::import_export::ExportNoteCsvRequest;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
 
 use super::metadata::Delimiter;
-use crate::{
-    import_export::{ExportProgress, IncrementableProgress},
-    notetype::RenderCardOutput,
-    pb::ExportNoteCsvRequest,
-    prelude::*,
-    search::{SearchNode, SortMode},
-    template::RenderedNode,
-    text::{html_to_text_line, CowMapping},
-};
+use crate::import_export::text::csv::metadata::DelimeterExt;
+use crate::import_export::ExportProgress;
+use crate::notetype::RenderCardOutput;
+use crate::prelude::*;
+use crate::search::SearchNode;
+use crate::search::SortMode;
+use crate::template::RenderedNode;
+use crate::text::html_to_text_line;
+use crate::text::CowMapping;
 
 const DELIMITER: Delimiter = Delimiter::Tab;
 
@@ -26,10 +31,8 @@ impl Collection {
         path: &str,
         search: impl TryIntoSearch,
         with_html: bool,
-        progress_fn: impl 'static + FnMut(ExportProgress, bool) -> bool,
     ) -> Result<usize> {
-        let mut progress = IncrementableProgress::new(progress_fn);
-        progress.call(ExportProgress::File)?;
+        let mut progress = self.new_progress_handler::<ExportProgress>();
         let mut incrementor = progress.incrementor(ExportProgress::Cards);
 
         let mut writer = file_writer_with_header(path, with_html)?;
@@ -37,28 +40,27 @@ impl Collection {
         cards.sort_unstable();
         for &card in &cards {
             incrementor.increment()?;
-            writer.write_record(self.card_record(card, with_html)?)?;
+            writer
+                .write_record(self.card_record(card, with_html)?)
+                .or_invalid("invalid csv")?;
         }
         writer.flush()?;
 
         Ok(cards.len())
     }
 
-    pub fn export_note_csv(
-        &mut self,
-        mut request: ExportNoteCsvRequest,
-        progress_fn: impl 'static + FnMut(ExportProgress, bool) -> bool,
-    ) -> Result<usize> {
-        let mut progress = IncrementableProgress::new(progress_fn);
-        progress.call(ExportProgress::File)?;
+    pub fn export_note_csv(&mut self, mut request: ExportNoteCsvRequest) -> Result<usize> {
+        let mut progress = self.new_progress_handler::<ExportProgress>();
         let mut incrementor = progress.incrementor(ExportProgress::Notes);
 
-        let guard = self.search_notes_into_table(request.search_node())?;
+        let guard = self.search_notes_into_table(Into::<SearchNode>::into(&mut request))?;
         let ctx = NoteContext::new(&request, guard.col)?;
         let mut writer = note_file_writer_with_header(&request.out_path, &ctx)?;
         guard.col.storage.for_each_note_in_search(|note| {
             incrementor.increment()?;
-            writer.write_record(ctx.record(&note))?;
+            writer
+                .write_record(ctx.record(&note))
+                .or_invalid("invalid csv")?;
             Ok(())
         })?;
         writer.flush()?;
@@ -67,7 +69,8 @@ impl Collection {
     }
 
     fn card_record(&mut self, card: CardId, with_html: bool) -> Result<[String; 2]> {
-        let RenderCardOutput { qnodes, anodes, .. } = self.render_existing_card(card, false)?;
+        let RenderCardOutput { qnodes, anodes, .. } =
+            self.render_existing_card(card, false, false)?;
         Ok([
             rendered_nodes_to_record_field(&qnodes, with_html, false),
             rendered_nodes_to_record_field(&anodes, with_html, true),
@@ -211,7 +214,7 @@ impl NoteContext {
     }
 
     fn guid_column(&self) -> Option<usize> {
-        self.with_guid.then(|| 1)
+        self.with_guid.then_some(1)
     }
 
     fn notetype_column(&self) -> Option<usize> {
@@ -274,8 +277,8 @@ impl NoteContext {
     }
 }
 
-impl ExportNoteCsvRequest {
-    fn search_node(&mut self) -> SearchNode {
-        SearchNode::from(self.limit.take().unwrap_or_default())
+impl From<&mut ExportNoteCsvRequest> for SearchNode {
+    fn from(req: &mut ExportNoteCsvRequest) -> Self {
+        SearchNode::from(req.limit.take().unwrap_or_default())
     }
 }

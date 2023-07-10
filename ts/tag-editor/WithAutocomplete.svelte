@@ -3,12 +3,12 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import { isApplePlatform } from "@tslib/platform";
     import { createEventDispatcher, tick } from "svelte";
     import type { Writable } from "svelte/store";
 
     import Popover from "../components/Popover.svelte";
     import WithFloating from "../components/WithFloating.svelte";
-    import { isApplePlatform } from "../lib/platform";
     import AutocompleteItem from "./AutocompleteItem.svelte";
 
     export let suggestionsPromise: Promise<string[]>;
@@ -127,7 +127,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <WithFloating
     keepOnKeyup
     show={$show}
-    placement="top-start"
+    preferredPlacement="top"
     portalTarget={document.body}
     let:asReference
     on:close={() => show.set(false)}
@@ -150,8 +150,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                         }}
                         on:mouseenter={(event) => selectIfMousedown(event, index)}
                         on:mouseleave={() => (active = false)}
-                        >{suggestion}</AutocompleteItem
                     >
+                        {suggestion}
+                    </AutocompleteItem>
                 {:else}
                     <AutocompleteItem
                         on:mousedown={() => setSelectedAndActive(index)}
@@ -160,8 +161,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                             chooseSelected();
                         }}
                         on:mouseenter={(event) => selectIfMousedown(event, index)}
-                        >{suggestion}</AutocompleteItem
                     >
+                        {suggestion}
+                    </AutocompleteItem>
                 {/if}
             {/each}
         </div>
@@ -178,7 +180,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
         /* Make sure that text in TagInput perfectly overlaps with Tag */
         border-left: 1px solid transparent;
-        border-top: 2px solid transparent;
+        border-bottom: 1px solid transparent;
     }
 
     .autocomplete-menu {
@@ -186,9 +188,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         flex-flow: column nowrap;
 
         width: 80vw;
-        max-height: 7rem;
+        max-height: 30vh;
 
-        font-size: 11px;
+        font-size: 13px;
         overflow-x: hidden;
         text-overflow: ellipsis;
         overflow-y: auto;

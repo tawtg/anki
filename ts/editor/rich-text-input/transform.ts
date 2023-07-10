@@ -1,13 +1,9 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-import {
-    fragmentToString,
-    nodeContainsInlineContent,
-    nodeIsElement,
-} from "../../lib/dom";
+import { fragmentToString, nodeContainsInlineContent, nodeIsElement } from "../../lib/dom";
 import { createDummyDoc } from "../../lib/parsing";
-import { decoratedElements } from "../DecoratedElements.svelte";
+import { decoratedElements } from "../decorated-elements";
 
 function adjustInputHTML(html: string): string {
     for (const component of decoratedElements) {
@@ -19,7 +15,7 @@ function adjustInputHTML(html: string): string {
 
 function adjustInputFragment(fragment: DocumentFragment): void {
     if (nodeContainsInlineContent(fragment)) {
-        fragment.append(document.createElement("br"));
+        fragment.appendChild(document.createElement("br"));
     }
 }
 
@@ -35,16 +31,12 @@ export function storedToFragment(storedHTML: string): DocumentFragment {
 
 function adjustOutputFragment(fragment: DocumentFragment): void {
     if (
-        nodeContainsInlineContent(fragment) &&
-        fragment.lastChild &&
-        nodeIsElement(fragment.lastChild) &&
-        fragment.lastChild.tagName === "BR"
+        fragment.hasChildNodes()
+        && nodeIsElement(fragment.lastChild!)
+        && nodeContainsInlineContent(fragment)
+        && fragment.lastChild!.tagName === "BR"
     ) {
-        fragment.lastChild.remove();
-    }
-
-    for (const divElement of fragment.querySelectorAll("div:empty")) {
-        divElement.remove();
+        fragment.lastChild!.remove();
     }
 }
 

@@ -10,12 +10,14 @@ from anki import (
     collection_pb2,
     config_pb2,
     generic_pb2,
+    image_occlusion_pb2,
     import_export_pb2,
     links_pb2,
     search_pb2,
     stats_pb2,
 )
 from anki._legacy import DeprecatedNamesMixin, deprecated
+from anki.sync_pb2 import SyncLoginRequest
 
 # protobuf we publicly export - listed first to avoid circular imports
 HelpPage = links_pb2.HelpPageLinkRequest.HelpPage
@@ -38,6 +40,10 @@ ImportCsvRequest = import_export_pb2.ImportCsvRequest
 CsvMetadata = import_export_pb2.CsvMetadata
 DupeResolution = CsvMetadata.DupeResolution
 Delimiter = import_export_pb2.CsvMetadata.Delimiter
+TtsVoice = card_rendering_pb2.AllTtsVoicesResponse.TtsVoice
+GetImageForOcclusionResponse = image_occlusion_pb2.GetImageForOcclusionResponse
+AddImageOcclusionNoteRequest = image_occlusion_pb2.AddImageOcclusionNoteRequest
+GetImageOcclusionNoteResponse = image_occlusion_pb2.GetImageOcclusionNoteResponse
 
 import copy
 import os
@@ -117,16 +123,19 @@ ExportLimit = Union[DeckIdLimit, NoteIdsLimit, CardIdsLimit, None]
 class Collection(DeprecatedNamesMixin):
     sched: V1Scheduler | V2Scheduler | V3Scheduler
 
+    @staticmethod
+    def initialize_backend_logging(path: str | None = None) -> None:
+        """Enable terminal and optional file-based logging. Must be called only once."""
+        RustBackend.initialize_logging(path)
+
     def __init__(
         self,
         path: str,
         backend: RustBackend | None = None,
         server: bool = False,
-        log: bool = False,
     ) -> None:
         self._backend = backend or RustBackend(server=server)
         self.db: DBProxy | None = None
-        self._should_log = log
         self.server = server
         self.path = os.path.abspath(path)
         self.reopen()
@@ -300,18 +309,13 @@ class Collection(DeprecatedNamesMixin):
 
         (media_dir, media_db) = media_paths_from_col_path(self.path)
 
-        log_path = ""
-        should_log = not self.server and self._should_log
-        if should_log:
-            log_path = self.path.replace(".anki2", ".log")
-
         # connect
         if not after_full_sync:
             self._backend.open_collection(
                 collection_path=self.path,
                 media_folder_path=media_dir,
                 media_db_path=media_db,
-                log_path=log_path,
+                force_schema11=False,
             )
         self.db = DBProxy(weakref.proxy(self._backend))
         self.db.begin()
@@ -456,6 +460,51 @@ class Collection(DeprecatedNamesMixin):
     def import_json_string(self, json: str) -> ImportLogWithChanges:
         return self._backend.import_json_string(json)
 
+    # Image Occlusion
+    ##########################################################################
+
+    def get_image_for_occlusion(self, path: str | None) -> GetImageForOcclusionResponse:
+        return self._backend.get_image_for_occlusion(path=path)
+
+    def add_image_occlusion_note(
+        self,
+        notetype_id: int,
+        image_path: str,
+        occlusions: str,
+        header: str,
+        back_extra: str,
+        tags: list[str],
+    ) -> OpChanges:
+        return self._backend.add_image_occlusion_note(
+            notetype_id=notetype_id,
+            image_path=image_path,
+            occlusions=occlusions,
+            header=header,
+            back_extra=back_extra,
+            tags=tags,
+        )
+
+    def get_image_occlusion_note(
+        self, note_id: int | None
+    ) -> GetImageOcclusionNoteResponse:
+        return self._backend.get_image_occlusion_note(note_id=note_id)
+
+    def update_image_occlusion_note(
+        self,
+        note_id: int | None,
+        occlusions: str | None,
+        header: str | None,
+        back_extra: str | None,
+        tags: list[str] | None,
+    ) -> OpChanges:
+        return self._backend.update_image_occlusion_note(
+            note_id=note_id,
+            occlusions=occlusions,
+            header=header,
+            back_extra=back_extra,
+            tags=tags,
+        )
+
     # Object helpers
     ##########################################################################
 
@@ -513,6 +562,7 @@ class Collection(DeprecatedNamesMixin):
         return Note(self, notetype)
 
     def add_note(self, note: Note, deck_id: DeckId) -> OpChanges:
+        hooks.note_will_be_added(self, note, deck_id)
         out = self._backend.add_note(note=note._to_backend_note(), deck_id=deck_id)
         note.id = NoteId(out.note_id)
         return out.changes
@@ -1108,7 +1158,7 @@ class Collection(DeprecatedNamesMixin):
         previewing = conf["dyn"] and not conf["resched"]
         if not previewing:
             last = self.db.scalar(
-                "select id from revlog where cid = ? " "order by id desc limit 1",
+                "select id from revlog where cid = ? order by id desc limit 1",
                 card.id,
             )
             self.db.execute("delete from revlog where id = ?", last)
@@ -1191,8 +1241,12 @@ class Collection(DeprecatedNamesMixin):
     def full_download(self, auth: SyncAuth) -> None:
         self._backend.full_download(auth)
 
-    def sync_login(self, username: str, password: str) -> SyncAuth:
-        return self._backend.sync_login(username=username, password=password)
+    def sync_login(
+        self, username: str, password: str, endpoint: str | None
+    ) -> SyncAuth:
+        return self._backend.sync_login(
+            SyncLoginRequest(username=username, password=password, endpoint=endpoint)
+        )
 
     def sync_collection(self, auth: SyncAuth) -> SyncOutput:
         return self._backend.sync_collection(auth)
@@ -1215,6 +1269,9 @@ class Collection(DeprecatedNamesMixin):
 
     def compare_answer(self, expected: str, provided: str) -> str:
         return self._backend.compare_answer(expected=expected, provided=provided)
+
+    def extract_cloze_for_typing(self, text: str, ordinal: int) -> str:
+        return self._backend.extract_cloze_for_typing(text=text, ordinal=ordinal)
 
     # Timeboxing
     ##########################################################################

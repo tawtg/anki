@@ -2,6 +2,8 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
+import enum
+import inspect
 import os
 import re
 import shutil
@@ -9,7 +11,7 @@ import subprocess
 import sys
 from functools import partial, wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence, Union, no_type_check
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence, Union
 
 from send2trash import send2trash
 
@@ -73,6 +75,7 @@ from aqt.qt import (
     qconnect,
     qtmajor,
     qtminor,
+    qVersion,
     traceback,
 )
 from aqt.theme import theme_manager
@@ -81,23 +84,29 @@ if TYPE_CHECKING:
     TextFormat = Literal["plain", "rich"]
 
 
-def aqt_data_folder() -> str:
-    # running in Bazel on macOS?
-    if path := os.getenv("AQT_DATA_FOLDER"):
-        return path
+def aqt_data_path() -> Path:
     # packaged?
-    elif getattr(sys, "frozen", False):
-        path = os.path.join(sys.prefix, "lib/aqt/data")
-        if os.path.exists(path):
+    if getattr(sys, "frozen", False):
+        prefix = Path(sys.prefix)
+        path = prefix / "lib/_aqt/data"
+        if path.exists():
             return path
         else:
-            return os.path.join(sys.prefix, "../Resources/aqt/data")
-    elif os.path.exists(dir := os.path.join(os.path.dirname(__file__), "data")):
-        return os.path.abspath(dir)
+            return prefix / "../Resources/_aqt/data"
     else:
-        # should only happen when running unit tests
-        print("warning, data folder not found")
-        return "."
+        import _aqt.colors
+
+        data_folder = Path(inspect.getfile(_aqt.colors)).with_name("data")
+        if data_folder.exists():
+            return data_folder.absolute()
+        else:
+            # should only happen when running unit tests
+            print("warning, data folder not found")
+            return Path(".")
+
+
+def aqt_data_folder() -> str:
+    return str(aqt_data_path())
 
 
 # shortcut to access Fluent translations; set as
@@ -630,6 +639,23 @@ def getFile(
     return ret[0] if ret else None
 
 
+def running_in_sandbox():
+    """Check whether running in Flatpak or Snap. When in such a sandbox, Qt
+    will not report the true location of user-chosen files, but instead a
+    temporary location from which the sandboxing software will copy the file to
+    the user-chosen destination. Thus file renames are impossible and caching
+    the reported file location is unhelpful."""
+    in_flatpak = (
+        QStandardPaths.locate(
+            QStandardPaths.StandardLocation.RuntimeLocation,
+            "flatpak-info",
+        )
+        != ""
+    )
+    in_snap = bool(os.environ.get("SNAP"))
+    return in_flatpak or in_snap
+
+
 def getSaveFile(
     parent: QDialog,
     title: str,
@@ -654,7 +680,7 @@ def getSaveFile(
         f"{key} (*{ext})",
         options=QFileDialog.Option.DontConfirmOverwrite,
     )[0]
-    if file:
+    if file and not running_in_sandbox():
         # add extension
         if not file.lower().endswith(ext):
             file += ext
@@ -668,28 +694,45 @@ def getSaveFile(
     return file
 
 
+class _QtStateKeyKind(enum.Enum):
+    HEADER = enum.auto()
+    SPLITTER = enum.auto()
+    STATE = enum.auto()
+    GEOMETRY = enum.auto()
+
+
+def _qt_state_key(kind: _QtStateKeyKind, key: str) -> str:
+    """Construct a key used to save/restore geometry, state, etc.
+
+    Adds Qt version number to key so that different data is saved per Qt version,
+    preventing crashes and bugs when restoring data saved with a different Qt version.
+    """
+    qt_suffix = f"{qtmajor}.{qtminor}" if qtmajor > 5 else ""
+    return f"{key}{kind.name.capitalize()}{qt_suffix}"
+
+
 def saveGeom(widget: QWidget, key: str) -> None:
     # restoring a fullscreen window is buggy
     # (at the time of writing; Qt 6.2.2 and 5.15)
     if not widget.isFullScreen():
-        aqt.mw.pm.profile[f"{key}Geom"] = widget.saveGeometry()
+        key = _qt_state_key(_QtStateKeyKind.GEOMETRY, key)
+        aqt.mw.pm.profile[key] = widget.saveGeometry()
 
 
 def restoreGeom(
-    widget: QWidget, key: str, offset: int | None = None, adjustSize: bool = False
+    widget: QWidget,
+    key: str,
+    adjustSize: bool = False,
+    default_size: tuple[int, int] | None = None,
 ) -> None:
-    key += "Geom"
-    if aqt.mw.pm.profile.get(key):
-        widget.restoreGeometry(aqt.mw.pm.profile[key])
-        if is_mac and offset:
-            if qtmajor > 5 or qtminor > 6:
-                # bug in osx toolkit
-                s = widget.size()
-                widget.resize(s.width(), s.height() + offset * 2)
+    key = _qt_state_key(_QtStateKeyKind.GEOMETRY, key)
+    if existing_geom := aqt.mw.pm.profile.get(key):
+        widget.restoreGeometry(existing_geom)
         ensureWidgetInScreenBoundaries(widget)
-    else:
-        if adjustSize:
-            widget.adjustSize()
+    elif adjustSize:
+        widget.adjustSize()
+    elif default_size:
+        widget.resize(*default_size)
 
 
 def ensureWidgetInScreenBoundaries(widget: QWidget) -> None:
@@ -721,39 +764,35 @@ def ensureWidgetInScreenBoundaries(widget: QWidget) -> None:
 
 
 def saveState(widget: QFileDialog | QMainWindow, key: str) -> None:
-    key += "State"
+    key = _qt_state_key(_QtStateKeyKind.STATE, key)
     aqt.mw.pm.profile[key] = widget.saveState()
 
 
 def restoreState(widget: QFileDialog | QMainWindow, key: str) -> None:
-    key += "State"
-    if aqt.mw.pm.profile.get(key):
-        widget.restoreState(aqt.mw.pm.profile[key])
+    key = _qt_state_key(_QtStateKeyKind.STATE, key)
+    if data := aqt.mw.pm.profile.get(key):
+        widget.restoreState(data)
 
 
 def saveSplitter(widget: QSplitter, key: str) -> None:
-    key += "Splitter"
+    key = _qt_state_key(_QtStateKeyKind.SPLITTER, key)
     aqt.mw.pm.profile[key] = widget.saveState()
 
 
 def restoreSplitter(widget: QSplitter, key: str) -> None:
-    key += "Splitter"
-    if aqt.mw.pm.profile.get(key):
-        widget.restoreState(aqt.mw.pm.profile[key])
-
-
-def _header_key(key: str) -> str:
-    # not compatible across major versions
-    qt_suffix = f"Qt{qtmajor}" if qtmajor > 5 else ""
-    return f"{key}Header{qt_suffix}"
+    key = _qt_state_key(_QtStateKeyKind.SPLITTER, key)
+    if data := aqt.mw.pm.profile.get(key):
+        widget.restoreState(data)
 
 
 def saveHeader(widget: QHeaderView, key: str) -> None:
-    aqt.mw.pm.profile[_header_key(key)] = widget.saveState()
+    key = _qt_state_key(_QtStateKeyKind.HEADER, key)
+    aqt.mw.pm.profile[key] = widget.saveState()
 
 
 def restoreHeader(widget: QHeaderView, key: str) -> None:
-    if state := aqt.mw.pm.profile.get(_header_key(key)):
+    key = _qt_state_key(_QtStateKeyKind.HEADER, key)
+    if state := aqt.mw.pm.profile.get(key):
         widget.restoreState(state)
 
 
@@ -870,7 +909,7 @@ def current_window() -> QWidget | None:
 
 
 def send_to_trash(path: Path) -> None:
-    "Place file/folder in recyling bin, or delete permanently on failure."
+    "Place file/folder in recycling bin, or delete permanently on failure."
     if not path.exists():
         return
     try:
@@ -1089,7 +1128,7 @@ Add-ons, last update check: {}
 """.format(
         version_with_build(),
         platform.python_version(),
-        QT_VERSION_STR,
+        qVersion(),
         PYQT_VERSION_STR,
         platname,
         getattr(sys, "frozen", False),
@@ -1100,6 +1139,7 @@ Add-ons, last update check: {}
 
 
 ######################################################################
+
 
 # adapted from version detection in qutebrowser
 def opengl_vendor() -> str | None:
@@ -1153,7 +1193,7 @@ def gfxDriverIsBroken() -> bool:
 
 def startup_info() -> Any:
     "Use subprocess.Popen(startupinfo=...) to avoid opening a console window."
-    if not sys.platform == "win32":
+    if sys.platform != "win32":
         return None
     si = subprocess.STARTUPINFO()  # pytype: disable=module-attr
     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # pytype: disable=module-attr
@@ -1242,6 +1282,7 @@ class KeyboardModifiersPressed:
 _deprecated_names = DeprecatedNamesMixinForModule(globals())
 
 
-@no_type_check
-def __getattr__(name: str) -> Any:
-    return _deprecated_names.__getattr__(name)
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        return _deprecated_names.__getattr__(name)

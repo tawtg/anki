@@ -1,32 +1,40 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{borrow::Cow, cmp::Ordering, collections::HashSet, hash::Hasher, path::Path, sync::Arc};
+use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::hash::Hasher;
+use std::path::Path;
+use std::sync::Arc;
 
 use fnv::FnvHasher;
 use regex::Regex;
-use rusqlite::{functions::FunctionFlags, params, Connection};
+use rusqlite::functions::FunctionFlags;
+use rusqlite::params;
+use rusqlite::Connection;
+use serde_json::Value;
 use unicase::UniCase;
 
-use super::{
-    upgrades::{SCHEMA_MAX_VERSION, SCHEMA_MIN_VERSION, SCHEMA_STARTING_VERSION},
-    SchemaVersion,
-};
-use crate::{
-    config::schema11::schema11_config_as_string,
-    error::{AnkiError, DbErrorKind, Result},
-    i18n::I18n,
-    scheduler::timing::{local_minutes_west_for_stamp, v1_creation_date},
-    text::without_combining,
-    timestamp::TimestampMillis,
-};
+use super::upgrades::SCHEMA_MAX_VERSION;
+use super::upgrades::SCHEMA_MIN_VERSION;
+use super::upgrades::SCHEMA_STARTING_VERSION;
+use super::SchemaVersion;
+use crate::config::schema11::schema11_config_as_string;
+use crate::error::DbErrorKind;
+use crate::prelude::*;
+use crate::scheduler::timing::local_minutes_west_for_stamp;
+use crate::scheduler::timing::v1_creation_date;
+use crate::storage::card::data::CardData;
+use crate::text::without_combining;
 
 fn unicase_compare(s1: &str, s2: &str) -> Ordering {
     UniCase::new(s1).cmp(&UniCase::new(s2))
 }
 
 // fixme: rollback savepoint when tags not changed
-// fixme: need to drop out of wal prior to vacuuming to fix page size of older collections
+// fixme: need to drop out of wal prior to vacuuming to fix page size of older
+// collections
 
 // currently public for dbproxy
 #[derive(Debug)]
@@ -44,11 +52,11 @@ fn open_or_create_collection_db(path: &Path) -> Result<Connection> {
 
     db.busy_timeout(std::time::Duration::from_secs(0))?;
 
-    db.pragma_update(None, "locking_mode", &"exclusive")?;
-    db.pragma_update(None, "page_size", &4096)?;
-    db.pragma_update(None, "cache_size", &(-40 * 1024))?;
-    db.pragma_update(None, "legacy_file_format", &false)?;
-    db.pragma_update(None, "journal_mode", &"wal")?;
+    db.pragma_update(None, "locking_mode", "exclusive")?;
+    db.pragma_update(None, "page_size", 4096)?;
+    db.pragma_update(None, "cache_size", -40 * 1024)?;
+    db.pragma_update(None, "legacy_file_format", false)?;
+    db.pragma_update(None, "journal_mode", "wal")?;
     // Android has no /tmp folder, and fails in the default config.
     #[cfg(target_os = "android")]
     db.pragma_update(None, "temp_store", &"memory")?;
@@ -61,12 +69,21 @@ fn open_or_create_collection_db(path: &Path) -> Result<Connection> {
     add_regexp_tags_function(&db)?;
     add_without_combining_function(&db)?;
     add_fnvhash_function(&db)?;
+    add_extract_custom_data_number_function(&db)?;
 
     db.create_collation("unicase", unicase_compare)?;
 
     Ok(db)
 }
 
+impl SqliteStorage {
+    /// This is provided as an escape hatch for when you need to do something
+    /// not directly supported by this library. Please exercise caution when
+    /// using it.
+    pub fn db(&self) -> &Connection {
+        &self.db
+    }
+}
 /// Adds sql function field_at_index(flds, index)
 /// to split provided fields and return field at zero-based index.
 /// If out of range, returns empty string.
@@ -184,6 +201,28 @@ fn add_regexp_tags_function(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// eg. extract_custom_data_number(card.data, 'r') -> float | null
+fn add_extract_custom_data_number_function(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "extract_custom_data_number",
+        2,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert_eq!(ctx.len(), 2, "called with unexpected number of arguments");
+
+            let Ok(card_data) = ctx.get_raw(0).as_str() else { return Ok(None) };
+            if card_data.is_empty() {
+                return Ok(None);
+            }
+            let Ok(key) = ctx.get_raw(1).as_str() else { return Ok(None) };
+            let custom_data = &CardData::from_str(card_data).custom_data;
+            let Ok(value) = serde_json::from_str::<Value>(custom_data) else { return Ok(None) };
+            let num = value.get(key).and_then(|v| v.as_f64());
+            Ok(num)
+        },
+    )
+}
+
 /// Fetch schema version from database.
 /// Return (must_create, version)
 fn schema_version(db: &Connection) -> Result<(bool, u8)> {
@@ -205,7 +244,13 @@ fn trace(s: &str) {
 }
 
 impl SqliteStorage {
-    pub(crate) fn open_or_create(path: &Path, tr: &I18n, server: bool) -> Result<Self> {
+    pub(crate) fn open_or_create(
+        path: &Path,
+        tr: &I18n,
+        server: bool,
+        check_integrity: bool,
+        force_schema11: bool,
+    ) -> Result<Self> {
         let db = open_or_create_collection_db(path)?;
         let (create, ver) = schema_version(&db)?;
 
@@ -223,6 +268,13 @@ impl SqliteStorage {
             return Err(AnkiError::db_error("", kind));
         }
 
+        if check_integrity {
+            match db.pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0)) {
+                Ok(s) => require!(s == "ok", "corrupt: {s}"),
+                Err(e) => return Err(e.into()),
+            };
+        }
+
         let upgrade = ver != SCHEMA_MAX_VERSION;
         if create || upgrade {
             db.execute("begin exclusive", [])?;
@@ -231,11 +283,11 @@ impl SqliteStorage {
         if create {
             db.execute_batch(include_str!("schema11.sql"))?;
             // start at schema 11, then upgrade below
-            let crt = v1_creation_date();
+            let crt = TimestampSecs(v1_creation_date());
             let offset = if server {
                 None
             } else {
-                Some(local_minutes_west_for_stamp(crt))
+                Some(local_minutes_west_for_stamp(crt)?)
             };
             db.execute(
                 "update col set crt=?, scm=?, ver=?, conf=?",
@@ -249,6 +301,13 @@ impl SqliteStorage {
         }
 
         let storage = Self { db };
+
+        if force_schema11 {
+            if create || upgrade {
+                storage.commit_trx()?;
+            }
+            return storage_with_schema11(storage, ver);
+        }
 
         if create || upgrade {
             storage.upgrade_to_latest_schema(ver, server)?;
@@ -271,14 +330,14 @@ impl SqliteStorage {
         if let Some(version) = desired_version {
             self.downgrade_to(version)?;
             if version.has_journal_mode_delete() {
-                self.db.pragma_update(None, "journal_mode", &"delete")?;
+                self.db.pragma_update(None, "journal_mode", "delete")?;
             }
         }
         Ok(())
     }
 
-    /// Flush data from WAL file into DB, so the DB is safe to copy. Caller must not call this
-    /// while there is an active transaction.
+    /// Flush data from WAL file into DB, so the DB is safe to copy. Caller must
+    /// not call this while there is an active transaction.
     pub(crate) fn checkpoint(&self) -> Result<()> {
         if !self.db.is_autocommit() {
             return Err(AnkiError::db_error(
@@ -369,4 +428,21 @@ impl SqliteStorage {
     pub(crate) fn db_scalar<T: rusqlite::types::FromSql>(&self, sql: &str) -> Result<T> {
         self.db.query_row(sql, [], |r| r.get(0)).map_err(Into::into)
     }
+}
+
+fn storage_with_schema11(storage: SqliteStorage, ver: u8) -> Result<SqliteStorage> {
+    if ver != 11 {
+        if ver != SCHEMA_MAX_VERSION {
+            // partially upgraded; need to fully upgrade before downgrading
+            storage.begin_trx()?;
+            storage.upgrade_to_latest_schema(ver, false)?;
+            storage.commit_trx()?;
+        }
+        storage.downgrade_to(SchemaVersion::V11)?;
+    }
+    // Requery uses "TRUNCATE" by default if WAL is not enabled.
+    // We copy this behaviour here. See https://github.com/ankidroid/Anki-Android/pull/7977 for
+    // analysis. We may be able to enable WAL at a later time.
+    storage.db.pragma_update(None, "journal_mode", "TRUNCATE")?;
+    Ok(storage)
 }

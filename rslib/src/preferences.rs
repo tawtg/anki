@@ -1,17 +1,18 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{
-    collection::Collection,
-    config::{BoolKey, StringKey},
-    error::Result,
-    pb::{
-        preferences::{scheduling::NewReviewMix as NewRevMixPB, Editing, Reviewing, Scheduling},
-        Preferences,
-    },
-    prelude::*,
-    scheduler::timing::local_minutes_west_for_stamp,
-};
+use anki_proto::config::preferences::scheduling::NewReviewMix as NewRevMixPB;
+use anki_proto::config::preferences::Editing;
+use anki_proto::config::preferences::Reviewing;
+use anki_proto::config::preferences::Scheduling;
+use anki_proto::config::Preferences;
+
+use crate::collection::Collection;
+use crate::config::BoolKey;
+use crate::config::StringKey;
+use crate::error::Result;
+use crate::prelude::*;
+use crate::scheduler::timing::local_minutes_west_for_stamp;
 
 impl Collection {
     pub fn get_preferences(&self) -> Result<Preferences> {
@@ -89,7 +90,7 @@ impl Collection {
 
         if s.new_timezone {
             if self.get_creation_utc_offset().is_none() {
-                self.set_creation_utc_offset(Some(local_minutes_west_for_stamp(created.0)))?;
+                self.set_creation_utc_offset(Some(local_minutes_west_for_stamp(created)?))?;
             }
         } else {
             self.set_creation_utc_offset(None)?;

@@ -16,7 +16,8 @@ from http import HTTPStatus
 from typing import Callable
 
 import flask
-import flask_cors  # type: ignore
+import flask_cors
+import stringcase
 from flask import Response, request
 from waitress.server import create_server
 
@@ -24,16 +25,16 @@ import aqt
 import aqt.main
 import aqt.operations
 from anki import hooks
-from anki._vendor import stringcase
 from anki.collection import OpChanges
-from anki.decks import DeckConfigsForUpdate, UpdateDeckConfigs
-from anki.scheduler_pb2 import SchedulingStates
+from anki.decks import UpdateDeckConfigs
+from anki.scheduler.v3 import SchedulingStatesWithContext, SetSchedulingStatesRequest
 from anki.utils import dev_mode
 from aqt.changenotetype import ChangeNotetypeDialog
 from aqt.deckoptions import DeckOptionsDialog
 from aqt.import_export.import_csv_dialog import ImportCsvDialog
 from aqt.operations.deck import update_deck_configs as update_deck_configs_op
 from aqt.qt import *
+from aqt.utils import aqt_data_path
 
 app = flask.Flask(__name__, root_path="/fake")
 flask_cors.CORS(app)
@@ -62,7 +63,6 @@ DynamicRequest = Callable[[], Response]
 
 
 class MediaServer(threading.Thread):
-
     _ready = threading.Event()
     daemon = True
 
@@ -80,7 +80,7 @@ class MediaServer(threading.Thread):
             logging.getLogger("waitress").setLevel(logging.ERROR)
 
             desired_host = os.getenv("ANKI_API_HOST", "127.0.0.1")
-            desired_port = int(os.getenv("ANKI_API_PORT", "0"))
+            desired_port = int(os.getenv("ANKI_API_PORT") or 0)
             self.server = create_server(
                 app,
                 host=desired_host,
@@ -185,7 +185,7 @@ def _handle_local_file_request(request: LocalFileRequest) -> Response:
             else:
                 max_age = 60 * 60
             return flask.send_file(
-                fullpath, mimetype=mimetype, conditional=True, max_age=max_age  # type: ignore[call-arg]
+                fullpath, mimetype=mimetype, conditional=True, max_age=max_age, download_name="foo"  # type: ignore[call-arg]
             )
         else:
             print(f"Not found: {path}")
@@ -213,18 +213,14 @@ def _handle_local_file_request(request: LocalFileRequest) -> Response:
 def _builtin_data(path: str) -> bytes:
     """Return data from file in aqt/data folder.
     Path must use forward slash separators."""
-    # overriden location?
-    if data_folder := os.getenv("ANKI_DATA_FOLDER"):
-        full_path = os.path.join(data_folder, path)
-        with open(full_path, "rb") as f:
-            return f.read()
-    else:
-        if is_win and not getattr(sys, "frozen", False):
-            # default Python resource loader expects backslashes on Windows
-            path = path.replace("/", "\\")
-        reader = aqt.__loader__.get_resource_reader("aqt")  # type: ignore
+    # packaged build?
+    if getattr(sys, "frozen", False):
+        reader = aqt.__loader__.get_resource_reader("_aqt")  # type: ignore
         with reader.open_resource(path) as f:
             return f.read()
+    else:
+        full_path = aqt_data_path() / ".." / path
+        return full_path.read_bytes()
 
 
 def _handle_builtin_file_request(request: BundledFileRequest) -> Response:
@@ -235,6 +231,8 @@ def _handle_builtin_file_request(request: BundledFileRequest) -> Response:
         data = _builtin_data(data_path)
         return Response(data, mimetype=mimetype)
     except FileNotFoundError:
+        if dev_mode:
+            print(f"404: {data_path}")
         return flask.make_response(
             f"Invalid path: {path}",
             HTTPStatus.NOT_FOUND,
@@ -385,10 +383,7 @@ def congrats_info() -> bytes:
 
 
 def get_deck_configs_for_update() -> bytes:
-    config_bytes = aqt.mw.col._backend.get_deck_configs_for_update_raw(request.data)
-    configs = DeckConfigsForUpdate.FromString(config_bytes)
-    configs.have_addons = aqt.mw.addonManager.dirty
-    return configs.SerializeToString()
+    return aqt.mw.col._backend.get_deck_configs_for_update_raw(request.data)
 
 
 def update_deck_configs() -> bytes:
@@ -412,18 +407,17 @@ def update_deck_configs() -> bytes:
     return b""
 
 
-def get_scheduling_states() -> bytes:
-    if states := aqt.mw.reviewer.get_scheduling_states():
-        return states.SerializeToString()
-    else:
-        return b""
+def get_scheduling_states_with_context() -> bytes:
+    return SchedulingStatesWithContext(
+        states=aqt.mw.reviewer.get_scheduling_states(),
+        context=aqt.mw.reviewer.get_scheduling_context(),
+    ).SerializeToString()
 
 
 def set_scheduling_states() -> bytes:
-    key = request.headers.get("key", "")
-    states = SchedulingStates()
+    states = SetSchedulingStatesRequest()
     states.ParseFromString(request.data)
-    aqt.mw.reviewer.set_scheduling_states(key, states)
+    aqt.mw.reviewer.set_scheduling_states(states)
     return b""
 
 
@@ -455,7 +449,7 @@ post_handler_list = [
     congrats_info,
     get_deck_configs_for_update,
     update_deck_configs,
-    get_scheduling_states,
+    get_scheduling_states_with_context,
     set_scheduling_states,
     change_notetype,
     import_csv,
@@ -482,6 +476,11 @@ exposed_backend_list = [
     "set_graph_preferences",
     # TagsService
     "complete_tag",
+    # ImageOcclusionService
+    "get_image_for_occlusion",
+    "add_image_occlusion_note",
+    "get_image_occlusion_note",
+    "update_image_occlusion_note",
 ]
 
 
@@ -515,9 +514,11 @@ def _extract_collection_post_request(path: str) -> DynamicRequest | NotFound:
                     response.headers["Content-Type"] = "application/binary"
                 else:
                     response = flask.make_response("", HTTPStatus.NO_CONTENT)
-            except:
+            except Exception as exc:
                 print(traceback.format_exc())
-                response = flask.make_response("", HTTPStatus.INTERNAL_SERVER_ERROR)
+                response = flask.make_response(
+                    str(exc), HTTPStatus.INTERNAL_SERVER_ERROR
+                )
             return response
 
         return wrapped

@@ -3,6 +3,12 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import { getListItem } from "@tslib/dom";
+    import { preventDefault } from "@tslib/events";
+    import * as tr from "@tslib/ftl";
+    import { getPlatformString, registerShortcut } from "@tslib/shortcuts";
+    import { onMount } from "svelte";
+
     import ButtonGroup from "../../components/ButtonGroup.svelte";
     import ButtonGroupItem, {
         createProps,
@@ -13,12 +19,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import DynamicallySlottable from "../../components/DynamicallySlottable.svelte";
     import IconButton from "../../components/IconButton.svelte";
     import Popover from "../../components/Popover.svelte";
-    import Shortcut from "../../components/Shortcut.svelte";
     import WithFloating from "../../components/WithFloating.svelte";
     import { execCommand } from "../../domlib";
-    import { getListItem } from "../../lib/dom";
-    import * as tr from "../../lib/ftl";
-    import { getPlatformString } from "../../lib/shortcuts";
     import { context } from "../NoteEditor.svelte";
     import { editingInputIsRichText } from "../rich-text-input";
     import CommandIconButton from "./CommandIconButton.svelte";
@@ -54,11 +56,25 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
     }
 
+    onMount(() => {
+        registerShortcut((event: KeyboardEvent) => {
+            preventDefault(event);
+            indentListItem();
+        }, indentKeyCombination);
+        registerShortcut((event: KeyboardEvent) => {
+            preventDefault(event);
+            outdentListItem();
+        }, outdentKeyCombination);
+    });
+
     const { focusedInput } = context.get();
 
-    $: disabled = !editingInputIsRichText($focusedInput);
+    $: disabled = !$focusedInput || !editingInputIsRichText($focusedInput);
 
     let showFloating = false;
+    $: if (disabled) {
+        showFloating = false;
+    }
 </script>
 
 <ButtonGroup>
@@ -73,28 +89,32 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             <CommandIconButton
                 key="insertUnorderedList"
                 tooltip={tr.editingUnorderedList()}
-                shortcut="Control+,">{@html ulIcon}</CommandIconButton
+                shortcut="Control+,"
             >
+                {@html ulIcon}
+            </CommandIconButton>
         </ButtonGroupItem>
 
         <ButtonGroupItem>
             <CommandIconButton
                 key="insertOrderedList"
                 tooltip={tr.editingOrderedList()}
-                shortcut="Control+.">{@html olIcon}</CommandIconButton
+                shortcut="Control+."
             >
+                {@html olIcon}
+            </CommandIconButton>
         </ButtonGroupItem>
 
         <ButtonGroupItem>
             <WithFloating
-                show={showFloating && !disabled}
-                placement="bottom"
+                show={showFloating}
                 inline
                 on:close={() => (showFloating = false)}
                 let:asReference
             >
                 <span class="block-buttons" use:asReference>
                     <IconButton
+                        tooltip={tr.editingAlignment()}
                         {disabled}
                         on:click={() => (showFloating = !showFloating)}
                     >
@@ -110,27 +130,31 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                                 tooltip={tr.editingAlignLeft()}
                                 --border-left-radius="5px"
                                 --border-right-radius="0px"
-                                >{@html justifyLeftIcon}</CommandIconButton
                             >
+                                {@html justifyLeftIcon}
+                            </CommandIconButton>
 
                             <CommandIconButton
                                 key="justifyCenter"
                                 tooltip={tr.editingCenter()}
-                                >{@html justifyCenterIcon}</CommandIconButton
                             >
+                                {@html justifyCenterIcon}
+                            </CommandIconButton>
 
                             <CommandIconButton
                                 key="justifyRight"
                                 tooltip={tr.editingAlignRight()}
-                                >{@html justifyRightIcon}</CommandIconButton
                             >
+                                {@html justifyRightIcon}
+                            </CommandIconButton>
 
                             <CommandIconButton
                                 key="justifyFull"
                                 tooltip={tr.editingJustify()}
                                 --border-right-radius="5px"
-                                >{@html justifyFullIcon}</CommandIconButton
                             >
+                                {@html justifyFullIcon}
+                            </CommandIconButton>
                         </ButtonGroup>
 
                         <ButtonGroup>
@@ -146,11 +170,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                                 {@html outdentIcon}
                             </IconButton>
 
-                            <Shortcut
-                                keyCombination={outdentKeyCombination}
-                                on:action={outdentListItem}
-                            />
-
                             <IconButton
                                 tooltip="{tr.editingIndent()} ({getPlatformString(
                                     indentKeyCombination,
@@ -161,11 +180,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                             >
                                 {@html indentIcon}
                             </IconButton>
-
-                            <Shortcut
-                                keyCombination={indentKeyCombination}
-                                on:action={indentListItem}
-                            />
                         </ButtonGroup>
                     </ButtonToolbar>
                 </Popover>

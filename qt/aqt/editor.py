@@ -55,7 +55,7 @@ from aqt.utils import (
     tooltip,
     tr,
 )
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
 pics = ("jpg", "jpeg", "png", "tif", "tiff", "gif", "svg", "webp", "ico")
 audio = (
@@ -147,24 +147,25 @@ class Editor:
 
     def setupWeb(self) -> None:
         if self.editorMode == EditorMode.ADD_CARDS:
-            file = "note_creator"
+            mode = "add"
         elif self.editorMode == EditorMode.BROWSER:
-            file = "browser_editor"
+            mode = "browse"
         else:
-            file = "reviewer_editor"
+            mode = "review"
 
         # then load page
         self.web.stdHtml(
             "",
-            css=[f"css/{file}.css"],
+            css=["css/editor.css"],
             js=[
                 "js/mathjax.js",
-                f"js/{file}.js",
+                "js/editor.js",
             ],
             context=self,
             default_css=False,
         )
-        self.web._fix_editor_background_color_and_show()
+        self.web.eval(f"setupEditor('{mode}')")
+        self.web.show()
 
         lefttopbtns: list[str] = []
         gui_hooks.editor_did_init_left_buttons(lefttopbtns, self)
@@ -236,7 +237,9 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
 
                     def on_hotkey() -> None:
                         on_activated()
-                        self.web.eval(f'toggleEditorButton("#{id}");')
+                        self.web.eval(
+                            f'toggleEditorButton(document.getElementById("{id}"));'
+                        )
 
                 else:
                     on_hotkey = on_activated
@@ -465,6 +468,11 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
             if not self.addMode:
                 self._save_current_note()
 
+        elif cmd.startswith("setTagsCollapsed"):
+            (type, collapsed_string) = cmd.split(":", 1)
+            collapsed = collapsed_string == "true"
+            self.setTagsCollapsed(collapsed)
+
         elif cmd in self._links:
             return self._links[cmd](self)
 
@@ -504,6 +512,7 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         collapsed = [fld["collapsed"] for fld in flds]
         plain_texts = [fld.get("plainText", False) for fld in flds]
         descriptions = [fld.get("description", "") for fld in flds]
+        notetype_meta = {"id": self.note.mid, "modTime": self.note.note_type()["mod"]}
 
         self.widget.show()
 
@@ -520,39 +529,31 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
                 self.web.setFocus()
             gui_hooks.editor_did_load_note(self)
 
-        text_color = self.mw.pm.profile.get("lastTextColor", "#00f")
-        highlight_color = self.mw.pm.profile.get("lastHighlightColor", "#00f")
+        text_color = self.mw.pm.profile.get("lastTextColor", "#0000ff")
+        highlight_color = self.mw.pm.profile.get("lastHighlightColor", "#0000ff")
 
-        js = """
-            setFields({});
-            setCollapsed({});
-            setPlainTexts({});
-            setDescriptions({});
-            setFonts({});
-            focusField({});
-            setNoteId({});
-            setColorButtons({});
-            setTags({});
-            setMathjaxEnabled({});
-            """.format(
-            json.dumps(data),
-            json.dumps(collapsed),
-            json.dumps(plain_texts),
-            json.dumps(descriptions),
-            json.dumps(self.fonts()),
-            json.dumps(focusTo),
-            json.dumps(self.note.id),
-            json.dumps([text_color, highlight_color]),
-            json.dumps(self.note.tags),
-            json.dumps(self.mw.col.get_config("renderMathjax", True)),
-        )
+        js = f"""
+            saveSession();
+            setFields({json.dumps(data)});
+            setNotetypeMeta({json.dumps(notetype_meta)});
+            setCollapsed({json.dumps(collapsed)});
+            setPlainTexts({json.dumps(plain_texts)});
+            setDescriptions({json.dumps(descriptions)});
+            setFonts({json.dumps(self.fonts())});
+            focusField({json.dumps(focusTo)});
+            setNoteId({json.dumps(self.note.id)});
+            setColorButtons({json.dumps([text_color, highlight_color])});
+            setTags({json.dumps(self.note.tags)});
+            setTagsCollapsed({json.dumps(self.mw.pm.tags_collapsed(self.editorMode))});
+            setMathjaxEnabled({json.dumps(self.mw.col.get_config("renderMathjax", True))});
+            setShrinkImages({json.dumps(self.mw.col.get_config("shrinkEditorImages", True))});
+            setCloseHTMLTags({json.dumps(self.mw.col.get_config("closeHTMLTags", True))});
+            triggerChanges();
+            """
 
         if self.addMode:
             sticky = [field["sticky"] for field in self.note.note_type()["flds"]]
             js += " setSticky(%s);" % json.dumps(sticky)
-
-        if os.getenv("ANKI_EDITOR_INSERT_SYMBOLS"):
-            js += " setInsertSymbolsEnabled();"
 
         js = gui_hooks.editor_will_load_note(js, self.note, self)
         self.web.evalWithCallback(
@@ -673,7 +674,7 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         self.tags = aqt.tagedit.TagEdit(self.widget)
         qconnect(self.tags.lostFocus, self.on_tag_focus_lost)
         self.tags.setToolTip(shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt()))
-        border = theme_manager.color(colors.BORDER)
+        border = theme_manager.var(colors.BORDER)
         self.tags.setStyleSheet(f"border: 1px solid {border}")
         tb.addWidget(self.tags, 1, 1)
         g.setLayout(tb)
@@ -966,7 +967,7 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         self.web.onPaste()
 
     def onCutOrCopy(self) -> None:
-        self.web.flagAnkiText()
+        self.web.user_cut_or_copied()
 
     # Legacy editing routines
     ######################################################################
@@ -1159,6 +1160,21 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         self.setupWeb()
         self.loadNoteKeepingFocus()
 
+    def toggleShrinkImages(self) -> None:
+        self.mw.col.set_config(
+            "shrinkEditorImages",
+            not self.mw.col.get_config("shrinkEditorImages", True),
+        )
+
+    def toggleCloseHTMLTags(self) -> None:
+        self.mw.col.set_config(
+            "closeHTMLTags",
+            not self.mw.col.get_config("closeHTMLTags", True),
+        )
+
+    def setTagsCollapsed(self, collapsed: bool) -> None:
+        aqt.mw.pm.set_tags_collapsed(self.editorMode, collapsed)
+
     # Links from HTML
     ######################################################################
 
@@ -1186,6 +1202,8 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
             mathjaxBlock=Editor.insertMathjaxBlock,
             mathjaxChemistry=Editor.insertMathjaxChemistry,
             toggleMathjax=Editor.toggleMathjax,
+            toggleShrinkImages=Editor.toggleShrinkImages,
+            toggleCloseHTMLTags=Editor.toggleCloseHTMLTags,
         )
 
 
@@ -1195,18 +1213,37 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
 
 class EditorWebView(AnkiWebView):
     def __init__(self, parent: QWidget, editor: Editor) -> None:
-        AnkiWebView.__init__(self, title="editor")
+        AnkiWebView.__init__(self, kind=AnkiWebViewKind.EDITOR)
         self.editor = editor
         self.setAcceptDrops(True)
-        self._markInternal = False
+        self._store_field_content_on_next_clipboard_change = False
+        # when we detect the user copying from a field, we store the content
+        # here, and use it when they paste, so we avoid filtering field content
+        self._internal_field_text_for_paste: str | None = None
         clip = self.editor.mw.app.clipboard()
-        qconnect(clip.dataChanged, self._onClipboardChange)
+        qconnect(clip.dataChanged, self._on_clipboard_change)
         gui_hooks.editor_web_view_did_init(self)
 
-    def _onClipboardChange(self) -> None:
-        if self._markInternal:
-            self._markInternal = False
-            self._flagAnkiText()
+    def user_cut_or_copied(self) -> None:
+        self._store_field_content_on_next_clipboard_change = True
+
+    def _on_clipboard_change(self) -> None:
+        if self._store_field_content_on_next_clipboard_change:
+            # if the flag was set, save the field data
+            self._internal_field_text_for_paste = self._get_clipboard_html_for_field()
+            self._store_field_content_on_next_clipboard_change = False
+        elif (
+            self._internal_field_text_for_paste != self._get_clipboard_html_for_field()
+        ):
+            # if we've previously saved the field, blank it out if the clipboard state has changed
+            self._internal_field_text_for_paste = None
+
+    def _get_clipboard_html_for_field(self):
+        clip = self.editor.mw.app.clipboard()
+        mime = clip.mimeData()
+        if not mime.hasHtml():
+            return
+        return mime.html()
 
     def onCut(self) -> None:
         self.triggerPageAction(QWebEnginePage.WebAction.Cut)
@@ -1224,11 +1261,15 @@ class EditorWebView(AnkiWebView):
 
     def _onPaste(self, mode: QClipboard.Mode) -> None:
         extended = self._wantsExtendedPaste()
-        mime = self.editor.mw.app.clipboard().mimeData(mode=mode)
-        html, internal = self._processMime(mime, extended)
-        if not html:
-            return
-        self.editor.doPaste(html, internal, extended)
+        if html := self._internal_field_text_for_paste:
+            print("reuse internal")
+            self.editor.doPaste(html, True, extended)
+        else:
+            print("use clipboard")
+            mime = self.editor.mw.app.clipboard().mimeData(mode=mode)
+            html, internal = self._processMime(mime, extended)
+            if html:
+                self.editor.doPaste(html, internal, extended)
 
     def onPaste(self) -> None:
         self._onPaste(QClipboard.Mode.Clipboard)
@@ -1265,7 +1306,7 @@ class EditorWebView(AnkiWebView):
         # print("urls", mime.urls())
         # print("text", mime.text())
 
-        internal = mime.html().startswith("<!--anki-->")
+        internal = False
 
         mime = gui_hooks.editor_will_process_mime(
             mime, self, internal, extended, drop_event
@@ -1277,7 +1318,11 @@ class EditorWebView(AnkiWebView):
             return html_content, internal
 
         # favour url if it's a local link
-        if mime.hasUrls() and mime.urls()[0].toString().startswith("file://"):
+        if (
+            mime.hasUrls()
+            and (urls := mime.urls())
+            and urls[0].toString().startswith("file://")
+        ):
             types = (self._processUrls, self._processImage, self._processText)
         else:
             types = (self._processImage, self._processUrls, self._processText)
@@ -1320,6 +1365,7 @@ class EditorWebView(AnkiWebView):
                     processed.append(link)
                 else:
                     token = html.escape(token).replace("\t", " " * 4)
+
                     # if there's more than one consecutive space,
                     # use non-breaking spaces for the second one on
                     def repl(match: Match) -> str:
@@ -1356,27 +1402,6 @@ class EditorWebView(AnkiWebView):
         if fname:
             return self.editor.fnameToLink(fname)
         return None
-
-    def flagAnkiText(self) -> None:
-        # be ready to adjust when clipboard event fires
-        self._markInternal = True
-        # workaround broken QClipboard.dataChanged() on recent Qt6 versions
-        # https://github.com/ankitects/anki/issues/1793
-        if is_win and qtmajor == 6:
-            self.editor.mw.progress.single_shot(300, self._flagAnkiText, True)
-
-    def _flagAnkiText(self) -> None:
-        # add a comment in the clipboard html so we can tell text is copied
-        # from us and doesn't need to be stripped
-        clip = self.editor.mw.app.clipboard()
-        if not is_mac and not clip.ownsClipboard():
-            return
-        mime = clip.mimeData()
-        if not mime.hasHtml():
-            return
-        html = mime.html()
-        mime.setHtml(f"<!--anki-->{html}")
-        aqt.mw.progress.timer(10, lambda: clip.setMimeData(mime), False, parent=self)
 
     def contextMenuEvent(self, evt: QContextMenuEvent) -> None:
         m = QMenu(self)

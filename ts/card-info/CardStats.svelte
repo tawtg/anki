@@ -3,22 +3,22 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import * as tr2 from "../lib/ftl";
-    import { Stats } from "../lib/proto";
-    import { DAY, timeSpan, Timestamp } from "../lib/time";
+    import type { CardStatsResponse } from "@tslib/anki/stats_pb";
+    import * as tr2 from "@tslib/ftl";
+    import { DAY, timeSpan, Timestamp } from "@tslib/time";
 
-    export let stats: Stats.CardStatsResponse;
+    export let stats: CardStatsResponse;
 
-    function dateString(timestamp: number): string {
-        return new Timestamp(timestamp).dateString();
+    function dateString(timestamp: bigint): string {
+        return new Timestamp(Number(timestamp)).dateString();
     }
 
     interface StatsRow {
         label: string;
-        value: string | number;
+        value: string | number | bigint;
     }
 
-    function rowsFromStats(stats: Stats.CardStatsResponse): StatsRow[] {
+    function rowsFromStats(stats: CardStatsResponse): StatsRow[] {
         const statsRows: StatsRow[] = [];
 
         statsRows.push({ label: tr2.cardStatsAdded(), value: dateString(stats.added) });
@@ -82,6 +82,22 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
         statsRows.push({ label: tr2.cardStatsCardId(), value: stats.cardId });
         statsRows.push({ label: tr2.cardStatsNoteId(), value: stats.noteId });
+
+        if (stats.customData) {
+            let value: string;
+            try {
+                const obj = JSON.parse(stats.customData);
+                value = Object.entries(obj)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(" ");
+            } catch (exc) {
+                value = stats.customData;
+            }
+            statsRows.push({
+                label: tr2.cardStatsCustomData(),
+                value: value,
+            });
+        }
 
         return statsRows;
     }

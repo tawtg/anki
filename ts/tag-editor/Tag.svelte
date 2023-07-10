@@ -5,8 +5,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <script lang="ts">
     import { createEventDispatcher, onMount } from "svelte";
 
-    import { pageTheme } from "../sveltelib/theme";
-
     let className: string = "";
     export { className as class };
 
@@ -29,11 +27,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 <button
     bind:this={button}
-    class="tag btn d-inline-flex align-items-center text-nowrap ps-2 pe-1 {className}"
+    class="tag d-inline-flex align-items-center text-nowrap ps-2 pe-1 {className}"
     class:selected
     class:flashing
-    class:btn-day={!$pageTheme.isDark}
-    class:btn-night={$pageTheme.isDark}
     tabindex="-1"
     title={tooltip}
     on:mousemove
@@ -58,10 +54,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     .tag {
-        font-size: var(--base-font-size);
+        @include button.base($with-active: false, $with-disabled: false);
+
+        vertical-align: middle;
+        font-size: var(--font-size);
         padding: 0;
 
-        --border-color: var(--medium-border);
+        --border-color: var(--border);
 
         border: 1px solid var(--border-color) !important;
         border-radius: 5px;
@@ -77,12 +76,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
 
         &.selected {
-            box-shadow: 0 0 0 2px var(--focus-shadow);
-            --border-color: var(--focus-border);
+            box-shadow: 0 0 0 2px var(--border-focus);
+            --border-color: var(--border-focus);
         }
     }
-
-    @include button.btn-day($with-active: false, $with-disabled: false);
-
-    @include button.btn-night($with-active: false, $with-disabled: false);
 </style>

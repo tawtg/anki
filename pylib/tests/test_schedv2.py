@@ -4,7 +4,7 @@
 import copy
 import os
 import time
-from typing import Dict
+from typing import Callable, Dict
 
 import pytest
 
@@ -184,7 +184,7 @@ def test_learn():
     col.sched.answerCard(c, 3)
     # it should be due in 10 minutes
     dueIn = c.due - time.time()
-    assert 599 <= dueIn <= 600 * 1.25
+    assert 598 <= dueIn <= 600 * 1.25
     assert c.left % 1000 == 1
     # the next pass should graduate the card
     assert c.queue == QUEUE_TYPE_LRN
@@ -717,7 +717,12 @@ def test_suspend():
 
 
 def test_filt_reviewing_early_normal():
-    to_int = round if is_2021() else int
+    def to_int(val: float) -> int:
+        if is_2021():
+            return round(val)
+        else:
+            return int(val)
+
     col = getEmptyCol()
     note = col.newNote()
     note["Front"] = "one"

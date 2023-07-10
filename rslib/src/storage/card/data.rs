@@ -3,17 +3,20 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{
-    types::{FromSql, FromSqlError, ToSqlOutput, ValueRef},
-    ToSql,
-};
-use serde_derive::{Deserialize, Serialize};
+use rusqlite::types::FromSql;
+use rusqlite::types::FromSqlError;
+use rusqlite::types::ToSqlOutput;
+use rusqlite::types::ValueRef;
+use rusqlite::ToSql;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
-use crate::{prelude::*, serde::default_on_invalid};
+use crate::prelude::*;
+use crate::serde::default_on_invalid;
 
 /// Helper for serdeing the card data column.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct CardData {
     #[serde(
@@ -72,18 +75,16 @@ fn meta_is_empty(s: &str) -> bool {
 
 fn validate_custom_data(json_str: &str) -> Result<()> {
     if !meta_is_empty(json_str) {
-        let object: HashMap<&str, Value> = serde_json::from_str(json_str)
-            .map_err(|e| AnkiError::invalid_input(format!("custom data not an object: {e}")))?;
-        if object.keys().any(|k| k.as_bytes().len() > 8) {
-            return Err(AnkiError::invalid_input(
-                "custom data keys must be <= 8 bytes",
-            ));
-        }
-        if json_str.len() > 100 {
-            return Err(AnkiError::invalid_input(
-                "serialized custom data must be under 100 bytes",
-            ));
-        }
+        let object: HashMap<&str, Value> =
+            serde_json::from_str(json_str).or_invalid("custom data not an object")?;
+        require!(
+            object.keys().all(|k| k.as_bytes().len() <= 8),
+            "custom data keys must be <= 8 bytes"
+        );
+        require!(
+            json_str.len() <= 100,
+            "serialized custom data must be under 100 bytes"
+        );
     }
     Ok(())
 }

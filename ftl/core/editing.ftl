@@ -15,7 +15,8 @@ editing-customize-card-templates = Customize Card Templates
 editing-customize-fields = Customize Fields
 editing-cut = Cut
 editing-double-click-image = double-click image
-editing-double-click-to-expand = (double-click to expand)
+editing-double-click-to-expand = double-click to expand
+editing-double-click-to-collapse = double-click to collapse
 editing-edit-current = Edit Current
 editing-edit-html = Edit HTML
 editing-fields = Fields
@@ -55,12 +56,19 @@ editing-to-make-a-cloze-deletion-on = To make a cloze deletion on an existing no
 editing-toggle-html-editor = Toggle HTML Editor
 editing-toggle-visual-editor = Toggle Visual Editor
 editing-toggle-sticky = Toggle sticky
+editing-expand = Expand
+editing-collapse = Collapse
 editing-expand-field = Expand field
 editing-collapse-field = Collapse field
 editing-underline-text = Underline text
 editing-unordered-list = Unordered list
 editing-warning-cloze-deletions-will-not-work = Warning, cloze deletions will not work until you switch the type at the top to Cloze.
-editing-toggle-mathjax-rendering = Toggle MathJax Rendering
+editing-mathjax-preview = MathJax Preview
+editing-shrink-images = Shrink Images
+editing-close-html-tags = Auto-close HTML tags
+editing-from-clipboard = From Clipboard
+editing-alignment = Alignment
+editing-equations = Equations
 
 ## You don't need to translate these strings, as they will be replaced with different ones soon.
 

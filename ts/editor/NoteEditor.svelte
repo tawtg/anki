@@ -21,7 +21,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         toolbar: EditorToolbarAPI;
     }
 
-    import { registerPackage } from "../lib/runtime-require";
+    import { registerPackage } from "@tslib/runtime-require";
+
     import contextProperty from "../sveltelib/context-property";
     import lifecycleHooks from "../sveltelib/lifecycle-hooks";
 
@@ -39,33 +40,34 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 </script>
 
 <script lang="ts">
+    import { bridgeCommand } from "@tslib/bridgecommand";
+    import * as tr from "@tslib/ftl";
     import { onMount, tick } from "svelte";
     import { get, writable } from "svelte/store";
 
     import Absolute from "../components/Absolute.svelte";
     import Badge from "../components/Badge.svelte";
-    import { bridgeCommand } from "../lib/bridgecommand";
     import { TagEditor } from "../tag-editor";
+    import { commitTagEdits } from "../tag-editor/TagInput.svelte";
     import { ChangeTimer } from "./change-timer";
-    import DecoratedElements from "./DecoratedElements.svelte";
     import { clearableArray } from "./destroyable";
     import DuplicateLink from "./DuplicateLink.svelte";
     import EditorToolbar from "./editor-toolbar";
     import type { FieldData } from "./EditorField.svelte";
     import EditorField from "./EditorField.svelte";
-    import FieldDescription from "./FieldDescription.svelte";
     import Fields from "./Fields.svelte";
-    import FrameElement from "./FrameElement.svelte";
     import { alertIcon } from "./icons";
-    import ImageHandle from "./image-overlay";
-    import MathjaxHandle from "./mathjax-overlay";
-    import MathjaxElement from "./MathjaxElement.svelte";
+    import ImageOverlay from "./image-overlay";
+    import { shrinkImagesByDefault } from "./image-overlay/ImageOverlay.svelte";
+    import MathjaxOverlay from "./mathjax-overlay";
+    import { closeMathjaxEditor } from "./mathjax-overlay/MathjaxEditor.svelte";
     import Notification from "./Notification.svelte";
     import PlainTextInput from "./plain-text-input";
+    import { closeHTMLTags } from "./plain-text-input/PlainTextInput.svelte";
     import PlainTextBadge from "./PlainTextBadge.svelte";
     import RichTextInput, { editingInputIsRichText } from "./rich-text-input";
     import RichTextBadge from "./RichTextBadge.svelte";
-    import SymbolsOverlay from "./symbols-overlay";
+    import type { NotetypeIdAndModTime, SessionOptions } from "./types";
 
     function quoteFontFamily(fontFamily: string): string {
         // generic families (e.g. sans-serif) must not be quoted
@@ -77,6 +79,21 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     const size = 1.6;
     const wrap = true;
+
+    const sessionOptions: SessionOptions = {};
+    export function saveSession(): void {
+        if (notetypeMeta) {
+            sessionOptions[notetypeMeta.id] = {
+                fieldsCollapsed,
+                fieldStates: {
+                    richTextsHidden,
+                    plainTextsHidden,
+                    plainTextDefaults,
+                },
+                modTimeOfNotetype: notetypeMeta.modTime,
+            };
+        }
+    }
 
     const fieldStores: Writable<string>[] = [];
     let fieldNames: string[] = [];
@@ -114,18 +131,39 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     let fieldsCollapsed: boolean[] = [];
-    export function setCollapsed(fs: boolean[]): void {
-        fieldsCollapsed = fs;
+    export function setCollapsed(defaultCollapsed: boolean[]): void {
+        fieldsCollapsed =
+            sessionOptions[notetypeMeta?.id]?.fieldsCollapsed ?? defaultCollapsed;
     }
 
     let richTextsHidden: boolean[] = [];
     let plainTextsHidden: boolean[] = [];
     let plainTextDefaults: boolean[] = [];
 
-    export function setPlainTexts(fs: boolean[]): void {
-        richTextsHidden = fs;
-        plainTextsHidden = Array.from(fs, (v) => !v);
-        plainTextDefaults = [...richTextsHidden];
+    export function setPlainTexts(defaultPlainTexts: boolean[]): void {
+        const states = sessionOptions[notetypeMeta?.id]?.fieldStates;
+        if (states) {
+            richTextsHidden = states.richTextsHidden;
+            plainTextsHidden = states.plainTextsHidden;
+            plainTextDefaults = states.plainTextDefaults;
+        } else {
+            plainTextDefaults = defaultPlainTexts;
+            richTextsHidden = [...defaultPlainTexts];
+            plainTextsHidden = Array.from(defaultPlainTexts, (v) => !v);
+        }
+    }
+
+    export function triggerChanges(): void {
+        // I know this looks quite weird and doesn't seem to do anything
+        // but if we don't call this after setPlainTexts() and setCollapsed()
+        // when switching notetypes, existing collapsibles won't react
+        // automatically to the updated props
+        tick().then(() => {
+            fieldsCollapsed = fieldsCollapsed;
+            plainTextDefaults = plainTextDefaults;
+            richTextsHidden = richTextsHidden;
+            plainTextsHidden = plainTextsHidden;
+        });
     }
 
     function setMathjaxEnabled(enabled: boolean): void {
@@ -133,8 +171,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     let fieldDescriptions: string[] = [];
-    export function setDescriptions(fs: string[]): void {
-        fieldDescriptions = fs;
+    export function setDescriptions(descriptions: string[]): void {
+        fieldDescriptions = descriptions.map((d) =>
+            d.replace(/\\/g, "").replace(/"/g, '\\"'),
+        );
     }
 
     let fonts: [string, number, boolean][] = [];
@@ -164,6 +204,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         $tags = ts;
     }
 
+    const tagsCollapsed = writable<boolean>();
+    export function setTagsCollapsed(collapsed: boolean): void {
+        $tagsCollapsed = collapsed;
+    }
+
+    function updateTagsCollapsed(collapsed: boolean) {
+        $tagsCollapsed = collapsed;
+        bridgeCommand(`setTagsCollapsed:${$tagsCollapsed}`);
+    }
+
     let noteId: number | null = null;
     export function setNoteId(ntid: number): void {
         // TODO this is a hack, because it requires the NoteEditor to know implementation details of the PlainTextInput.
@@ -174,10 +224,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         noteId = ntid;
     }
 
-    let insertSymbols = false;
-
-    function setInsertSymbolsEnabled() {
-        insertSymbols = true;
+    let notetypeMeta: NotetypeIdAndModTime;
+    function setNotetypeMeta({ id, modTime }: NotetypeIdAndModTime): void {
+        notetypeMeta = { id, modTime };
+        // Discard the saved state of the fields if the notetype has been modified.
+        if (sessionOptions[id]?.modTimeOfNotetype !== modTime) {
+            delete sessionOptions[id];
+        }
     }
 
     function getNoteId(): number | null {
@@ -205,21 +258,37 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     })) as FieldData[];
 
     function saveTags({ detail }: CustomEvent): void {
+        tagAmount = detail.tags.filter((tag: string) => tag != "").length;
         bridgeCommand(`saveTags:${JSON.stringify(detail.tags)}`);
     }
 
     const fieldSave = new ChangeTimer();
 
+    function transformContentBeforeSave(content: string): string {
+        return content.replace(/ data-editor-shrink="(true|false)"/g, "");
+    }
+
     function updateField(index: number, content: string): void {
         fieldSave.schedule(
-            () => bridgeCommand(`key:${index}:${getNoteId()}:${content}`),
+            () =>
+                bridgeCommand(
+                    `key:${index}:${getNoteId()}:${transformContentBeforeSave(
+                        content,
+                    )}`,
+                ),
             600,
         );
     }
 
-    export function saveFieldNow(): void {
+    function saveFieldNow(): void {
         /* this will always be a key save */
         fieldSave.fireImmediately();
+    }
+
+    function saveNow(): void {
+        closeMathjaxEditor?.();
+        $commitTagEdits();
+        saveFieldNow();
     }
 
     export function saveOnPageHide() {
@@ -248,11 +317,65 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     let plainTextInputs: PlainTextInput[] = [];
     $: plainTextInputs = plainTextInputs.filter(Boolean);
 
+    function toggleRichTextInput(index: number): void {
+        const hidden = !richTextsHidden[index];
+        richTextInputs[index].focusFlag.setFlag(!hidden);
+        richTextsHidden[index] = hidden;
+        if (hidden) {
+            plainTextInputs[index].api.refocus();
+        }
+    }
+
+    function togglePlainTextInput(index: number): void {
+        const hidden = !plainTextsHidden[index];
+        plainTextInputs[index].focusFlag.setFlag(!hidden);
+        plainTextsHidden[index] = hidden;
+        if (hidden) {
+            richTextInputs[index].api.refocus();
+        }
+    }
+
+    function toggleField(index: number): void {
+        const collapsed = !fieldsCollapsed[index];
+        fieldsCollapsed[index] = collapsed;
+
+        const defaultInput = !plainTextDefaults[index]
+            ? richTextInputs[index]
+            : plainTextInputs[index];
+
+        if (!collapsed) {
+            defaultInput.api.refocus();
+        } else if (!plainTextDefaults[index]) {
+            plainTextsHidden[index] = true;
+        } else {
+            richTextsHidden[index] = true;
+        }
+    }
+
     const toolbar: Partial<EditorToolbarAPI> = {};
 
+    function setShrinkImages(shrinkByDefault: boolean) {
+        $shrinkImagesByDefault = shrinkByDefault;
+    }
+
+    function setCloseHTMLTags(closeTags: boolean) {
+        $closeHTMLTags = closeTags;
+    }
+
+    /**
+     * Enable/Disable add-on buttons that do not have the `perm` class
+     */
+    function setAddonButtonsDisabled(disabled: boolean): void {
+        document.querySelectorAll("button.linkb:not(.perm)").forEach((button) => {
+            (button as HTMLButtonElement).disabled = disabled;
+        });
+    }
+
+    import { wrapInternal } from "@tslib/wrap";
+    import Shortcut from "components/Shortcut.svelte";
+
     import { mathjaxConfig } from "../editable/mathjax-element";
-    import { wrapInternal } from "../lib/wrap";
-    import { refocusInput } from "./helpers";
+    import CollapseLabel from "./CollapseLabel.svelte";
     import * as oldEditorAdapter from "./old-editor-adapter";
 
     onMount(() => {
@@ -267,6 +390,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
 
         Object.assign(globalThis, {
+            saveSession,
             setFields,
             setCollapsed,
             setPlainTexts,
@@ -274,15 +398,19 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             setFonts,
             focusField,
             setTags,
+            setTagsCollapsed,
             setBackgrounds,
             setClozeHint,
-            saveNow: saveFieldNow,
+            saveNow,
             focusIfField,
             getNoteId,
             setNoteId,
+            setNotetypeMeta,
             wrap,
             setMathjaxEnabled,
-            setInsertSymbolsEnabled,
+            setShrinkImages,
+            setCloseHTMLTags,
+            triggerChanges,
             ...oldEditorAdapter,
         });
 
@@ -308,6 +436,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     setContextProperty(api);
     setupLifecycleHooks(api);
+
+    $: tagAmount = $tags.length;
 </script>
 
 <!--
@@ -315,7 +445,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 Serves as a pre-slotted convenience component which combines all the common
 components and functionality for general note editing.
 
-Functionality exclusive to specifc note-editing views (e.g. in the browser or
+Functionality exclusive to specific note-editing views (e.g. in the browser or
 the AddCards dialog) should be implemented in the user of this component.
 -->
 <div class="note-editor">
@@ -326,166 +456,145 @@ the AddCards dialog) should be implemented in the user of this component.
     {#if hint}
         <Absolute bottom right --margin="10px">
             <Notification>
-                <Badge --badge-color="tomato" --icon-align="top"
-                    >{@html alertIcon}</Badge
-                >
+                <Badge --badge-color="tomato" --icon-align="top">
+                    {@html alertIcon}
+                </Badge>
                 <span>{@html hint}</span>
             </Notification>
         </Absolute>
     {/if}
 
     <Fields>
-        <DecoratedElements>
-            {#each fieldsData as field, index}
-                {@const content = fieldStores[index]}
+        {#each fieldsData as field, index}
+            {@const content = fieldStores[index]}
 
-                <EditorField
-                    {field}
-                    {content}
-                    flipInputs={plainTextDefaults[index]}
-                    api={fields[index]}
-                    on:focusin={() => {
-                        $focusedField = fields[index];
-                        bridgeCommand(`focus:${index}`);
-                    }}
-                    on:focusout={() => {
-                        $focusedField = null;
-                        bridgeCommand(`blur:${index}:${getNoteId()}:${get(content)}`);
-                    }}
-                    on:mouseenter={() => {
-                        $hoveredField = fields[index];
-                    }}
-                    on:mouseleave={() => {
-                        $hoveredField = null;
-                    }}
-                    collapsed={fieldsCollapsed[index]}
-                    --label-color={cols[index] === "dupe"
-                        ? "var(--flag1-bg)"
-                        : "var(--window-bg)"}
-                >
-                    <svelte:fragment slot="field-label">
-                        <LabelContainer
-                            collapsed={fieldsCollapsed[index]}
-                            on:toggle={async () => {
-                                fieldsCollapsed[index] = !fieldsCollapsed[index];
-
-                                const defaultInput = !plainTextDefaults[index]
-                                    ? richTextInputs[index]
-                                    : plainTextInputs[index];
-
-                                if (!fieldsCollapsed[index]) {
-                                    refocusInput(defaultInput.api);
-                                } else if (!plainTextDefaults[index]) {
-                                    plainTextsHidden[index] = true;
-                                } else {
-                                    richTextsHidden[index] = true;
-                                }
-                            }}
-                        >
-                            <svelte:fragment slot="field-name">
-                                <LabelName>
-                                    {field.name}
-                                </LabelName>
-                            </svelte:fragment>
-                            <FieldState>
-                                {#if cols[index] === "dupe"}
-                                    <DuplicateLink />
-                                {/if}
-                                {#if plainTextDefaults[index]}
-                                    <RichTextBadge
-                                        visible={!fieldsCollapsed[index] &&
-                                            (fields[index] === $hoveredField ||
-                                                fields[index] === $focusedField)}
-                                        bind:off={richTextsHidden[index]}
-                                        on:toggle={async () => {
-                                            richTextsHidden[index] =
-                                                !richTextsHidden[index];
-
-                                            if (!richTextsHidden[index]) {
-                                                refocusInput(richTextInputs[index].api);
-                                            }
-                                        }}
-                                    />
-                                {:else}
-                                    <PlainTextBadge
-                                        visible={!fieldsCollapsed[index] &&
-                                            (fields[index] === $hoveredField ||
-                                                fields[index] === $focusedField)}
-                                        bind:off={plainTextsHidden[index]}
-                                        on:toggle={async () => {
-                                            plainTextsHidden[index] =
-                                                !plainTextsHidden[index];
-
-                                            if (!plainTextsHidden[index]) {
-                                                refocusInput(
-                                                    plainTextInputs[index].api,
-                                                );
-                                            }
-                                        }}
-                                    />
-                                {/if}
-                                <slot
-                                    name="field-state"
-                                    {field}
-                                    {index}
-                                    visible={fields[index] === $hoveredField ||
-                                        fields[index] === $focusedField}
+            <EditorField
+                {field}
+                {content}
+                flipInputs={plainTextDefaults[index]}
+                api={fields[index]}
+                on:focusin={() => {
+                    $focusedField = fields[index];
+                    setAddonButtonsDisabled(false);
+                    bridgeCommand(`focus:${index}`);
+                }}
+                on:focusout={() => {
+                    $focusedField = null;
+                    setAddonButtonsDisabled(true);
+                    bridgeCommand(
+                        `blur:${index}:${getNoteId()}:${transformContentBeforeSave(
+                            get(content),
+                        )}`,
+                    );
+                }}
+                on:mouseenter={() => {
+                    $hoveredField = fields[index];
+                }}
+                on:mouseleave={() => {
+                    $hoveredField = null;
+                }}
+                collapsed={fieldsCollapsed[index]}
+                dupe={cols[index] === "dupe"}
+                --description-font-size="{field.fontSize}px"
+                --description-content={`"${field.description}"`}
+            >
+                <svelte:fragment slot="field-label">
+                    <LabelContainer
+                        collapsed={fieldsCollapsed[index]}
+                        on:toggle={() => toggleField(index)}
+                        --icon-align="bottom"
+                    >
+                        <svelte:fragment slot="field-name">
+                            <LabelName>
+                                {field.name}
+                            </LabelName>
+                        </svelte:fragment>
+                        <FieldState>
+                            {#if cols[index] === "dupe"}
+                                <DuplicateLink />
+                            {/if}
+                            {#if plainTextDefaults[index]}
+                                <RichTextBadge
+                                    show={!fieldsCollapsed[index] &&
+                                        (fields[index] === $hoveredField ||
+                                            fields[index] === $focusedField)}
+                                    bind:off={richTextsHidden[index]}
+                                    on:toggle={() => toggleRichTextInput(index)}
                                 />
-                            </FieldState>
-                        </LabelContainer>
-                    </svelte:fragment>
-                    <svelte:fragment slot="rich-text-input">
-                        <Collapsible
-                            collapse={richTextsHidden[index]}
-                            let:collapsed={hidden}
-                        >
-                            <RichTextInput
-                                {hidden}
-                                on:focusout={() => {
-                                    saveFieldNow();
-                                    $focusedInput = null;
-                                }}
-                                bind:this={richTextInputs[index]}
-                            >
-                                <ImageHandle maxWidth={250} maxHeight={125} />
-                                <MathjaxHandle />
-                                {#if insertSymbols}
-                                    <SymbolsOverlay />
-                                {/if}
-                                <FieldDescription>
-                                    {field.description}
-                                </FieldDescription>
-                            </RichTextInput>
-                        </Collapsible>
-                    </svelte:fragment>
-                    <svelte:fragment slot="plain-text-input">
-                        <Collapsible
-                            collapse={plainTextsHidden[index]}
-                            let:collapsed={hidden}
-                        >
-                            <PlainTextInput
-                                {hidden}
-                                isDefault={plainTextDefaults[index]}
-                                richTextHidden={richTextsHidden[index]}
-                                on:focusout={() => {
-                                    saveFieldNow();
-                                    $focusedInput = null;
-                                }}
-                                bind:this={plainTextInputs[index]}
+                            {:else}
+                                <PlainTextBadge
+                                    show={!fieldsCollapsed[index] &&
+                                        (fields[index] === $hoveredField ||
+                                            fields[index] === $focusedField)}
+                                    bind:off={plainTextsHidden[index]}
+                                    on:toggle={() => togglePlainTextInput(index)}
+                                />
+                            {/if}
+                            <slot
+                                name="field-state"
+                                {field}
+                                {index}
+                                show={fields[index] === $hoveredField ||
+                                    fields[index] === $focusedField}
                             />
-                        </Collapsible>
-                    </svelte:fragment>
-                </EditorField>
-            {/each}
+                        </FieldState>
+                    </LabelContainer>
+                </svelte:fragment>
+                <svelte:fragment slot="rich-text-input">
+                    <Collapsible
+                        collapse={richTextsHidden[index]}
+                        let:collapsed={hidden}
+                        toggleDisplay
+                    >
+                        <RichTextInput
+                            {hidden}
+                            on:focusout={() => {
+                                saveFieldNow();
+                                $focusedInput = null;
+                            }}
+                            bind:this={richTextInputs[index]}
+                        />
+                    </Collapsible>
+                </svelte:fragment>
+                <svelte:fragment slot="plain-text-input">
+                    <Collapsible
+                        collapse={plainTextsHidden[index]}
+                        let:collapsed={hidden}
+                        toggleDisplay
+                    >
+                        <PlainTextInput
+                            {hidden}
+                            on:focusout={() => {
+                                saveFieldNow();
+                                $focusedInput = null;
+                            }}
+                            bind:this={plainTextInputs[index]}
+                        />
+                    </Collapsible>
+                </svelte:fragment>
+            </EditorField>
+        {/each}
 
-            <MathjaxElement />
-            <FrameElement />
-        </DecoratedElements>
+        <MathjaxOverlay />
+        <ImageOverlay maxWidth={250} maxHeight={125} />
     </Fields>
 
-    <div class="note-editor-tag-editor">
+    <Shortcut
+        keyCombination="Control+Shift+T"
+        on:action={() => {
+            updateTagsCollapsed(false);
+        }}
+    />
+    <CollapseLabel
+        collapsed={$tagsCollapsed}
+        tooltip={$tagsCollapsed ? tr.editingExpand() : tr.editingCollapse()}
+        on:toggle={() => updateTagsCollapsed(!$tagsCollapsed)}
+    >
+        {@html `${tagAmount > 0 ? tagAmount : ""} ${tr.editingTags()}`}
+    </CollapseLabel>
+    <Collapsible toggleDisplay collapse={$tagsCollapsed}>
         <TagEditor {tags} on:tagsupdate={saveTags} />
-    </div>
+    </Collapsible>
 </div>
 
 <style lang="scss">
@@ -493,13 +602,5 @@ the AddCards dialog) should be implemented in the user of this component.
         display: flex;
         flex-direction: column;
         height: 100%;
-    }
-
-    .note-editor-tag-editor {
-        padding: 2px 0 0;
-
-        border-width: thin 0 0;
-        border-style: solid;
-        border-color: var(--medium-border);
     }
 </style>

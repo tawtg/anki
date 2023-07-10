@@ -1,25 +1,31 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
+use std::sync::Arc;
 
+use anki_i18n::I18n;
 use itertools::Itertools;
-use slog::debug;
+use tracing::debug;
 
-use crate::{
-    collection::Collection,
-    config::SchedulerVersion,
-    error::{AnkiError, DbError, DbErrorKind, Result},
-    i18n::I18n,
-    notetype::{
-        all_stock_notetypes, AlreadyGeneratedCardInfo, CardGenContext, Notetype, NotetypeId,
-        NotetypeKind,
-    },
-    prelude::*,
-    timestamp::{TimestampMillis, TimestampSecs},
-};
+use crate::collection::Collection;
+use crate::config::SchedulerVersion;
+use crate::error::AnkiError;
+use crate::error::DbError;
+use crate::error::DbErrorKind;
+use crate::error::Result;
+use crate::notetype::all_stock_notetypes;
+use crate::notetype::AlreadyGeneratedCardInfo;
+use crate::notetype::CardGenContext;
+use crate::notetype::Notetype;
+use crate::notetype::NotetypeId;
+use crate::notetype::NotetypeKind;
+use crate::prelude::*;
+use crate::progress::ThrottlingProgressHandler;
+use crate::timestamp::TimestampMillis;
+use crate::timestamp::TimestampSecs;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct CheckDatabaseOutput {
     card_properties_invalid: usize,
     card_position_too_high: usize,
@@ -31,14 +37,19 @@ pub struct CheckDatabaseOutput {
     field_count_mismatch: usize,
     notetypes_recovered: usize,
     invalid_utf8: usize,
+    invalid_ids: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum DatabaseCheckProgress {
+#[derive(Debug, Clone, Copy, Default)]
+pub enum DatabaseCheckProgress {
+    #[default]
     Integrity,
     Optimize,
     Cards,
-    Notes { current: u32, total: u32 },
+    Notes {
+        current: usize,
+        total: usize,
+    },
     History,
 }
 
@@ -77,6 +88,9 @@ impl CheckDatabaseOutput {
         if self.invalid_utf8 > 0 {
             probs.push(tr.database_check_notes_with_invalid_utf8(self.invalid_utf8));
         }
+        if self.invalid_ids > 0 {
+            probs.push(tr.database_check_fixed_invalid_ids(self.invalid_ids));
+        }
 
         probs.into_iter().map(Into::into).collect()
     }
@@ -84,57 +98,58 @@ impl CheckDatabaseOutput {
 
 impl Collection {
     /// Check the database, returning a list of problems that were fixed.
-    pub(crate) fn check_database<F>(&mut self, mut progress_fn: F) -> Result<CheckDatabaseOutput>
-    where
-        F: FnMut(DatabaseCheckProgress, bool),
-    {
-        progress_fn(DatabaseCheckProgress::Integrity, false);
-        debug!(self.log, "quick check");
+    pub(crate) fn check_database(&mut self) -> Result<CheckDatabaseOutput> {
+        let mut progress = self.new_progress_handler();
+        progress.set(DatabaseCheckProgress::Integrity)?;
+        debug!("quick check");
         if self.storage.quick_check_corrupt() {
-            debug!(self.log, "quick check failed");
+            debug!("quick check failed");
             return Err(AnkiError::db_error(
                 self.tr.database_check_corrupt(),
                 DbErrorKind::Corrupt,
             ));
         }
 
-        progress_fn(DatabaseCheckProgress::Optimize, false);
-        debug!(self.log, "optimize");
+        progress.set(DatabaseCheckProgress::Optimize)?;
+        debug!("optimize");
         self.storage.optimize()?;
 
-        self.transact_no_undo(|col| col.check_database_inner(progress_fn))
+        self.transact_no_undo(|col| col.check_database_inner(progress))
     }
 
-    fn check_database_inner<F>(&mut self, mut progress_fn: F) -> Result<CheckDatabaseOutput>
-    where
-        F: FnMut(DatabaseCheckProgress, bool),
-    {
+    fn check_database_inner(
+        &mut self,
+        mut progress: ThrottlingProgressHandler<DatabaseCheckProgress>,
+    ) -> Result<CheckDatabaseOutput> {
         let mut out = CheckDatabaseOutput::default();
 
         // cards first, as we need to be able to read them to process notes
-        progress_fn(DatabaseCheckProgress::Cards, false);
-        debug!(self.log, "check cards");
+        progress.set(DatabaseCheckProgress::Cards)?;
+        debug!("check cards");
         self.check_card_properties(&mut out)?;
         self.check_orphaned_cards(&mut out)?;
 
-        debug!(self.log, "check decks");
+        debug!("check decks");
         self.check_missing_deck_ids(&mut out)?;
         self.check_filtered_cards(&mut out)?;
 
-        debug!(self.log, "check notetypes");
-        self.check_notetypes(&mut out, &mut progress_fn)?;
+        debug!("check notetypes");
+        self.check_notetypes(&mut out, &mut progress)?;
 
-        progress_fn(DatabaseCheckProgress::History, false);
+        progress.set(DatabaseCheckProgress::History)?;
 
-        debug!(self.log, "check review log");
+        debug!("check review log");
         self.check_revlog(&mut out)?;
 
-        debug!(self.log, "missing decks");
+        debug!("missing decks");
         self.check_missing_deck_names(&mut out)?;
 
         self.update_next_new_position()?;
 
-        debug!(self.log, "db check finished: {:#?}", out);
+        debug!("invalid ids");
+        out.invalid_ids = self.maybe_fix_invalid_ids()?;
+
+        debug!("db check finished: {:#?}", out);
 
         Ok(out)
     }
@@ -195,14 +210,11 @@ impl Collection {
         Ok(())
     }
 
-    fn check_notetypes<F>(
+    fn check_notetypes(
         &mut self,
         out: &mut CheckDatabaseOutput,
-        mut progress_fn: F,
-    ) -> Result<()>
-    where
-        F: FnMut(DatabaseCheckProgress, bool),
-    {
+        progress: &mut ThrottlingProgressHandler<DatabaseCheckProgress>,
+    ) -> Result<()> {
         let nids_by_notetype = self.storage.all_note_ids_by_notetype()?;
         let norm = self.get_config_bool(BoolKey::NormalizeNoteText);
         let usn = self.usn()?;
@@ -213,10 +225,13 @@ impl Collection {
         self.storage.clear_all_tags()?;
 
         let total_notes = self.storage.total_notes()?;
-        let mut checked_notes = 0;
 
+        progress.set(DatabaseCheckProgress::Notes {
+            current: 0,
+            total: total_notes as usize,
+        })?;
         for (ntid, group) in &nids_by_notetype.into_iter().group_by(|tup| tup.0) {
-            debug!(self.log, "check notetype: {}", ntid);
+            debug!("check notetype: {}", ntid);
             let mut group = group.peekable();
             let nt = match self.get_notetype(ntid)? {
                 None => {
@@ -229,14 +244,10 @@ impl Collection {
 
             let mut genctx = None;
             for (_, nid) in group {
-                progress_fn(
-                    DatabaseCheckProgress::Notes {
-                        current: checked_notes,
-                        total: total_notes,
-                    },
-                    true,
-                );
-                checked_notes += 1;
+                progress.increment(|p| {
+                    let DatabaseCheckProgress::Notes { current, .. } = p else { unreachable!() };
+                    current
+                })?;
 
                 let mut note = self.get_note_fixing_invalid_utf8(nid, out)?;
                 let original = note.clone();
@@ -278,8 +289,8 @@ impl Collection {
         // to ensure to restore the collapse state
         self.storage.restore_expanded_tags(&expanded_tags)?;
 
-        // if the collection is empty and the user has deleted all note types, ensure at least
-        // one note type exists
+        // if the collection is empty and the user has deleted all note types, ensure at
+        // least one note type exists
         if self.storage.get_all_notetype_names()?.is_empty() {
             let mut nt = all_stock_notetypes(&self.tr).remove(0);
             self.add_notetype_inner(&mut nt, usn, true)?;
@@ -304,10 +315,13 @@ impl Collection {
         match self.storage.get_note(nid) {
             Ok(note) => Ok(note.unwrap()),
             Err(err) => match err {
-                AnkiError::DbError(DbError {
-                    kind: DbErrorKind::Utf8,
-                    ..
-                }) => {
+                AnkiError::DbError {
+                    source:
+                        DbError {
+                            kind: DbErrorKind::Utf8,
+                            ..
+                        },
+                } => {
                     // fix note then fetch again
                     self.storage.fix_invalid_utf8_in_note(nid)?;
                     out.invalid_utf8 += 1;
@@ -360,7 +374,7 @@ impl Collection {
         field_count: usize,
         previous_id: NotetypeId,
     ) -> Result<Arc<Notetype>> {
-        debug!(self.log, "create recovery notetype");
+        debug!("create recovery notetype");
         let extra_cards_required = self
             .storage
             .highest_card_ordinal_for_notetype(previous_id)?;
@@ -400,18 +414,28 @@ impl Collection {
         let pos = self.storage.max_new_card_position().unwrap_or(0);
         self.set_next_card_position(pos)
     }
+
+    pub(crate) fn maybe_fix_invalid_ids(&mut self) -> Result<usize> {
+        let now = TimestampMillis::now();
+        let tomorrow = now.adding_secs(24 * 60 * 60).0;
+        let num_invalid_ids = self.storage.invalid_ids(tomorrow)?;
+        if num_invalid_ids > 0 {
+            self.storage.fix_invalid_ids(tomorrow, now.0)?;
+            self.set_schema_modified()?;
+        }
+        Ok(num_invalid_ids)
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, decks::DeckId, search::SortMode};
-
-    fn progress_fn(_progress: DatabaseCheckProgress, _throttle: bool) {}
+    use crate::decks::DeckId;
+    use crate::search::SortMode;
 
     #[test]
     fn cards() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
         col.add_note(&mut note, DeckId(1))?;
@@ -421,7 +445,7 @@ mod test {
             .db
             .execute_batch("update cards set ivl=1.5,due=2000000,odue=1.5")?;
 
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -431,12 +455,12 @@ mod test {
             }
         );
         // should be idempotent
-        assert_eq!(col.check_database(progress_fn)?, Default::default());
+        assert_eq!(col.check_database()?, Default::default());
 
         // missing deck
         col.storage.db.execute_batch("update cards set did=123")?;
 
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -455,7 +479,7 @@ mod test {
 
         // missing note
         col.storage.remove_note(note.id)?;
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -473,7 +497,7 @@ mod test {
 
     #[test]
     fn revlog() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         col.storage.db.execute_batch(
             "
@@ -481,7 +505,7 @@ mod test {
         values (0,0,0,0,1.5,1.5,0,0,0)",
         )?;
 
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -498,7 +522,7 @@ mod test {
 
     #[test]
     fn note_card_link() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
         col.add_note(&mut note, DeckId(1))?;
@@ -509,7 +533,7 @@ mod test {
         card.id.0 += 1;
         col.storage.add_card(&mut card)?;
 
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -529,7 +553,7 @@ mod test {
         card.template_idx = 10;
         col.storage.add_card(&mut card)?;
 
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -547,7 +571,7 @@ mod test {
 
     #[test]
     fn note_fields() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
         col.add_note(&mut note, DeckId(1))?;
@@ -556,7 +580,7 @@ mod test {
         col.storage
             .db
             .execute_batch("update notes set flds = 'a\x1fb\x1fc\x1fd'")?;
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -571,7 +595,7 @@ mod test {
         col.storage
             .db
             .execute_batch("update notes set flds = 'a'")?;
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -587,7 +611,7 @@ mod test {
 
     #[test]
     fn deck_names() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let deck = col.get_or_create_normal_deck("foo::bar::baz")?;
         // includes default
@@ -599,7 +623,7 @@ mod test {
             .execute([deck.id])?;
         assert_eq!(col.storage.get_all_deck_names()?.len(), 2);
 
-        let out = col.check_database(progress_fn)?;
+        let out = col.check_database()?;
         assert_eq!(
             out,
             CheckDatabaseOutput {
@@ -621,7 +645,7 @@ mod test {
 
     #[test]
     fn tags() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
         note.tags.push("one".into());
@@ -630,7 +654,7 @@ mod test {
 
         col.set_tag_collapsed("one", false)?;
 
-        col.check_database(progress_fn)?;
+        col.check_database()?;
 
         assert!(col.storage.get_tag("one")?.unwrap().expanded);
         assert!(!col.storage.get_tag("two")?.unwrap().expanded);

@@ -14,7 +14,6 @@ from aqt.utils import openLink, showText, tr
 
 
 class LatestVersionFinder(QThread):
-
     newVerAvail = pyqtSignal(str)
     newMsg = pyqtSignal(dict)
     clockIsOff = pyqtSignal(float)
@@ -40,7 +39,7 @@ class LatestVersionFinder(QThread):
         d["proto"] = 1
 
         try:
-            r = requests.post(aqt.appUpdate, data=d)
+            r = requests.post(aqt.appUpdate, data=d, timeout=60)
             r.raise_for_status()
             resp = r.json()
         except:

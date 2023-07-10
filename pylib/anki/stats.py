@@ -63,7 +63,7 @@ class CardStats:
         self.txt += self.makeLine(k, v)
 
     def makeLine(self, k: str, v: str | int) -> str:
-        txt = "<tr><td align=left style='padding-right: 3px;'>"
+        txt = "<tr><td align=start style='padding-right: 3px;'>"
         txt += f"<b>{k}</b></td><td>{v}</td></tr>"
         return txt
 
@@ -164,6 +164,7 @@ from revlog where id > ? """
         rev = rev or 0
         relrn = relrn or 0
         filt = filt or 0
+
         # studied
         def bold(s: str) -> str:
             return "<b>" + str(s) + "</b>"
@@ -462,11 +463,11 @@ group by day order by day"""
         totd: dict[int, Any] = {}
         alltot = []
         allcnt: float = 0
-        for (n, col, lab) in spec:
+        for n, col, lab in spec:
             totcnt[n] = 0.0
             totd[n] = []
         for row in data:
-            for (n, col, lab) in spec:
+            for n, col, lab in spec:
                 if n not in sep:
                     sep[n] = []
                 sep[n].append((row[0], row[n]))
@@ -475,7 +476,7 @@ group by day order by day"""
                 totd[n].append((row[0], totcnt[n]))
             alltot.append((row[0], allcnt))
         ret = []
-        for (n, col, lab) in spec:
+        for n, col, lab in spec:
             if len(totd[n]) and totcnt[n]:
                 # bars
                 ret.append(dict(data=sep[n], color=col, label=lab))
@@ -599,7 +600,7 @@ group by day order by day)"""
         totd = []
         if not ivls or not all:
             return ""
-        for (grp, cnt) in ivls:
+        for grp, cnt in ivls:
             tot += cnt
             totd.append((grp, tot / float(all) * 100))
         if self.type == PERIOD_MONTH:
@@ -670,7 +671,7 @@ select count(), avg(ivl), max(ivl) from cards where did in %s and queue = {QUEUE
         d: dict[str, list] = {"lrn": [], "yng": [], "mtr": []}
         types = ("lrn", "yng", "mtr")
         eases = self._eases()
-        for (type, ease, cnt) in eases:
+        for type, ease, cnt in eases:
             if type == CARD_TYPE_LRN:
                 ease += 5
             elif type == CARD_TYPE_REV:
@@ -711,7 +712,7 @@ select count(), avg(ivl), max(ivl) from cards where did in %s and queue = {QUEUE
 
     def _easeInfo(self, eases: list[tuple[int, int, int]]) -> str:
         types = {PERIOD_MONTH: [0, 0], PERIOD_YEAR: [0, 0], PERIOD_LIFE: [0, 0]}
-        for (type, ease, cnt) in eases:
+        for type, ease, cnt in eases:
             if ease == 1:
                 types[type][0] += cnt
             else:
@@ -909,12 +910,12 @@ when you answer "good" on a review."""
         colon = ":"
         if bold:
             i.append(
-                ("<tr><td width=200 align=right>%s%s</td><td><b>%s</b></td></tr>")
+                ("<tr><td width=200 align=start>%s%s</td><td><b>%s</b></td></tr>")
                 % (a, colon, b)
             )
         else:
             i.append(
-                ("<tr><td width=200 align=right>%s%s</td><td>%s</td></tr>")
+                ("<tr><td width=200 align=end>%s%s</td><td>%s</td></tr>")
                 % (a, colon, b)
             )
 

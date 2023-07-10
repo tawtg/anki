@@ -4,14 +4,14 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any, Iterable, NewType, Sequence, no_type_check
+from typing import TYPE_CHECKING, Any, Iterable, NewType, Sequence
 
 if TYPE_CHECKING:
     import anki
 
 import anki.cards
 import anki.collection
-from anki import deckconfig_pb2, decks_pb2
+from anki import deck_config_pb2, decks_pb2
 from anki._legacy import DeprecatedNamesMixin, deprecated, print_deprecation_warning
 from anki.collection import OpChanges, OpChangesWithCount, OpChangesWithId
 from anki.consts import *
@@ -23,8 +23,8 @@ DeckTreeNode = decks_pb2.DeckTreeNode
 DeckNameId = decks_pb2.DeckNameId
 FilteredDeckConfig = decks_pb2.Deck.Filtered
 DeckCollapseScope = decks_pb2.SetDeckCollapsedRequest.Scope
-DeckConfigsForUpdate = deckconfig_pb2.DeckConfigsForUpdate
-UpdateDeckConfigs = deckconfig_pb2.UpdateDeckConfigsRequest
+DeckConfigsForUpdate = deck_config_pb2.DeckConfigsForUpdate
+UpdateDeckConfigs = deck_config_pb2.UpdateDeckConfigsRequest
 Deck = decks_pb2.Deck
 
 # type aliases until we can move away from dicts
@@ -590,15 +590,18 @@ DeckManager.register_deprecated_aliases(
 )
 
 
-@no_type_check
-def __getattr__(name):
-    if name == "defaultDeck":
-        print_deprecation_warning(
-            "defaultDeck is deprecated; call decks.id() without it"
-        )
-        return 0
-    elif name == "defaultDynamicDeck":
-        print_deprecation_warning("defaultDynamicDeck is replaced with new_filtered()")
-        return 1
-    else:
-        raise AttributeError(f"module {__name__} has no attribute {name}")
+if not TYPE_CHECKING:
+
+    def __getattr__(name):
+        if name == "defaultDeck":
+            print_deprecation_warning(
+                "defaultDeck is deprecated; call decks.id() without it"
+            )
+            return 0
+        elif name == "defaultDynamicDeck":
+            print_deprecation_warning(
+                "defaultDynamicDeck is replaced with new_filtered()"
+            )
+            return 1
+        else:
+            raise AttributeError(f"module {__name__} has no attribute {name}")

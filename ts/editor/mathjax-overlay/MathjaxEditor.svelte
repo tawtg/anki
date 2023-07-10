@@ -2,15 +2,26 @@
 Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
+<script context="module" lang="ts">
+    import { writable } from "svelte/store";
+
+    export let closeMathjaxEditor: (() => void) | null = null;
+
+    const closeSignalStore = writable<symbol>(Symbol(), (set) => {
+        closeMathjaxEditor = () => set(Symbol());
+        return () => (closeMathjaxEditor = null);
+    });
+</script>
+
 <script lang="ts">
+    import * as tr from "@tslib/ftl";
+    import { noop } from "@tslib/functional";
+    import { isArrowLeft, isArrowRight } from "@tslib/keys";
+    import { getPlatformString } from "@tslib/shortcuts";
     import type CodeMirrorLib from "codemirror";
     import { createEventDispatcher, onMount } from "svelte";
     import type { Writable } from "svelte/store";
 
-    import * as tr from "../../lib/ftl";
-    import { noop } from "../../lib/functional";
-    import { isArrowLeft, isArrowRight } from "../../lib/keys";
-    import { getPlatformString } from "../../lib/shortcuts";
     import { pageTheme } from "../../sveltelib/theme";
     import { baseOptions, focusAndSetCaret, latex } from "../code-mirror";
     import type { CodeMirrorAPI } from "../CodeMirror.svelte";
@@ -51,7 +62,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         editor.on(
             "keydown",
             (_instance: CodeMirrorLib.Editor, event: KeyboardEvent): void => {
-                if (isArrowLeft(event)) {
+                if (event.key === "Escape") {
+                    dispatch("close");
+                    event.stopPropagation();
+                } else if (isArrowLeft(event)) {
                     direction = "start";
                 } else if (isArrowRight(event)) {
                     direction = "end";
@@ -91,6 +105,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             }
         });
     });
+
+    $: $closeSignalStore, dispatch("close");
 </script>
 
 <div class="mathjax-editor" class:light-theme={!$pageTheme.isDark}>
@@ -99,7 +115,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         {configuration}
         bind:api={codeMirror}
         on:change={({ detail: mathjaxText }) => code.set(mathjaxText)}
-        on:tab
+        on:blur
     />
 </div>
 
@@ -111,7 +127,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         overflow: hidden;
 
         :global(.CodeMirror) {
-            max-width: 28rem;
+            max-width: 100ch;
             min-width: 14rem;
             margin-bottom: 0.25rem;
         }
@@ -126,7 +142,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             font-family: sans-serif;
             font-size: 55%;
             text-align: center;
-            color: var(--slightly-grey-text);
+            color: var(--fg-subtle);
         }
     }
 </style>

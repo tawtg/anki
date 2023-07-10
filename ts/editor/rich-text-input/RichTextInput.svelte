@@ -25,12 +25,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     function editingInputIsRichText(
-        editingInput: EditingInputAPI | null,
+        editingInput: EditingInputAPI,
     ): editingInput is RichTextInputAPI {
-        return editingInput?.name === "rich-text";
+        return editingInput.name === "rich-text";
     }
 
-    import { registerPackage } from "../../lib/runtime-require";
+    import { registerPackage } from "@tslib/runtime-require";
+
     import contextProperty from "../../sveltelib/context-property";
     import lifecycleHooks from "../../sveltelib/lifecycle-hooks";
     import { Surrounder } from "../surround";
@@ -41,7 +42,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     const [lifecycle, instances, setupLifecycleHooks] =
         lifecycleHooks<RichTextInputAPI>();
     const apiStore = writable<SurroundedAPI | null>(null);
-    const surrounder = Surrounder.make(apiStore);
+    const surrounder = Surrounder.make<string>(apiStore);
 
     registerPackage("anki/RichTextInput", {
         context,
@@ -54,23 +55,25 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         context,
         editingInputIsRichText,
         globalInputHandler as inputHandler,
+        lifecycle,
         surrounder,
     };
 </script>
 
 <script lang="ts">
-    import { getAllContexts, getContext, onMount } from "svelte";
+    import { directionKey, fontFamilyKey, fontSizeKey } from "@tslib/context-keys";
+    import { promiseWithResolver } from "@tslib/promise";
+    import { singleCallback } from "@tslib/typing";
+    import { getAllContexts, getContext, onMount, tick } from "svelte";
     import type { Readable } from "svelte/store";
 
     import { placeCaretAfterContent } from "../../domlib/place-caret";
     import ContentEditable from "../../editable/ContentEditable.svelte";
-    import { directionKey, fontFamilyKey, fontSizeKey } from "../../lib/context-keys";
-    import { promiseWithResolver } from "../../lib/promise";
-    import { singleCallback } from "../../lib/typing";
     import useDOMMirror from "../../sveltelib/dom-mirror";
     import useInputHandler from "../../sveltelib/input-handler";
     import { pageTheme } from "../../sveltelib/theme";
     import { context as editingAreaContext } from "../EditingArea.svelte";
+    import { Flag } from "../helpers";
     import { context as noteEditorContext } from "../NoteEditor.svelte";
     import getNormalizingNodeStore from "./normalizing-node-store";
     import useRichTextResolve from "./rich-text-resolve";
@@ -78,6 +81,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import { fragmentToStored, storedToFragment } from "./transform";
 
     export let hidden = false;
+    export const focusFlag = new Flag();
 
     const { focusedInput } = noteEditorContext.get();
     const { content, editingInputs } = editingAreaContext.get();
@@ -126,7 +130,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         return hidden;
     }
 
-    const className = "rich-text-editable";
     let richTextDiv: HTMLElement;
 
     async function getInputAPI(target: EventTarget): Promise<FocusableInputAPI | null> {
@@ -191,7 +194,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         $apiStore = null;
     }
 
-    $: pushUpdate(!hidden);
+    $: {
+        pushUpdate(!hidden);
+        if (focusFlag.checkAndReset()) {
+            tick().then(refocus);
+        }
+    }
 
     onMount(() => {
         $editingInputs.push(api);
@@ -221,29 +229,48 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         let:attachToShadow={attachStyles}
         let:stylesDidLoad
     >
-        <div
-            bind:this={richTextDiv}
-            class={className}
-            class:night-mode={$pageTheme.isDark}
-            use:attachShadow
-            use:attachStyles
-            use:attachContentEditable={{ stylesDidLoad }}
-            on:focusin
-            on:focusout
-        />
+        <div class="rich-text-relative">
+            <div
+                class="rich-text-editable"
+                class:empty={$content.length === 0}
+                bind:this={richTextDiv}
+                use:attachShadow
+                use:attachStyles
+                use:attachContentEditable={{ stylesDidLoad }}
+                on:focusin
+                on:focusout
+            />
 
-        {#await Promise.all([richTextPromise, stylesDidLoad]) then _}
-            <div class="rich-text-widgets">
-                <slot />
-            </div>
-        {/await}
+            {#await Promise.all([richTextPromise, stylesDidLoad]) then _}
+                <div class="rich-text-widgets">
+                    <slot />
+                </div>
+            {/await}
+        </div>
     </RichTextStyles>
-    <slot name="plain-text-badge" />
 </div>
 
 <style lang="scss">
     .rich-text-input {
+        height: 100%;
+
+        background-color: var(--canvas-elevated);
+        padding: 6px;
+    }
+
+    .rich-text-relative {
         position: relative;
-        margin: 6px;
+    }
+
+    .rich-text-editable.empty::before {
+        position: absolute;
+        color: var(--fg-subtle);
+        content: var(--description-content);
+        font-size: var(--description-font-size, 20px);
+        cursor: text;
+        max-width: 95%;
+        overflow-x: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
     }
 </style>

@@ -1,21 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    collections::{HashMap, HashSet},
-    iter::Peekable,
-    ops::AddAssign,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::iter::Peekable;
+use std::ops::AddAssign;
 
+pub use anki_proto::decks::set_deck_collapsed_request::Scope as DeckCollapseScope;
+use anki_proto::decks::DeckTreeNode;
 use serde_tuple::Serialize_tuple;
 use unicase::UniCase;
 
-use super::{
-    limits::{remaining_limits_map, RemainingLimits},
-    DueCounts,
-};
-pub use crate::pb::set_deck_collapsed_request::Scope as DeckCollapseScope;
-use crate::{config::SchedulerVersion, ops::OpOutput, pb::DeckTreeNode, prelude::*, undo::Op};
+use super::limits::remaining_limits_map;
+use super::limits::RemainingLimits;
+use super::DueCounts;
+use crate::config::SchedulerVersion;
+use crate::ops::OpOutput;
+use crate::prelude::*;
+use crate::undo::Op;
 
 fn deck_names_to_tree(names: impl Iterator<Item = (DeckId, String)>) -> DeckTreeNode {
     let mut top = DeckTreeNode::default();
@@ -176,12 +178,15 @@ impl NodeCountsV3 {
         let mut remaining_reviews = remaining.review.saturating_sub(capped.interday_learning);
         // any remaining review limit is applied to reviews
         capped.review = capped.review.min(remaining_reviews);
-        remaining_reviews = remaining_reviews.saturating_sub(capped.review);
-        // new cards last, capped to new and remaining review limits
-        capped.new = capped.new.min(remaining_reviews).min(remaining.new);
+        capped.new = capped.new.min(remaining.new);
+        if remaining.cap_new_to_review {
+            remaining_reviews = remaining_reviews.saturating_sub(capped.review);
+            capped.new = capped.new.min(remaining_reviews);
+        }
         capped
     }
 }
+
 impl AddAssign for NodeCountsV3 {
     fn add_assign(&mut self, rhs: Self) {
         self.new += rhs.new;
@@ -238,35 +243,36 @@ fn hide_default_deck(node: &mut DeckTreeNode) {
                 // can't remove if there are no other decks
             } else {
                 // safe to remove
-                node.children.remove(idx);
+                _ = node.children.remove(idx);
             }
             return;
         }
     }
 }
 
-impl DeckTreeNode {
-    /// Locate provided deck in tree, and return it.
-    pub fn get_deck(self, deck_id: DeckId) -> Option<DeckTreeNode> {
-        if self.deck_id == deck_id.0 {
-            return Some(self);
+/// Locate provided deck in tree, and return it.
+pub fn get_deck_in_tree(tree: DeckTreeNode, deck_id: DeckId) -> Option<DeckTreeNode> {
+    if tree.deck_id == deck_id.0 {
+        return Some(tree);
+    }
+    for child in tree.children {
+        if let Some(node) = get_deck_in_tree(child, deck_id) {
+            return Some(node);
         }
-        for child in self.children {
-            if let Some(node) = child.get_deck(deck_id) {
-                return Some(node);
-            }
-        }
-
-        None
     }
 
-    pub(crate) fn sum<T: AddAssign>(&self, map: fn(&DeckTreeNode) -> T) -> T {
-        let mut output = map(self);
-        for child in &self.children {
-            output += child.sum(map);
-        }
-        output
+    None
+}
+
+pub(crate) fn sum_deck_tree_node<T: AddAssign>(
+    node: &DeckTreeNode,
+    map: fn(&DeckTreeNode) -> T,
+) -> T {
+    let mut output = map(node);
+    for child in &node.children {
+        output += sum_deck_tree_node(child, map)
     }
+    output
 }
 
 #[derive(Serialize_tuple)]
@@ -321,10 +327,18 @@ impl Collection {
             let learn_cutoff = (timestamp.0 as u32) + self.learn_ahead_secs();
             let sched_ver = self.scheduler_version();
             let v3 = self.get_config_bool(BoolKey::Sched2021);
+            let new_cards_ignore_review_limit =
+                self.get_config_bool(BoolKey::NewCardsIgnoreReviewLimit);
             let counts = self.due_counts(days_elapsed, learn_cutoff)?;
             let dconf = self.storage.get_deck_config_map()?;
             add_counts(&mut tree, &counts);
-            let limits = remaining_limits_map(decks_map.values(), &dconf, days_elapsed, v3);
+            let limits = remaining_limits_map(
+                decks_map.values(),
+                &dconf,
+                days_elapsed,
+                v3,
+                new_cards_ignore_review_limit,
+            );
             if sched_ver == SchedulerVersion::V2 {
                 if v3 {
                     sum_counts_and_apply_limits_v3(&mut tree, &limits);
@@ -342,7 +356,7 @@ impl Collection {
     pub fn current_deck_tree(&mut self) -> Result<Option<DeckTreeNode>> {
         let target = self.get_current_deck_id();
         let tree = self.deck_tree(Some(TimestampSecs::now()))?;
-        Ok(tree.get_deck(target))
+        Ok(get_deck_in_tree(tree, target))
     }
 
     pub fn set_deck_collapsed(
@@ -393,11 +407,12 @@ impl Collection {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, deckconfig::DeckConfigId, error::Result};
+    use crate::deckconfig::DeckConfigId;
+    use crate::error::Result;
 
     #[test]
     fn wellformed() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         col.get_or_create_normal_deck("1")?;
         col.get_or_create_normal_deck("2")?;
@@ -421,7 +436,7 @@ mod test {
 
     #[test]
     fn malformed() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         col.get_or_create_normal_deck("1")?;
         col.get_or_create_normal_deck("2::3::4")?;
@@ -438,7 +453,7 @@ mod test {
 
     #[test]
     fn counts() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
         let mut parent_deck = col.get_or_create_normal_deck("Default")?;
         let mut child_deck = col.get_or_create_normal_deck("Default::one")?;
@@ -488,7 +503,7 @@ mod test {
             deck
         }
 
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         col.set_config_bool(BoolKey::Sched2021, true, false)?;
 
         let parent_deck = create_deck_with_new_limit(&mut col, "Default", 8);
@@ -514,7 +529,8 @@ mod test {
         assert_eq!(parent.children[0].children[1].new_count, 1);
         // child: cards from self and children, limited by own new limit
         assert_eq!(parent.children[0].new_count, 4);
-        // parent: cards from self and all subdecks, all limits in the hierarchy are respected
+        // parent: cards from self and all subdecks, all limits in the hierarchy are
+        // respected
         assert_eq!(parent.new_count, 6);
         assert_eq!(parent.total_including_children, 8);
         assert_eq!(parent.total_in_deck, 2);

@@ -1,10 +1,12 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{collections::HashMap, mem};
+use std::collections::HashMap;
+use std::mem;
 
 use super::Context;
-use crate::{decks::NormalDeck, prelude::*};
+use crate::decks::NormalDeck;
+use crate::prelude::*;
 
 struct DeckContext<'d> {
     target_col: &'d mut Collection,
@@ -30,10 +32,15 @@ impl Context<'_> {
     pub(super) fn import_decks_and_configs(
         &mut self,
         keep_filtered: bool,
+        contains_scheduling: bool,
     ) -> Result<HashMap<DeckId, DeckId>> {
         let mut ctx = DeckContext::new(self.target_col, self.usn);
         ctx.import_deck_configs(mem::take(&mut self.data.deck_configs))?;
-        ctx.import_decks(mem::take(&mut self.data.decks), keep_filtered)?;
+        ctx.import_decks(
+            mem::take(&mut self.data.decks),
+            keep_filtered,
+            contains_scheduling,
+        )?;
         Ok(ctx.imported_decks)
     }
 }
@@ -47,23 +54,39 @@ impl DeckContext<'_> {
         Ok(())
     }
 
-    fn import_decks(&mut self, mut decks: Vec<Deck>, keep_filtered: bool) -> Result<()> {
+    fn import_decks(
+        &mut self,
+        mut decks: Vec<Deck>,
+        keep_filtered: bool,
+        contains_scheduling: bool,
+    ) -> Result<()> {
         // ensure parents are seen before children
         decks.sort_unstable_by_key(|deck| deck.level());
         for deck in &mut decks {
-            self.prepare_deck(deck, keep_filtered);
+            self.prepare_deck(deck, keep_filtered, contains_scheduling);
             self.import_deck(deck)?;
         }
         Ok(())
     }
 
-    fn prepare_deck(&self, deck: &mut Deck, keep_filtered: bool) {
+    fn prepare_deck(&self, deck: &mut Deck, keep_filtered: bool, contains_scheduling: bool) {
         self.maybe_reparent(deck);
         if !keep_filtered && deck.is_filtered() {
             deck.kind = DeckKind::Normal(NormalDeck {
                 config_id: 1,
                 ..Default::default()
             });
+        } else if !contains_scheduling {
+            // reset things like today's study count and collapse state
+            deck.common = Default::default();
+            deck.kind = match &mut deck.kind {
+                DeckKind::Normal(normal) => DeckKind::Normal(NormalDeck {
+                    config_id: 1,
+                    description: mem::take(&mut normal.description),
+                    ..Default::default()
+                }),
+                DeckKind::Filtered(_) => unreachable!(),
+            }
         }
     }
 
@@ -118,11 +141,11 @@ impl DeckContext<'_> {
     fn update_deck(&mut self, deck: &Deck, original: Deck) -> Result<()> {
         let mut new_deck = original.clone();
         if let (Ok(new), Ok(old)) = (new_deck.normal_mut(), deck.normal()) {
-            new.update_with_other(old);
+            update_normal_with_other(new, old);
         } else if let (Ok(new), Ok(old)) = (new_deck.filtered_mut(), deck.filtered()) {
             *new = old.clone();
         } else {
-            return Err(AnkiError::invalid_input("decks have different kinds"));
+            invalid_input!("decks have different kinds");
         }
         self.imported_decks.insert(deck.id, new_deck.id);
         self.target_col
@@ -165,20 +188,18 @@ impl Deck {
     }
 }
 
-impl NormalDeck {
-    fn update_with_other(&mut self, other: &Self) {
-        if !other.description.is_empty() {
-            self.markdown_description = other.markdown_description;
-            self.description = other.description.clone();
-        }
-        if other.config_id != 1 {
-            self.config_id = other.config_id;
-        }
-        self.review_limit = other.review_limit.or(self.review_limit);
-        self.new_limit = other.new_limit.or(self.new_limit);
-        self.review_limit_today = other.review_limit_today.or(self.review_limit_today);
-        self.new_limit_today = other.new_limit_today.or(self.new_limit_today);
+fn update_normal_with_other(normal: &mut NormalDeck, other: &NormalDeck) {
+    if !other.description.is_empty() {
+        normal.markdown_description = other.markdown_description;
+        normal.description = other.description.clone();
     }
+    if other.config_id != 1 {
+        normal.config_id = other.config_id;
+    }
+    normal.review_limit = other.review_limit.or(normal.review_limit);
+    normal.new_limit = other.new_limit.or(normal.new_limit);
+    normal.review_limit_today = other.review_limit_today.or(normal.review_limit_today);
+    normal.new_limit_today = other.new_limit_today.or(normal.new_limit_today);
 }
 
 #[cfg(test)]
@@ -186,26 +207,25 @@ mod test {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::{collection::open_test_collection, tests::new_deck_with_machine_name};
 
     #[test]
     fn parents() {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
 
-        col.add_deck_with_machine_name("filtered", true);
-        col.add_deck_with_machine_name("PARENT", false);
+        DeckAdder::new("filtered").filtered(true).add(&mut col);
+        DeckAdder::new("PARENT").add(&mut col);
 
         let mut ctx = DeckContext::new(&mut col, Usn(1));
         ctx.unique_suffix = "★".to_string();
 
         let imports = vec![
-            new_deck_with_machine_name("unknown parent\x1fchild", false),
-            new_deck_with_machine_name("filtered\x1fchild", false),
-            new_deck_with_machine_name("parent\x1fchild", false),
-            new_deck_with_machine_name("NEW PARENT\x1fchild", false),
-            new_deck_with_machine_name("new parent", false),
+            DeckAdder::new("unknown parent::child").deck(),
+            DeckAdder::new("filtered::child").deck(),
+            DeckAdder::new("parent::child").deck(),
+            DeckAdder::new("NEW PARENT::child").deck(),
+            DeckAdder::new("new parent").deck(),
         ];
-        ctx.import_decks(imports, false).unwrap();
+        ctx.import_decks(imports, false, false).unwrap();
         let existing_decks: HashSet<_> = ctx
             .target_col
             .get_all_deck_names(true)

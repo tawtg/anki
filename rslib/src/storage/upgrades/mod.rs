@@ -8,7 +8,8 @@ pub(super) const SCHEMA_STARTING_VERSION: u8 = 11;
 /// The maximum schema version we can open.
 pub(super) const SCHEMA_MAX_VERSION: u8 = 18;
 
-use super::{SchemaVersion, SqliteStorage};
+use super::SchemaVersion;
+use super::SqliteStorage;
 use crate::error::Result;
 
 impl SqliteStorage {
@@ -76,14 +77,39 @@ impl SqliteStorage {
 
 #[cfg(test)]
 mod test {
+    use anki_io::new_tempfile;
+
     use super::*;
+    use crate::collection::CollectionBuilder;
+    use crate::prelude::*;
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn assert_18_is_latest_schema_version() {
-        assert!(
-            18 == SCHEMA_MAX_VERSION,
+        assert_eq!(
+            18, SCHEMA_MAX_VERSION,
             "must implement SqliteStorage::downgrade_to(SchemaVersion::V18)"
         );
+    }
+
+    #[test]
+    fn valid_ease_factor_survives_upgrade_roundtrip() -> Result<()> {
+        let tempfile = new_tempfile()?;
+        let mut col = CollectionBuilder::default()
+            .set_collection_path(tempfile.path())
+            .build()?;
+        let nt = col.get_notetype_by_name("Basic")?.unwrap();
+        let mut note = nt.new_note();
+        col.add_note(&mut note, DeckId(1))?;
+        col.storage
+            .db
+            .execute("update cards set factor = 1400", [])?;
+        col.close(Some(SchemaVersion::V11))?;
+        let col = CollectionBuilder::default()
+            .set_collection_path(tempfile.path())
+            .build()?;
+        let card = &col.storage.get_all_cards()[0];
+        assert_eq!(card.ease_factor, 1400);
+        Ok(())
     }
 }

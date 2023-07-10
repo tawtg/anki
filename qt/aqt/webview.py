@@ -1,14 +1,18 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
 import dataclasses
 import json
 import re
 import sys
+from enum import Enum
 from typing import Any, Callable, Optional, Sequence, cast
 
 import anki
 import anki.lang
+from anki._legacy import deprecated
 from anki.lang import is_rtl
 from anki.utils import is_lin, is_mac, is_win
 from aqt import colors, gui_hooks
@@ -174,7 +178,7 @@ class WebContent:
 
     Important Notes:
         - When modifying the attributes specified above, please make sure your
-        changes only perform the minimum requried edits to make your add-on work.
+        changes only perform the minimum required edits to make your add-on work.
         You should avoid overwriting or interfering with existing data as much
         as possible, instead opting to append your own changes, e.g.:
 
@@ -221,21 +225,49 @@ class WebContent:
 ##########################################################################
 
 
+class AnkiWebViewKind(Enum):
+    """Enum registry of all web views managed by Anki
+
+    The value of each entry corresponds to the web view's title.
+
+    When introducing a new web view, please add it to the registry below.
+    """
+
+    MAIN = "main webview"
+    TOP_TOOLBAR = "top toolbar"
+    BOTTOM_TOOLBAR = "bottom toolbar"
+    DECK_OPTIONS = "deck options"
+    EDITOR = "editor"
+    LEGACY_DECK_STATS = "legacy deck stats"
+    DECK_STATS = "deck stats"
+    PREVIEWER = "previewer"
+    CHANGE_NOTETYPE = "change notetype"
+    CARD_LAYOUT = "card layout"
+    BROWSER_CARD_INFO = "browser card info"
+    IMPORT_CSV = "csv import"
+    EMPTY_CARDS = "empty cards"
+    FIND_DUPLICATES = "find duplicates"
+    FIELDS = "fields"
+
+
 class AnkiWebView(QWebEngineView):
     allow_drops = False
+    _kind: AnkiWebViewKind | None
 
     def __init__(
         self,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         title: str = "default",
+        kind: AnkiWebViewKind | None = None,
     ) -> None:
         QWebEngineView.__init__(self, parent=parent)
-        self.set_title(title)
+        if kind:
+            self.set_kind(kind)
+        else:
+            self.set_title(title)
         self._page = AnkiWebPage(self._onBridgeCmd)
         # reduce flicker
-        self._page.setBackgroundColor(
-            self.get_window_bg_color(theme_manager.night_mode)
-        )
+        self._page.setBackgroundColor(theme_manager.qcolor(colors.CANVAS))
 
         # in new code, use .set_bridge_command() instead of setting this directly
         self.onBridgeCmd: Callable[[str], Any] = self.defaultOnBridgeCmd
@@ -248,13 +280,30 @@ class AnkiWebView(QWebEngineView):
 
         self.resetHandlers()
         self._filterSet = False
-        QShortcut(  # type: ignore
-            QKeySequence("Esc"),
-            self,
-            context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
-            activated=self.onEsc,
-        )
         gui_hooks.theme_did_change.append(self.on_theme_did_change)
+        gui_hooks.body_classes_need_update.append(self.on_body_classes_need_update)
+
+        qconnect(self.loadFinished, self._on_load_finished)
+
+    def _on_load_finished(self) -> None:
+        self.eval(
+            """
+        document.addEventListener("keydown", function(evt) {
+            if (evt.keyCode === 27) {
+                pycmd("close");
+            }
+        });
+        """
+        )
+
+    def set_kind(self, kind: AnkiWebViewKind) -> None:
+        self._kind = kind
+        self.set_title(kind.value)
+
+    @property
+    def kind(self) -> AnkiWebViewKind | None:
+        """Used by add-ons to identify the webview kind"""
+        return self._kind
 
     def set_title(self, title: str) -> None:
         self.title = title  # type: ignore[assignment]
@@ -333,7 +382,6 @@ class AnkiWebView(QWebEngineView):
         self._domDone = True
         self._queueAction("setHtml", html)
         self.set_open_links_externally(True)
-        self.setZoomFactor(1)
         self.allow_drops = False
         self.show()
 
@@ -404,48 +452,40 @@ class AnkiWebView(QWebEngineView):
         else:
             return 3
 
-    def get_window_bg_color(self, night_mode: bool) -> QColor:
-        if night_mode:
-            return QColor(colors.WINDOW_BG[1])
-        elif is_mac:
-            # standard palette does not return correct window color on macOS
-            return QColor("#ececec")
-        else:
-            return theme_manager.default_palette.color(QPalette.ColorRole.Window)
-
     def standard_css(self) -> str:
-        palette = theme_manager.default_palette
-        color_hl = palette.color(QPalette.ColorRole.Highlight).name()
+        color_hl = theme_manager.var(colors.BORDER_FOCUS)
 
         if is_win:
             # T: include a font for your language on Windows, eg: "Segoe UI", "MS Mincho"
             family = tr.qt_misc_segoe_ui()
             button_style = f"""
 button {{ font-family: {family}; }}
-button:focus {{ outline: 5px auto {color_hl}; }}"""
-            font = f"font-size:12px;font-family:{family};"
+            """
+            font = f"font-family:{family};"
         elif is_mac:
             family = "Helvetica"
-            font = f'font-size:15px;font-family:"{family}";'
-            color = ""
-            if not theme_manager.night_mode:
-                color = "background: #fff; border: 1px solid #ccc;"
-            button_style = (
-                """
-button { -webkit-appearance: none; %s
-border-radius:5px; font-family: Helvetica }"""
-                % color
-            )
+            font = f'font-family:"{family}";'
+            button_style = """
+button {
+    --canvas: #fff;
+    -webkit-appearance: none;
+    background: var(--canvas);
+    border-radius: var(--border-radius);
+    padding: 3px 12px;
+    border: 0.5px solid var(--border);
+    box-shadow: 0px 1px 3px var(--border-subtle);
+    font-family: Helvetica
+}
+.night-mode button { --canvas: #606060; --fg: #eee; }
+"""
         else:
             family = self.font().family()
-            color_hl_txt = palette.color(QPalette.ColorRole.HighlightedText).name()
-            font = f'font-size:14px;font-family:"{family}", sans-serif;'
+            font = f'font-family:"{family}", sans-serif;'
             button_style = """
 /* Buttons */
 button{{ 
-        font-family:"{family}", sans-serif; }}
-button:focus{{ border-color: {color_hl} }}
-button:active, button:active:hover {{ background-color: {color_hl}; color: {color_hl_txt};}}
+    font-family: "{family}", sans-serif;
+}}
 /* Input field focus outline */
 textarea:focus, input:focus, input[type]:focus, .uneditable-input:focus,
 div[contenteditable="true"]:focus {{   
@@ -454,20 +494,16 @@ div[contenteditable="true"]:focus {{
 }}""".format(
                 family=family,
                 color_hl=color_hl,
-                color_hl_txt=color_hl_txt,
             )
 
         zoom = self.app_zoom_factor()
 
-        window_bg_day = self.get_window_bg_color(False).name()
-        window_bg_night = self.get_window_bg_color(True).name()
-
         return f"""
-body {{ zoom: {zoom}; background-color: var(--window-bg); }}
+body {{ zoom: {zoom}; background-color: var(--canvas); }}
 html {{ {font} }}
 {button_style}
-:root {{ --window-bg: {window_bg_day} }}
-:root[class*=night-mode] {{ --window-bg: {window_bg_night} }}
+:root {{ --canvas: {colors.CANVAS["light"]} }}
+:root[class*=night-mode] {{ --canvas: {colors.CANVAS["dark"]} }}
 """
 
     def stdHtml(
@@ -510,8 +546,10 @@ html {{ {font} }}
 
         if theme_manager.night_mode:
             doc_class = "night-mode"
+            bs_theme = "dark"
         else:
             doc_class = ""
+            bs_theme = "light"
 
         if is_rtl(anki.lang.current_lang):
             lang_dir = "rtl"
@@ -520,7 +558,7 @@ html {{ {font} }}
 
         html = f"""
 <!doctype html>
-<html class="{doc_class}" dir="{lang_dir}">
+<html class="{doc_class}" dir="{lang_dir}" data-bs-theme="{bs_theme}">
 <head>
     <title>{self.title}</title>
 {head}
@@ -614,6 +652,8 @@ html {{ {font} }}
         if cmd == "domDone":
             self._domDone = True
             self._maybeRunActions()
+        elif cmd == "close":
+            self.onEsc()
         else:
             handled, result = gui_hooks.webview_did_receive_js_message(
                 (False, None), cmd, self._bridge_context
@@ -638,7 +678,6 @@ html {{ {font} }}
         from aqt import mw
 
         if qvar is None:
-
             mw.progress.single_shot(1000, mw.reset)
             return
 
@@ -659,23 +698,31 @@ html {{ {font} }}
         self.setSizePolicy(sp)
         self.hide()
 
-    def inject_dynamic_style_and_show(self) -> None:
-        "Add dynamic styling, and reveal."
+    def add_dynamic_styling_and_props_then_show(self) -> None:
+        "Add dynamic styling, title, set platform-specific body classes and reveal."
         css = self.standard_css()
+        body_classes = theme_manager.body_class().split(" ")
 
-        def after_style(arg: Any) -> None:
+        def after_injection(arg: Any) -> None:
             gui_hooks.webview_did_inject_style_into_page(self)
             self.show()
 
+        if theme_manager.night_mode:
+            night_mode = 'document.documentElement.classList.add("night-mode");'
+        else:
+            night_mode = ""
         self.evalWithCallback(
             f"""
 (function(){{
+    document.title = `{self.title}`;
     const style = document.createElement('style');
     style.innerHTML = `{css}`;
     document.head.appendChild(style);
+    document.body.classList.add({", ".join([f'"{c}"' for c in body_classes])});
+    {night_mode}
 }})();
 """,
-            after_style,
+            after_injection,
         )
 
     def load_ts_page(self, name: str) -> None:
@@ -686,10 +733,8 @@ html {{ {font} }}
             extra = "#night"
         else:
             extra = ""
-        self.hide_while_preserving_layout()
-        self.setZoomFactor(1)
         self.load_url(QUrl(f"{mw.serverURL()}_anki/pages/{name}.html{extra}"))
-        self.inject_dynamic_style_and_show()
+        self.add_dynamic_styling_and_props_then_show()
 
     def force_load_hack(self) -> None:
         """Force process to initialize.
@@ -706,56 +751,46 @@ html {{ {font} }}
             return
 
         gui_hooks.theme_did_change.remove(self.on_theme_did_change)
+        gui_hooks.body_classes_need_update.remove(self.on_body_classes_need_update)
         mw.mediaServer.clear_page_html(id(self))
         self._page.deleteLater()
 
     def on_theme_did_change(self) -> None:
         # avoid flashes if page reloaded
-        self._page.setBackgroundColor(
-            self.get_window_bg_color(theme_manager.night_mode)
-        )
+        self._page.setBackgroundColor(theme_manager.qcolor(colors.CANVAS))
         # update night-mode class, and legacy nightMode/night-mode body classes
         self.eval(
             f"""
 (function() {{
-    const doc = document.documentElement.classList;
+    const doc = document.documentElement;
     const body = document.body.classList;
     if ({1 if theme_manager.night_mode else 0}) {{
-        doc.add("night-mode");
-        body.add("night-mode");
+        doc.dataset.bsTheme = "dark";
+        doc.classList.add("night-mode");
+        body.add("night_mode");
         body.add("nightMode");
+        {"body.add('macos-dark-mode');" if theme_manager.macos_dark_mode() else ""}
     }} else {{
-        doc.remove("night-mode");
-        body.remove("night-mode");
+        doc.dataset.bsTheme = "light";
+        doc.classList.remove("night-mode");
+        body.remove("night_mode");
         body.remove("nightMode");
+        body.remove("macos-dark-mode");
     }}
 }})();
 """
         )
 
-    def _fix_editor_background_color_and_show(self) -> None:
-        # The editor does not use our standard CSS, which takes care of matching the background
-        # colour of the webview to the window we're showing it in. This causes a difference in
-        # shades on Windows/Linux in day mode, that we need to work around. This is a temporary
-        # fix before the 2.1.50 release; with more time there may be a better way to do this.
+    def on_body_classes_need_update(self) -> None:
+        from aqt import mw
 
-        if theme_manager.night_mode:
-            # The styling changes are not required for night mode, and hiding+showing the
-            # webview causes a flash of black.
-            return
-
-        self.hide()
-
-        window_bg_day = self.get_window_bg_color(False).name()
-        css = f":root {{ --window-bg: {window_bg_day} }}"
-        self.evalWithCallback(
-            f"""
-(function(){{
-    const style = document.createElement('style');
-    style.innerHTML = `{css}`;
-    document.head.appendChild(style);
-}})();
-""",
-            # avoids FOUC
-            lambda _: self.show(),
+        self.eval(
+            f"""document.body.classList.toggle("fancy", {json.dumps(not mw.pm.minimalist_mode())}); """
         )
+        self.eval(
+            f"""document.body.classList.toggle("reduce-motion", {json.dumps(mw.pm.reduce_motion())}); """
+        )
+
+    @deprecated(info="use theme_manager.qcolor() instead")
+    def get_window_bg_color(self, night_mode: Optional[bool] = None) -> QColor:
+        return theme_manager.qcolor(colors.CANVAS)

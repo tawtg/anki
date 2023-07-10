@@ -3,11 +3,11 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import * as tr from "@tslib/ftl";
     import { writable } from "svelte/store";
 
     import Col from "../components/Col.svelte";
     import Row from "../components/Row.svelte";
-    import * as tr from "../lib/ftl";
     import TagEditor from "../tag-editor/TagEditor.svelte";
 
     export let globalTags: string[];
@@ -24,8 +24,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             tags={globalTagsWritable}
             on:tagsupdate={({ detail }) => (globalTags = detail.tags)}
             keyCombination={"Control+T"}
-        /></Col
-    >
+        />
+    </Col>
 </Row>
 <Row --cols={2}>
     <Col>{tr.importingTagUpdatedNotes()}</Col>
@@ -33,6 +33,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         <TagEditor
             tags={updatedTagsWritable}
             on:tagsupdate={({ detail }) => (updatedTags = detail.tags)}
-        /></Col
-    >
+        />
+    </Col>
 </Row>

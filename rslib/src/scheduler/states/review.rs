@@ -1,10 +1,12 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{
-    interval_kind::IntervalKind, CardState, LearnState, RelearnState, SchedulingStates,
-    StateContext,
-};
+use super::interval_kind::IntervalKind;
+use super::CardState;
+use super::LearnState;
+use super::RelearnState;
+use super::SchedulingStates;
+use super::StateContext;
 use crate::revlog::RevlogReviewKind;
 
 pub const INITIAL_EASE_FACTOR: f32 = 2.5;
@@ -122,7 +124,8 @@ impl ReviewState {
         }
     }
 
-    /// Return the intervals for hard, good and easy, each of which depends on the previous.
+    /// Return the intervals for hard, good and easy, each of which depends on
+    /// the previous.
     fn passing_review_intervals(self, ctx: &StateContext) -> (u32, u32, u32) {
         if self.days_late() < 0 {
             self.passing_early_review_intervals(ctx)
@@ -134,21 +137,29 @@ impl ReviewState {
     fn passing_nonearly_review_intervals(self, ctx: &StateContext) -> (u32, u32, u32) {
         let current_interval = self.scheduled_days as f32;
         let days_late = self.days_late().max(0) as f32;
+
+        // hard
         let hard_factor = ctx.hard_multiplier;
         let hard_minimum = if hard_factor <= 1.0 {
             0
         } else {
             self.scheduled_days + 1
         };
-
         let hard_interval =
             constrain_passing_interval(ctx, current_interval * hard_factor, hard_minimum, true);
+        // good
+        let good_minimum = if hard_factor <= 1.0 {
+            self.scheduled_days + 1
+        } else {
+            hard_interval + 1
+        };
         let good_interval = constrain_passing_interval(
             ctx,
             (current_interval + days_late / 2.0) * self.ease_factor,
-            hard_interval + 1,
+            good_minimum,
             true,
         );
+        // easy
         let easy_interval = constrain_passing_interval(
             ctx,
             (current_interval + days_late) * self.ease_factor * ctx.easy_multiplier,
@@ -159,10 +170,10 @@ impl ReviewState {
         (hard_interval, good_interval, easy_interval)
     }
 
-    /// Mostly direct port from the Python version for now, so we can confirm implementation
-    /// is correct.
-    /// FIXME: this needs reworking in the future; it overly penalizes reviews done
-    /// shortly before the due date.
+    /// Mostly direct port from the Python version for now, so we can confirm
+    /// implementation is correct.
+    /// FIXME: this needs reworking in the future; it overly penalizes reviews
+    /// done shortly before the due date.
     fn passing_early_review_intervals(self, ctx: &StateContext) -> (u32, u32, u32) {
         let scheduled = self.scheduled_days as f32;
         let elapsed = (self.scheduled_days as f32) + (self.days_late() as f32);
@@ -218,7 +229,7 @@ fn constrain_passing_interval(ctx: &StateContext, interval: f32, minimum: u32, f
     if fuzz {
         ctx.with_review_fuzz(interval, minimum, maximum)
     } else {
-        (interval.round() as u32).max(minimum).min(maximum)
+        (interval.round() as u32).clamp(minimum, maximum)
     }
 }
 
@@ -258,7 +269,8 @@ mod test {
     #[test]
     fn extreme_multiplier_fuzz() {
         let mut ctx = StateContext::defaults_for_testing();
-        // our calculations should work correctly with a low ease or non-default multiplier
+        // our calculations should work correctly with a low ease or non-default
+        // multiplier
         let state = ReviewState {
             scheduled_days: 1,
             elapsed_days: 1,
@@ -279,5 +291,22 @@ mod test {
         ctx.interval_multiplier = 10.0;
         ctx.maximum_review_interval = 5;
         assert_eq!(state.passing_review_intervals(&ctx), (5, 5, 5));
+    }
+
+    #[test]
+    fn low_hard_multiplier_does_not_pull_good_down() {
+        let mut ctx = StateContext::defaults_for_testing();
+        // our calculations should work correctly with a low ease or non-default
+        // multiplier
+        ctx.hard_multiplier = 0.1;
+        let state = ReviewState {
+            scheduled_days: 2,
+            elapsed_days: 2,
+            ease_factor: 1.3,
+            lapses: 0,
+            leeched: false,
+        };
+        ctx.fuzz_factor = Some(0.0);
+        assert_eq!(state.passing_review_intervals(&ctx), (1, 3, 4));
     }
 }

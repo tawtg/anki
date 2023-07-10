@@ -1,80 +1,62 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    fs::File,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
-};
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 
-use crate::{
-    import_export::{
-        text::{
-            csv::metadata::{CsvDeck, CsvMetadata, CsvNotetype, Delimiter},
-            ForeignData, ForeignNote, NameOrId,
-        },
-        ImportProgress, NoteLog,
-    },
-    prelude::*,
-};
+use anki_io::open_file;
+
+use crate::import_export::text::csv::metadata::CsvDeck;
+use crate::import_export::text::csv::metadata::CsvMetadata;
+use crate::import_export::text::csv::metadata::CsvMetadataHelpers;
+use crate::import_export::text::csv::metadata::CsvNotetype;
+use crate::import_export::text::csv::metadata::DelimeterExt;
+use crate::import_export::text::csv::metadata::Delimiter;
+use crate::import_export::text::ForeignData;
+use crate::import_export::text::ForeignNote;
+use crate::import_export::text::NameOrId;
+use crate::import_export::NoteLog;
+use crate::prelude::*;
+use crate::text::strip_utf8_bom;
 
 impl Collection {
-    pub fn import_csv(
-        &mut self,
-        path: &str,
-        metadata: CsvMetadata,
-        progress_fn: impl 'static + FnMut(ImportProgress, bool) -> bool,
-    ) -> Result<OpOutput<NoteLog>> {
-        let file = File::open(path)?;
-        let default_deck = metadata.deck()?.name_or_id();
-        let default_notetype = metadata.notetype()?.name_or_id();
+    pub fn import_csv(&mut self, path: &str, metadata: CsvMetadata) -> Result<OpOutput<NoteLog>> {
+        let progress = self.new_progress_handler();
+        let file = open_file(path)?;
         let mut ctx = ColumnContext::new(&metadata)?;
         let notes = ctx.deserialize_csv(file, metadata.delimiter())?;
+        let mut data = ForeignData::from(metadata);
+        data.notes = notes;
+        data.import(self, progress)
+    }
+}
 
+impl From<CsvMetadata> for ForeignData {
+    fn from(metadata: CsvMetadata) -> Self {
         ForeignData {
             dupe_resolution: metadata.dupe_resolution(),
-            default_deck,
-            default_notetype,
-            notes,
+            match_scope: metadata.match_scope(),
+            default_deck: metadata.deck().map(|d| d.name_or_id()).unwrap_or_default(),
+            default_notetype: metadata
+                .notetype()
+                .map(|nt| nt.name_or_id())
+                .unwrap_or_default(),
             global_tags: metadata.global_tags,
             updated_tags: metadata.updated_tags,
             ..Default::default()
         }
-        .import(self, progress_fn)
     }
 }
 
-impl CsvMetadata {
-    fn deck(&self) -> Result<&CsvDeck> {
-        self.deck
-            .as_ref()
-            .ok_or_else(|| AnkiError::invalid_input("deck oneof not set"))
-    }
-
-    fn notetype(&self) -> Result<&CsvNotetype> {
-        self.notetype
-            .as_ref()
-            .ok_or_else(|| AnkiError::invalid_input("notetype oneof not set"))
-    }
-
-    fn field_source_columns(&self) -> Result<FieldSourceColumns> {
-        Ok(match self.notetype()? {
-            CsvNotetype::GlobalNotetype(global) => global
-                .field_columns
-                .iter()
-                .map(|&i| (i > 0).then(|| i as usize))
-                .collect(),
-            CsvNotetype::NotetypeColumn(_) => {
-                let meta_columns = self.meta_columns();
-                (1..self.column_labels.len() + 1)
-                    .filter(|idx| !meta_columns.contains(idx))
-                    .map(Some)
-                    .collect()
-            }
-        })
-    }
+trait CsvDeckExt {
+    fn name_or_id(&self) -> NameOrId;
+    fn column(&self) -> Option<usize>;
 }
 
-impl CsvDeck {
+impl CsvDeckExt for CsvDeck {
     fn name_or_id(&self) -> NameOrId {
         match self {
             Self::DeckId(did) => NameOrId::Id(*did),
@@ -90,7 +72,12 @@ impl CsvDeck {
     }
 }
 
-impl CsvNotetype {
+trait CsvNotetypeExt {
+    fn name_or_id(&self) -> NameOrId;
+    fn column(&self) -> Option<usize>;
+}
+
+impl CsvNotetypeExt for CsvNotetype {
     fn name_or_id(&self) -> NameOrId {
         match self {
             Self::GlobalNotetype(nt) => NameOrId::Id(nt.id),
@@ -107,7 +94,7 @@ impl CsvNotetype {
 }
 
 /// Column indices for the fields of a notetype.
-type FieldSourceColumns = Vec<Option<usize>>;
+pub(super) type FieldSourceColumns = Vec<Option<usize>>;
 
 // Column indices are 1-based.
 struct ColumnContext {
@@ -117,15 +104,16 @@ struct ColumnContext {
     notetype_column: Option<usize>,
     /// Source column indices for the fields of a notetype
     field_source_columns: FieldSourceColumns,
-    /// How fields are converted to strings. Used for escaping HTML if appropriate.
+    /// How fields are converted to strings. Used for escaping HTML if
+    /// appropriate.
     stringify: fn(&str) -> String,
 }
 
 impl ColumnContext {
     fn new(metadata: &CsvMetadata) -> Result<Self> {
         Ok(Self {
-            tags_column: (metadata.tags_column > 0).then(|| metadata.tags_column as usize),
-            guid_column: (metadata.guid_column > 0).then(|| metadata.guid_column as usize),
+            tags_column: (metadata.tags_column > 0).then_some(metadata.tags_column as usize),
+            guid_column: (metadata.guid_column > 0).then_some(metadata.guid_column as usize),
             deck_column: metadata.deck()?.column(),
             notetype_column: metadata.notetype()?.column(),
             field_source_columns: metadata.field_source_columns()?,
@@ -148,9 +136,8 @@ impl ColumnContext {
     ) -> Result<Vec<ForeignNote>> {
         reader
             .records()
-            .into_iter()
             .map(|res| {
-                res.map_err(Into::into)
+                res.or_invalid("invalid csv")
                     .map(|record| self.foreign_note_from_record(&record))
             })
             .collect()
@@ -213,17 +200,17 @@ fn stringify_fn(is_html: bool) -> fn(&str) -> String {
     if is_html {
         ToString::to_string
     } else {
-        htmlescape::encode_minimal
+        |s| htmlescape::encode_minimal(s).replace('\n', "<br>")
     }
 }
 
-/// If the reader's first line starts with "tags:", which is allowed for historic
-/// reasons, seek to the second line.
+/// If the reader's first line starts with "tags:", which is allowed for
+/// historic reasons, seek to the second line.
 fn remove_tags_line_from_reader(reader: &mut (impl Read + Seek)) -> Result<()> {
     let mut buf_reader = BufReader::new(reader);
     let mut first_line = String::new();
     buf_reader.read_line(&mut first_line)?;
-    let offset = if first_line.starts_with("tags:") {
+    let offset = if strip_utf8_bom(&first_line).starts_with("tags:") {
         first_line.as_bytes().len()
     } else {
         0
@@ -238,8 +225,10 @@ fn remove_tags_line_from_reader(reader: &mut (impl Read + Seek)) -> Result<()> {
 mod test {
     use std::io::Cursor;
 
+    use anki_proto::import_export::csv_metadata::MappedNotetype;
+
+    use super::super::metadata::test::CsvMetadataTestExt;
     use super::*;
-    use crate::pb::import_export::csv_metadata::MappedNotetype;
 
     macro_rules! import {
         ($metadata:expr, $csv:expr) => {{
@@ -268,29 +257,6 @@ mod test {
                 assert_eq!(&field.as_ref().map(String::as_str), expected);
             }
         };
-    }
-
-    impl CsvMetadata {
-        fn defaults_for_testing() -> Self {
-            Self {
-                delimiter: Delimiter::Comma as i32,
-                force_delimiter: false,
-                is_html: false,
-                force_is_html: false,
-                tags_column: 0,
-                guid_column: 0,
-                global_tags: Vec::new(),
-                updated_tags: Vec::new(),
-                column_labels: vec!["".to_string(); 2],
-                deck: Some(CsvDeck::DeckId(1)),
-                notetype: Some(CsvNotetype::GlobalNotetype(MappedNotetype {
-                    id: 1,
-                    field_columns: vec![1, 2],
-                })),
-                preview: Vec::new(),
-                dupe_resolution: 0,
-            }
-        }
     }
 
     #[test]
@@ -380,5 +346,14 @@ mod test {
         assert_eq!(notes[0].notetype, NameOrId::Name(String::from("Basic")));
         assert_field_eq!(notes[1].fields, [Some("foo"), Some("bar")]);
         assert_eq!(notes[1].notetype, NameOrId::Name(String::from("Cloze")));
+    }
+
+    #[test]
+    fn should_ignore_bom() {
+        let metadata = CsvMetadata::defaults_for_testing();
+        assert_imported_fields!(metadata, "\u{feff}foo,bar\n", [[Some("foo"), Some("bar")]]);
+        assert!(import!(metadata, "\u{feff}#foo\n").is_empty());
+        assert!(import!(metadata, "\u{feff}#html:true\n").is_empty());
+        assert!(import!(metadata, "\u{feff}tags:foo\n").is_empty());
     }
 }

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -66,7 +67,6 @@ class DeckBrowser:
     def show(self) -> None:
         av_player.stop_and_clear_queue()
         self.web.set_bridge_command(self._linkHandler, self)
-        self._renderPage()
         # redraw top bar for theme change
         self.mw.toolbar.redraw()
         self.refresh()
@@ -117,6 +117,10 @@ class DeckBrowser:
             self._confirm_upgrade()
         elif cmd == "v2upgradeinfo":
             openLink("https://faqs.ankiweb.net/the-anki-2.1-scheduler.html")
+        elif cmd == "select":
+            set_current_deck(
+                parent=self.mw, deck_id=DeckId(int(arg))
+            ).run_in_background()
         return False
 
     def set_current_deck(self, deck_id: DeckId) -> None:
@@ -129,7 +133,7 @@ class DeckBrowser:
 
     _body = """
 <center>
-<table cellspacing=0 cellpading=3>
+<table cellspacing=0 cellpadding=3>
 %(tree)s
 </table>
 
@@ -209,7 +213,14 @@ class DeckBrowser:
         else:
             klass = "deck"
 
-        buf = "<tr class='%s' id='%d'>" % (klass, node.deck_id)
+        buf = (
+            "<tr class='%s' id='%d' onclick='if(event.shiftKey) return pycmd(\"select:%d\")'>"
+            % (
+                klass,
+                node.deck_id,
+                node.deck_id,
+            )
+        )
         # deck link
         if node.children:
             collapse = (
@@ -230,8 +241,9 @@ class DeckBrowser:
             collapse,
             extraclass,
             node.deck_id,
-            node.name,
+            html.escape(node.name),
         )
+
         # due counts
         def nonzeroColour(cnt: int, klass: str) -> str:
             if not cnt:
@@ -241,7 +253,7 @@ class DeckBrowser:
         review = nonzeroColour(node.review_count, "review-count")
         learn = nonzeroColour(node.learn_count, "learn-count")
 
-        buf += ("<td align=right>%s</td>" * 3) % (
+        buf += ("<td align=end>%s</td>" * 3) % (
             nonzeroColour(node.new_count, "new-count"),
             learn,
             review,
@@ -345,7 +357,9 @@ class DeckBrowser:
         openLink(f"{aqt.appShared}decks/")
 
     def _on_create(self) -> None:
-        if op := add_deck_dialog(parent=self.mw):
+        if op := add_deck_dialog(
+            parent=self.mw, default_text=self.mw.col.decks.current()["name"]
+        ):
             op.run_in_background()
 
     ######################################################################

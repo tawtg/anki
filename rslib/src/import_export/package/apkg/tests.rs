@@ -3,14 +3,17 @@
 
 #![cfg(test)]
 
-use std::{collections::HashSet, fs::File, io::Write};
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::Write;
 
-use crate::{
-    media::{files::sha1_of_data, MediaManager},
-    prelude::*,
-    search::SearchNode,
-    tests::open_fs_test_collection,
-};
+use anki_io::read_file;
+
+use crate::media::files::sha1_of_data;
+use crate::media::MediaManager;
+use crate::prelude::*;
+use crate::search::SearchNode;
+use crate::tests::open_fs_test_collection;
 
 const SAMPLE_JPG: &str = "sample.jpg";
 const SAMPLE_MP3: &str = "sample.mp3";
@@ -18,10 +21,15 @@ const SAMPLE_JS: &str = "_sample.js";
 const JPG_DATA: &[u8] = b"1";
 const MP3_DATA: &[u8] = b"2";
 const JS_DATA: &[u8] = b"3";
-const OTHER_MP3_DATA: &[u8] = b"4";
+const EXISTING_MP3_DATA: &[u8] = b"4";
 
 #[test]
 fn roundtrip() {
+    roundtrip_inner(true);
+    roundtrip_inner(false);
+}
+
+fn roundtrip_inner(legacy: bool) {
     let (mut src_col, src_tempdir) = open_fs_test_collection("src");
     let (mut target_col, _target_tempdir) = open_fs_test_collection("target");
     let apkg_path = src_tempdir.path().join("test.apkg");
@@ -38,12 +46,11 @@ fn roundtrip() {
             SearchNode::from_deck_name("parent::sample"),
             true,
             true,
-            true,
+            legacy,
             None,
-            |_, _| true,
         )
         .unwrap();
-    target_col.import_apkg(&apkg_path, |_, _| true).unwrap();
+    target_col.import_apkg(&apkg_path).unwrap();
 
     target_col.assert_decks();
     target_col.assert_notetype(&notetype);
@@ -112,7 +119,7 @@ impl Collection {
 
     fn add_conflicting_media(&mut self) {
         let mut file = File::create(self.media_folder.join(SAMPLE_MP3)).unwrap();
-        file.write_all(OTHER_MP3_DATA).unwrap();
+        file.write_all(EXISTING_MP3_DATA).unwrap();
     }
 
     fn assert_decks(&mut self) {
@@ -134,14 +141,24 @@ impl Collection {
 
     fn assert_note_and_media(&mut self, note: &Note) {
         let sha1 = sha1_of_data(MP3_DATA);
-        let new_mp3_name = format!("sample-{}.mp3", hex::encode(&sha1));
+        let new_mp3_name = format!("sample-{}.mp3", hex::encode(sha1));
         let csums = MediaManager::new(&self.media_folder, &self.media_db)
             .unwrap()
             .all_checksums_as_is();
 
-        for file in [SAMPLE_JPG, SAMPLE_JS, &new_mp3_name] {
-            assert!(self.media_folder.join(file).exists());
-            assert!(*csums.get(file).unwrap() != [0; 20]);
+        for (fname, orig_data) in [
+            (SAMPLE_JPG, JPG_DATA),
+            (SAMPLE_MP3, EXISTING_MP3_DATA),
+            (new_mp3_name.as_str(), MP3_DATA),
+            (SAMPLE_JS, JS_DATA),
+        ] {
+            // data should have been copied correctly
+            assert_eq!(
+                read_file(&self.media_folder.join(fname)).unwrap(),
+                orig_data
+            );
+            // and checksums in media db should be valid
+            assert_eq!(*csums.get(fname).unwrap(), sha1_of_data(orig_data));
         }
 
         let imported_note = self.storage.get_note(note.id).unwrap().unwrap();

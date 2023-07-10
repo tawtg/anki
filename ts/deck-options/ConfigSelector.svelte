@@ -3,17 +3,16 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import * as tr from "@tslib/ftl";
+    import { noop } from "@tslib/functional";
     import type Modal from "bootstrap/js/dist/modal";
     import { createEventDispatcher, getContext } from "svelte";
 
-    import ButtonGroup from "../components/ButtonGroup.svelte";
     import ButtonToolbar from "../components/ButtonToolbar.svelte";
     import { modalsKey } from "../components/context-keys";
-    import SelectButton from "../components/SelectButton.svelte";
+    import Select from "../components/Select.svelte";
     import SelectOption from "../components/SelectOption.svelte";
     import StickyContainer from "../components/StickyContainer.svelte";
-    import * as tr from "../lib/ftl";
-    import { noop } from "../lib/functional";
     import type { ConfigListEntry, DeckOptionsState } from "./lib";
     import SaveButton from "./SaveButton.svelte";
     import TextInputModal from "./TextInputModal.svelte";
@@ -23,13 +22,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     const dispatch = createEventDispatcher();
     const dispatchPresetChange = () => dispatch("presetchange");
 
+    $: value = $configList.findIndex((entry) => entry.current);
+    $: label = configLabel($configList[value]);
+
     function configLabel(entry: ConfigListEntry): string {
         const count = tr.deckConfigUsedByDecks({ decks: entry.useCount });
         return `${entry.name} (${count})`;
     }
 
-    function blur(event: Event): void {
-        state.setCurrentIndex(parseInt((event.target! as HTMLSelectElement).value));
+    function blur(e: CustomEvent): void {
+        state.setCurrentIndex(e.detail.value);
         dispatchPresetChange();
     }
 
@@ -91,21 +93,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 />
 
 <StickyContainer --gutter-block="0.5rem" --sticky-borders="0 0 1px" breakpoint="sm">
-    <ButtonToolbar class="justify-content-between" size={2.3} wrap={false}>
-        <ButtonGroup class="flex-grow-1">
-            <SelectButton
-                class="flex-grow-1"
-                on:change={blur}
-                --border-left-radius="5px"
-                --border-right-radius="5px"
-            >
-                {#each $configList as entry}
-                    <SelectOption value={String(entry.idx)} selected={entry.current}>
-                        {configLabel(entry)}
-                    </SelectOption>
-                {/each}
-            </SelectButton>
-        </ButtonGroup>
+    <ButtonToolbar class="justify-content-between flex-grow-1" wrap={false}>
+        <Select class="flex-grow-1" bind:value {label} on:change={blur}>
+            {#each $configList as entry}
+                <SelectOption value={entry.idx}>{configLabel(entry)}</SelectOption>
+            {/each}
+        </Select>
 
         <SaveButton
             {state}

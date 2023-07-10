@@ -10,11 +10,10 @@ import aqt.operations
 from anki.collection import ImportCsvRequest
 from aqt.qt import *
 from aqt.utils import addCloseShortcut, disable_help_button, restoreGeom, saveGeom, tr
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
 
 class ImportCsvDialog(QDialog):
-
     TITLE = "csv import"
     silentlyClose = True
 
@@ -35,10 +34,10 @@ class ImportCsvDialog(QDialog):
         self.mw.garbage_collect_on_dialog_finish(self)
         self.setMinimumSize(400, 300)
         disable_help_button(self)
-        restoreGeom(self, self.TITLE)
+        restoreGeom(self, self.TITLE, default_size=(800, 800))
         addCloseShortcut(self)
 
-        self.web = AnkiWebView(title=self.TITLE)
+        self.web = AnkiWebView(kind=AnkiWebViewKind.IMPORT_CSV)
         self.web.setVisible(False)
         self.web.load_ts_page("import-csv")
         layout = QVBoxLayout()
@@ -46,7 +45,10 @@ class ImportCsvDialog(QDialog):
         layout.addWidget(self.web)
         self.setLayout(layout)
 
-        self.web.eval(f"anki.setupImportCsvPage('{path}');")
+        escaped_path = path.replace("'", r"\'")
+        self.web.evalWithCallback(
+            f"anki.setupImportCsvPage('{escaped_path}');", lambda _: self.web.setFocus()
+        )
         self.setWindowTitle(tr.decks_import_file())
 
     def reject(self) -> None:

@@ -26,13 +26,14 @@ type AnkiPackages =
     | "anki/theme"
     | "anki/location"
     | "anki/surround"
-    | "anki/ui";
+    | "anki/ui"
+    | "anki/reviewer";
 type PackageDeprecation<T extends Record<string, unknown>> = {
     [key in keyof T]?: string;
 };
 
-/// This can be extended to allow require() calls at runtime, for packages
-/// that are not included at bundling time.
+/** This can be extended to allow require() calls at runtime, for packages
+that are not included at bundling time. */
 const runtimePackages: Partial<Record<AnkiPackages, Record<string, unknown>>> = {};
 const prohibit = () => false;
 
@@ -52,17 +53,17 @@ export function registerPackage<
 >(name: T, entries: U, deprecation?: PackageDeprecation<U>): void {
     const pack = deprecation
         ? new Proxy(entries, {
-              set: prohibit,
-              defineProperty: prohibit,
-              deleteProperty: prohibit,
-              get: (target, name: string) => {
-                  if (name in deprecation) {
-                      console.log(`anki: ${name} is deprecated: ${deprecation[name]}`);
-                  }
+            set: prohibit,
+            defineProperty: prohibit,
+            deleteProperty: prohibit,
+            get: (target, name: string) => {
+                if (name in deprecation) {
+                    console.log(`anki: ${name} is deprecated: ${deprecation[name]}`);
+                }
 
-                  return target[name];
-              },
-          })
+                return target[name];
+            },
+        })
         : entries;
 
     registerPackageRaw(name, pack);

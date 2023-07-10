@@ -1,22 +1,26 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use prost::Message;
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::params;
+use rusqlite::OptionalExtension;
+use rusqlite::Row;
 use unicase::UniCase;
 
-use super::{ids_to_string, SqliteStorage};
-use crate::{
-    error::{AnkiError, DbErrorKind, Result},
-    notes::NoteId,
-    notetype::{
-        AlreadyGeneratedCardInfo, CardTemplate, CardTemplateConfig, NoteField, NoteFieldConfig,
-        Notetype, NotetypeConfig, NotetypeId, NotetypeSchema11,
-    },
-    timestamp::TimestampMillis,
-};
+use super::ids_to_string;
+use super::SqliteStorage;
+use crate::error::DbErrorKind;
+use crate::notetype::AlreadyGeneratedCardInfo;
+use crate::notetype::CardTemplate;
+use crate::notetype::CardTemplateConfig;
+use crate::notetype::NoteField;
+use crate::notetype::NoteFieldConfig;
+use crate::notetype::NotetypeConfig;
+use crate::notetype::NotetypeSchema11;
+use crate::prelude::*;
 
 fn row_to_notetype_core(row: &Row) -> Result<Notetype> {
     let config = NotetypeConfig::decode(row.get_ref_unwrap(4).as_blob()?)?;
@@ -217,11 +221,7 @@ impl SqliteStorage {
 
     /// Notetype should have an existing id, and will be added if missing.
     fn update_notetype_core(&self, nt: &Notetype) -> Result<()> {
-        if nt.id.0 == 0 {
-            return Err(AnkiError::invalid_input(
-                "notetype with id 0 passed in as existing",
-            ));
-        }
+        require!(nt.id.0 != 0, "notetype with id 0 passed in as existing");
         let mut stmt = self.db.prepare_cached(include_str!("add_or_update.sql"))?;
         let mut config_bytes = vec![];
         nt.config.encode(&mut config_bytes)?;
@@ -231,7 +231,7 @@ impl SqliteStorage {
     }
 
     pub(crate) fn add_notetype(&self, nt: &mut Notetype) -> Result<()> {
-        assert!(nt.id.0 == 0);
+        assert_eq!(nt.id.0, 0);
 
         let mut stmt = self.db.prepare_cached(include_str!("add_notetype.sql"))?;
         let mut config_bytes = vec![];
@@ -330,7 +330,9 @@ impl SqliteStorage {
     pub(crate) fn upgrade_notetypes_to_schema15(&self) -> Result<()> {
         let nts = self
             .get_schema11_notetypes()
-            .map_err(|e| AnkiError::JsonError(format!("decoding models: {}", e)))?;
+            .map_err(|e| AnkiError::JsonError {
+                info: format!("decoding models: {}", e),
+            })?;
         let mut names = HashSet::new();
         for (mut ntid, nt) in nts {
             let mut nt = Notetype::from(nt);
@@ -359,7 +361,7 @@ impl SqliteStorage {
 
     pub(crate) fn downgrade_notetypes_from_schema15(&self) -> Result<()> {
         let nts = self.get_all_notetypes_as_schema11()?;
-        self.set_schema11_notetypes(nts)
+        self.set_schema11_notetypes(&nts)
     }
 
     fn get_schema11_notetypes(&self) -> Result<HashMap<NotetypeId, NotetypeSchema11>> {
@@ -377,9 +379,9 @@ impl SqliteStorage {
 
     pub(crate) fn set_schema11_notetypes(
         &self,
-        notetypes: HashMap<NotetypeId, NotetypeSchema11>,
+        notetypes: &HashMap<NotetypeId, NotetypeSchema11>,
     ) -> Result<()> {
-        let json = serde_json::to_string(&notetypes)?;
+        let json = crate::serde::schema11_to_string(notetypes)?;
         self.db.execute("update col set models = ?", [json])?;
         Ok(())
     }

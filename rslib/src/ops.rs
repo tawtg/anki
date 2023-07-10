@@ -3,7 +3,7 @@
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     Custom(String),
     AddDeck,
@@ -17,6 +17,7 @@ pub enum Op {
     CreateCustomStudy,
     EmptyFilteredDeck,
     FindAndReplace,
+    ImageOcclusion,
     Import,
     RebuildFilteredDeck,
     RemoveDeck,
@@ -90,12 +91,13 @@ impl Op {
             Op::Custom(name) => name.into(),
             Op::ChangeNotetype => tr.browsing_change_notetype(),
             Op::SkipUndo => return "".to_string(),
+            Op::ImageOcclusion => tr.notetypes_image_occlusion_name(),
         }
         .into()
     }
 }
 
-#[derive(Debug, PartialEq, Default, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 pub struct StateChanges {
     pub card: bool,
     pub note: bool,
@@ -107,13 +109,13 @@ pub struct StateChanges {
     pub mtime: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct OpChanges {
     pub op: Op,
     pub changes: StateChanges,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct OpOutput<T> {
     pub output: T,
     pub changes: OpChanges,
@@ -161,7 +163,11 @@ impl OpChanges {
         let c = &self.changes;
         (c.card && self.op != Op::SetFlag)
             || c.deck
-            || (c.config && matches!(self.op, Op::SetCurrentDeck | Op::UpdatePreferences))
+            || (c.config
+                && matches!(
+                    self.op,
+                    Op::SetCurrentDeck | Op::UpdatePreferences | Op::UpdateDeckConfig
+                ))
             || c.deck_config
     }
 }

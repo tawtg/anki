@@ -19,7 +19,7 @@ from aqt.utils import (
     setWindowIcon,
     tr,
 )
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
 
 class CardInfoDialog(QDialog):
@@ -48,11 +48,11 @@ class CardInfoDialog(QDialog):
     def _setup_ui(self, card_id: CardId | None) -> None:
         self.mw.garbage_collect_on_dialog_finish(self)
         disable_help_button(self)
-        restoreGeom(self, self.GEOMETRY_KEY)
+        restoreGeom(self, self.GEOMETRY_KEY, default_size=(800, 800))
         addCloseShortcut(self)
         setWindowIcon(self)
 
-        self.web = AnkiWebView(title=self.TITLE)
+        self.web = AnkiWebView(kind=AnkiWebViewKind.BROWSER_CARD_INFO)
         self.web.setVisible(False)
         self.web.load_ts_page("card-info")
         layout = QVBoxLayout()

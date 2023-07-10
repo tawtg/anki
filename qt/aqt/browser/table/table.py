@@ -11,8 +11,7 @@ from anki.cards import Card, CardId
 from anki.collection import Collection, Config, OpChanges
 from anki.consts import *
 from anki.notes import Note, NoteId
-from anki.utils import is_win
-from aqt import colors, gui_hooks
+from aqt import gui_hooks
 from aqt.browser.table import Columns, ItemId, SearchContext
 from aqt.browser.table.model import DataModel
 from aqt.browser.table.state import CardState, ItemState, NoteState
@@ -61,7 +60,6 @@ class Table:
 
     def cleanup(self) -> None:
         self._save_header()
-        gui_hooks.theme_did_change.remove(self._setup_style)
 
     # Public Methods
     ######################################################################
@@ -134,12 +132,14 @@ class Table:
             | QItemSelectionModel.SelectionFlag.Rows,
         )
 
-    def select_single_card(self, card_id: CardId) -> None:
+    def select_single_card(
+        self, card_id: CardId, scroll_even_if_visible: bool = True
+    ) -> None:
         """Try to set the selection to the item corresponding to the given card."""
         self._reset_selection()
         if (row := self._model.get_card_row(card_id)) is not None:
             self._view.selectRow(row)
-            self._scroll_to_row(row, scroll_even_if_visible=True)
+            self._scroll_to_row(row, scroll_even_if_visible)
         else:
             self.browser.on_all_or_selected_rows_changed()
             self.browser.on_current_row_changed()
@@ -277,7 +277,7 @@ class Table:
 
     def _reset_selection(self) -> None:
         """Remove selection and focus without emitting signals.
-        If no selection change is triggerd afterwards, `browser.on_all_or_selected_rows_changed()`
+        If no selection change is triggered afterwards, `browser.on_all_or_selected_rows_changed()`
         and `browser.on_current_row_changed()` must be called.
         """
         self._view.selectionModel().reset()
@@ -321,17 +321,11 @@ class Table:
         hh.setCascadingSectionResizes(False)
 
     def _save_header(self) -> None:
-        saveHeader(
-            self._view.horizontalHeader(), self._state.GEOMETRY_KEY_PREFIX + "31"
-        )
+        saveHeader(self._view.horizontalHeader(), self._state.GEOMETRY_KEY_PREFIX)
 
     def _restore_header(self) -> None:
         self._view.horizontalHeader().blockSignals(True)
-        # Qt 6.3.1 won't allow headers to be clicked when restoring state from a previous
-        # version, so we need to bump the key.
-        restoreHeader(
-            self._view.horizontalHeader(), self._state.GEOMETRY_KEY_PREFIX + "31"
-        )
+        restoreHeader(self._view.horizontalHeader(), self._state.GEOMETRY_KEY_PREFIX)
         self._set_column_sizes()
         self._set_sort_indicator()
         self._view.horizontalHeader().blockSignals(False)
@@ -351,10 +345,8 @@ class Table:
         self._view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._view.horizontalScrollBar().setSingleStep(10)
         self._update_font()
-        self._setup_style()
         self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         qconnect(self._view.customContextMenuRequested, self._on_context_menu)
-        gui_hooks.theme_did_change.append(self._setup_style)
 
     def _update_font(self) -> None:
         # we can't choose different line heights efficiently, so we need
@@ -367,25 +359,11 @@ class Table:
                     curmax = bsize
         self._view.verticalHeader().setDefaultSectionSize(curmax + 6)
 
-    def _setup_style(self) -> None:
-        if not theme_manager.night_mode:
-            self._view.setStyleSheet(
-                "QTableView{ selection-background-color: rgba(150, 150, 150, 50); "
-                "selection-color: black; }"
-            )
-        elif theme_manager.macos_dark_mode():
-            self._view.setStyleSheet(
-                f"QTableView {{ gridline-color: {colors.FRAME_BG} }}"
-            )
-        else:
-            self._view.setStyleSheet("")
-
     def _setup_headers(self) -> None:
         vh = self._view.verticalHeader()
         hh = self._view.horizontalHeader()
-        if not is_win:
-            vh.hide()
-            hh.show()
+        vh.hide()
+        hh.show()
         hh.setHighlightSections(False)
         hh.setMinimumSectionSize(50)
         hh.setSectionsMovable(True)

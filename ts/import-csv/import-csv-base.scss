@@ -1,13 +1,12 @@
-@use "sass/vars";
 @use "sass/bootstrap-dark";
 
 @import "sass/base";
 
-@import "sass/bootstrap/scss/alert";
-@import "sass/bootstrap/scss/buttons";
-@import "sass/bootstrap/scss/button-group";
-@import "sass/bootstrap/scss/close";
-@import "sass/bootstrap/scss/grid";
+@import "bootstrap/scss/alert";
+@import "bootstrap/scss/buttons";
+@import "bootstrap/scss/button-group";
+@import "bootstrap/scss/close";
+@import "bootstrap/scss/grid";
 @import "sass/bootstrap-forms";
 
 .night-mode {
@@ -15,18 +14,12 @@
 }
 
 body {
+    min-height: 100vh;
     width: min(100vw, 70em);
     margin: 0 auto;
-    padding: 1em;
-    // pad out the underside of the footer
-    padding-bottom: 5em;
+    padding: 0 1em 1em 1em;
 }
 
 html {
-    overflow-x: hidden;
-}
-
-// override the default down arrow colour in <select> elements
-.night-mode select {
-    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23FFFFFF' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M2 5l6 6 6-6'/%3e%3c/svg%3e");
+    height: initial;
 }

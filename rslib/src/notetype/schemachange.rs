@@ -5,11 +5,12 @@
 
 use std::collections::HashMap;
 
-use super::{CardGenContext, CardTemplate, Notetype};
-use crate::{
-    prelude::*,
-    search::{JoinSearches, TemplateKind},
-};
+use super::CardGenContext;
+use super::CardTemplate;
+use super::Notetype;
+use crate::prelude::*;
+use crate::search::JoinSearches;
+use crate::search::TemplateKind;
 
 /// True if any ordinals added, removed or reordered.
 fn ords_changed(ords: &[Option<u32>], previous_len: usize) -> bool {
@@ -20,7 +21,7 @@ fn ords_changed(ords: &[Option<u32>], previous_len: usize) -> bool {
             .any(|(idx, &ord)| ord != Some(idx as u32))
 }
 
-#[derive(Default, PartialEq, Debug)]
+#[derive(Default, PartialEq, Eq, Debug)]
 struct TemplateOrdChanges {
     added: Vec<u32>,
     removed: Vec<u16>,
@@ -129,8 +130,8 @@ impl Collection {
     }
 
     /// Update cards after card templates added, removed or reordered.
-    /// Does not remove cards where the template still exists but creates an empty card.
-    /// Caller must create transaction.
+    /// Does not remove cards where the template still exists but creates an
+    /// empty card. Caller must create transaction.
     pub(crate) fn update_cards_for_changed_templates(
         &mut self,
         nt: &Notetype,
@@ -193,8 +194,8 @@ impl Notetype {
 
 #[cfg(test)]
 mod test {
-    use super::{ords_changed, TemplateOrdChanges};
-    use crate::{collection::open_test_collection, decks::DeckId, error::Result, search::SortMode};
+    use super::*;
+    use crate::search::SortMode;
 
     #[test]
     fn ord_changes() {
@@ -253,7 +254,7 @@ mod test {
 
     #[test]
     fn fields() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut nt = col
             .storage
             .get_notetype(col.get_current_notetype_id().unwrap())?
@@ -281,7 +282,7 @@ mod test {
 
     #[test]
     fn field_renaming_and_deleting() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut nt = col
             .storage
             .get_notetype(col.get_current_notetype_id().unwrap())?
@@ -302,7 +303,7 @@ mod test {
 
     #[test]
     fn cards() -> Result<()> {
-        let mut col = open_test_collection();
+        let mut col = Collection::new();
         let mut nt = col
             .storage
             .get_notetype(col.get_current_notetype_id().unwrap())?

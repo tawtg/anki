@@ -1,51 +1,51 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::{
-    fs::File,
-    io::{self, Write},
-    path::{Path, PathBuf},
-};
+use std::fs::File;
+use std::io;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
 
-use zip::{read::ZipFile, ZipArchive};
-use zstd::{self, stream::copy_decode};
+use anki_io::atomic_rename;
+use anki_io::create_dir_all;
+use anki_io::new_tempfile_in_parent_of;
+use anki_io::open_file;
+use anki_io::FileIoSnafu;
+use anki_io::FileOp;
+use zip::read::ZipFile;
+use zip::ZipArchive;
+use zstd::stream::copy_decode;
 
-use crate::{
-    collection::CollectionBuilder,
-    error::ImportError,
-    import_export::{
-        package::{
-            media::{extract_media_entries, SafeMediaEntry},
-            Meta,
-        },
-        ImportProgress, IncrementableProgress,
-    },
-    io::{atomic_rename, tempfile_in_parent_of},
-    media::MediaManager,
-    prelude::*,
-};
+use super::super::meta::MetaExt;
+use crate::collection::CollectionBuilder;
+use crate::import_export::package::media::extract_media_entries;
+use crate::import_export::package::media::SafeMediaEntry;
+use crate::import_export::package::Meta;
+use crate::import_export::ImportError;
+use crate::import_export::ImportProgress;
+use crate::media::MediaManager;
+use crate::prelude::*;
+use crate::progress::ThrottlingProgressHandler;
 
 pub fn import_colpkg(
     colpkg_path: &str,
     target_col_path: &str,
     target_media_folder: &Path,
     media_db: &Path,
-    progress_fn: impl 'static + FnMut(ImportProgress, bool) -> bool,
-    log: &Logger,
+    mut progress: ThrottlingProgressHandler<ImportProgress>,
 ) -> Result<()> {
-    let mut progress = IncrementableProgress::new(progress_fn);
-    progress.call(ImportProgress::File)?;
     let col_path = PathBuf::from(target_col_path);
-    let mut tempfile = tempfile_in_parent_of(&col_path)?;
+    let mut tempfile = new_tempfile_in_parent_of(&col_path)?;
 
-    let backup_file = File::open(colpkg_path)?;
+    let backup_file = open_file(colpkg_path)?;
     let mut archive = ZipArchive::new(backup_file)?;
     let meta = Meta::from_archive(&mut archive)?;
 
     copy_collection(&mut archive, &mut tempfile, &meta)?;
-    progress.call(ImportProgress::File)?;
+    progress.set(ImportProgress::File)?;
     check_collection_and_mod_schema(tempfile.path())?;
-    progress.call(ImportProgress::File)?;
+    progress.set(ImportProgress::File)?;
 
     restore_media(
         &meta,
@@ -53,10 +53,11 @@ pub fn import_colpkg(
         &mut archive,
         target_media_folder,
         media_db,
-        log,
     )?;
 
-    atomic_rename(tempfile, &col_path, true)
+    atomic_rename(tempfile, &col_path, true)?;
+
+    Ok(())
 }
 
 fn check_collection_and_mod_schema(col_path: &Path) -> Result<()> {
@@ -71,26 +72,27 @@ fn check_collection_and_mod_schema(col_path: &Path) -> Result<()> {
                 .pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))
                 .ok()
         })
-        .and_then(|s| (s == "ok").then(|| ()))
-        .ok_or(AnkiError::ImportError(ImportError::Corrupt))
+        .and_then(|s| (s == "ok").then_some(()))
+        .ok_or(AnkiError::ImportError {
+            source: ImportError::Corrupt,
+        })
 }
 
 fn restore_media(
     meta: &Meta,
-    progress: &mut IncrementableProgress<ImportProgress>,
+    progress: &mut ThrottlingProgressHandler<ImportProgress>,
     archive: &mut ZipArchive<File>,
     media_folder: &Path,
     media_db: &Path,
-    log: &Logger,
 ) -> Result<()> {
     let media_entries = extract_media_entries(meta, archive)?;
     if media_entries.is_empty() {
         return Ok(());
     }
 
-    std::fs::create_dir_all(media_folder)?;
+    create_dir_all(media_folder)?;
     let media_manager = MediaManager::new(media_folder, media_db)?;
-    let mut media_comparer = MediaComparer::new(meta, progress, &media_manager, log)?;
+    let mut media_comparer = MediaComparer::new(meta, progress, &media_manager)?;
 
     let mut incrementor = progress.incrementor(ImportProgress::Media);
     for mut entry in media_entries {
@@ -123,16 +125,14 @@ fn maybe_restore_media_file(
 }
 
 fn restore_media_file(meta: &Meta, zip_file: &mut ZipFile, path: &Path) -> Result<()> {
-    let mut tempfile = tempfile_in_parent_of(path)?;
-
-    if meta.zstd_compressed() {
-        copy_decode(zip_file, &mut tempfile)
-    } else {
-        io::copy(zip_file, &mut tempfile).map(|_| ())
-    }
-    .map_err(|err| AnkiError::file_io_error(err, path))?;
-
-    atomic_rename(tempfile, path, false)
+    let mut tempfile = new_tempfile_in_parent_of(path)?;
+    meta.copy(zip_file, &mut tempfile)
+        .with_context(|_| FileIoSnafu {
+            path: tempfile.path(),
+            op: FileOp::copy(zip_file.name()),
+        })?;
+    atomic_rename(tempfile, path, false)?;
+    Ok(())
 }
 
 fn copy_collection(
@@ -140,9 +140,12 @@ fn copy_collection(
     writer: &mut impl Write,
     meta: &Meta,
 ) -> Result<()> {
-    let mut file = archive
-        .by_name(meta.collection_filename())
-        .map_err(|_| AnkiError::ImportError(ImportError::Corrupt))?;
+    let mut file =
+        archive
+            .by_name(meta.collection_filename())
+            .map_err(|_| AnkiError::ImportError {
+                source: ImportError::Corrupt,
+            })?;
     if !meta.zstd_compressed() {
         io::copy(&mut file, writer)?;
     } else {
@@ -159,15 +162,14 @@ struct MediaComparer<'a>(Option<Box<GetChecksumFn<'a>>>);
 impl<'a> MediaComparer<'a> {
     fn new(
         meta: &Meta,
-        progress: &mut IncrementableProgress<ImportProgress>,
+        progress: &mut ThrottlingProgressHandler<ImportProgress>,
         media_manager: &'a MediaManager,
-        log: &Logger,
     ) -> Result<Self> {
         Ok(Self(if meta.media_list_is_hashmap() {
             None
         } else {
             let mut db_progress_fn = progress.media_db_fn(ImportProgress::MediaCheck)?;
-            media_manager.register_changes(&mut db_progress_fn, log)?;
+            media_manager.register_changes(&mut db_progress_fn)?;
             Some(Box::new(media_manager.checksum_getter()))
         }))
     }

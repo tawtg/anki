@@ -3,14 +3,22 @@
     License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
+    import * as tr from "@tslib/ftl";
+    import { HelpPage } from "@tslib/help-page";
+    import type Carousel from "bootstrap/js/dist/carousel";
+    import type Modal from "bootstrap/js/dist/modal";
+
     import DynamicallySlottable from "../components/DynamicallySlottable.svelte";
     import Item from "../components/Item.svelte";
-    import * as tr from "../lib/ftl";
+    import TitledContainer from "../components/TitledContainer.svelte";
+    import HelpModal from "./HelpModal.svelte";
     import type { DeckOptionsState } from "./lib";
     import { ValueTab } from "./lib";
+    import SettingTitle from "./SettingTitle.svelte";
     import SpinBoxRow from "./SpinBoxRow.svelte";
+    import SwitchRow from "./SwitchRow.svelte";
     import TabbedValue from "./TabbedValue.svelte";
-    import TitledContainer from "./TitledContainer.svelte";
+    import type { DeckOption } from "./types";
     import Warning from "./Warning.svelte";
 
     export let state: DeckOptionsState;
@@ -37,17 +45,18 @@
     const limits = state.deckLimits;
     const defaults = state.defaults;
     const parentLimits = state.parentLimits;
+    const newCardsIgnoreReviewLimit = state.newCardsIgnoreReviewLimit;
 
     const v3Extra = state.v3Scheduler
-        ? "\n\n" +
-          tr.deckConfigLimitNewBoundByReviews() +
-          "\n\n" +
-          tr.deckConfigLimitInterdayBoundByReviews() +
-          "\n\n" +
-          tr.deckConfigLimitDeckV3() +
-          "\n\n" +
-          tr.deckConfigTabDescription()
+        ? "\n\n" + tr.deckConfigLimitDeckV3() + "\n\n" + tr.deckConfigTabDescription()
         : "";
+    const reviewV3Extra = state.v3Scheduler
+        ? "\n\n" + tr.deckConfigLimitInterdayBoundByReviews() + v3Extra
+        : "";
+    const newCardsIgnoreReviewLimitHelp =
+        tr.deckConfigAffectsEntireCollection() +
+        "\n\n" +
+        tr.deckConfigNewCardsIgnoreReviewLimitTooltip();
 
     $: newCardsGreaterThanParent =
         !state.v3Scheduler && newValue > $parentLimits.newCards
@@ -76,14 +85,14 @@
                   new ValueTab(
                       tr.deckConfigDeckOnly(),
                       $limits.new ?? null,
-                      (value) => ($limits.new = value),
+                      (value) => ($limits.new = value ?? undefined),
                       null,
                       null,
                   ),
                   new ValueTab(
                       tr.deckConfigTodayOnly(),
                       $limits.newTodayActive ? $limits.newToday ?? null : null,
-                      (value) => ($limits.newToday = value),
+                      (value) => ($limits.newToday = value ?? undefined),
                       null,
                       $limits.newToday ?? null,
                   ),
@@ -105,14 +114,14 @@
                   new ValueTab(
                       tr.deckConfigDeckOnly(),
                       $limits.review ?? null,
-                      (value) => ($limits.review = value),
+                      (value) => ($limits.review = value ?? undefined),
                       null,
                       null,
                   ),
                   new ValueTab(
                       tr.deckConfigTodayOnly(),
                       $limits.reviewTodayActive ? $limits.reviewToday ?? null : null,
-                      (value) => ($limits.reviewToday = value),
+                      (value) => ($limits.reviewToday = value ?? undefined),
                       null,
                       $limits.reviewToday ?? null,
                   ),
@@ -120,40 +129,95 @@
             : [],
     );
 
-    let reviewsValue: number;
-    let newValue: number;
+    let newValue = 0;
+    let reviewsValue = 0;
+
+    const settings = {
+        newLimit: {
+            title: tr.schedulingNewCardsday(),
+            help: tr.deckConfigNewLimitTooltip() + v3Extra,
+            url: HelpPage.DeckOptions.newCardsday,
+        },
+        reviewLimit: {
+            title: tr.schedulingMaximumReviewsday(),
+            help: tr.deckConfigReviewLimitTooltip() + reviewV3Extra,
+            url: HelpPage.DeckOptions.maximumReviewsday,
+        },
+        newCardsIgnoreReviewLimit: {
+            title: tr.deckConfigNewCardsIgnoreReviewLimit(),
+            help: newCardsIgnoreReviewLimitHelp,
+            url: HelpPage.DeckOptions.newCardsday,
+        },
+    };
+    const helpSections = Object.values(settings) as DeckOption[];
+
+    let modal: Modal;
+    let carousel: Carousel;
+
+    function openHelpModal(index: number): void {
+        modal.show();
+        carousel.to(index);
+    }
 </script>
 
 <TitledContainer title={tr.deckConfigDailyLimits()}>
+    <HelpModal
+        title={tr.deckConfigDailyLimits()}
+        url={HelpPage.DeckOptions.dailyLimits}
+        slot="tooltip"
+        {helpSections}
+        on:mount={(e) => {
+            modal = e.detail.modal;
+            carousel = e.detail.carousel;
+        }}
+    />
     <DynamicallySlottable slotHost={Item} {api}>
-        <TabbedValue tabs={newTabs} bind:value={newValue} />
         <Item>
-            <SpinBoxRow
-                bind:value={newValue}
-                defaultValue={defaults.newPerDay}
-                markdownTooltip={tr.deckConfigNewLimitTooltip() + v3Extra}
-            >
-                {tr.schedulingNewCardsday()}
+            <SpinBoxRow bind:value={newValue} defaultValue={defaults.newPerDay}>
+                <TabbedValue slot="tabs" tabs={newTabs} bind:value={newValue} />
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(Object.keys(settings).indexOf("newLimit"))}
+                >
+                    {settings.newLimit.title}
+                </SettingTitle>
             </SpinBoxRow>
         </Item>
 
         <Item>
             <Warning warning={newCardsGreaterThanParent} />
         </Item>
-
-        <TabbedValue tabs={reviewTabs} bind:value={reviewsValue} />
         <Item>
-            <SpinBoxRow
-                bind:value={reviewsValue}
-                defaultValue={defaults.reviewsPerDay}
-                markdownTooltip={tr.deckConfigReviewLimitTooltip() + v3Extra}
-            >
-                {tr.schedulingMaximumReviewsday()}
+            <SpinBoxRow bind:value={reviewsValue} defaultValue={defaults.reviewsPerDay}>
+                <TabbedValue slot="tabs" tabs={reviewTabs} bind:value={reviewsValue} />
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(Object.keys(settings).indexOf("reviewLimit"))}
+                >
+                    {settings.reviewLimit.title}
+                </SettingTitle>
             </SpinBoxRow>
         </Item>
 
         <Item>
             <Warning warning={reviewsTooLow} />
         </Item>
+
+        {#if state.v3Scheduler}
+            <Item>
+                <SwitchRow bind:value={$newCardsIgnoreReviewLimit} defaultValue={false}>
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf(
+                                    "newCardsIgnoreReviewLimit",
+                                ),
+                            )}
+                    >
+                        {settings.newCardsIgnoreReviewLimit.title}
+                    </SettingTitle>
+                </SwitchRow>
+            </Item>
+        {/if}
     </DynamicallySlottable>
 </TitledContainer>

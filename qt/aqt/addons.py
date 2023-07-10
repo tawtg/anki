@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import io
 import json
 import os
@@ -45,6 +46,7 @@ from aqt.utils import (
     send_to_trash,
     show_info,
     showInfo,
+    showText,
     showWarning,
     tooltip,
     tr,
@@ -177,7 +179,6 @@ def package_name_valid(name: str) -> bool:
 
 # fixme: this class should not have any GUI code in it
 class AddonManager:
-
     exts: list[str] = [".ankiaddon", ".zip"]
     _manifest_schema: dict = {
         "type": "object",
@@ -246,11 +247,17 @@ class AddonManager:
             except AbortAddonImport:
                 pass
             except:
-                showWarning(
+                error = html.escape(
                     tr.addons_failed_to_load(
                         name=addon.human_name(),
                         traceback=traceback.format_exc(),
                     )
+                )
+                txt = f"<h1>{tr.qt_misc_error()}</h1><div style='white-space: pre-wrap'>{error}</div>"
+                showText(
+                    txt,
+                    type="html",
+                    copyBtn=True,
                 )
 
     def onAddonsDialog(self) -> None:
@@ -399,7 +406,7 @@ class AddonManager:
         force_enable: bool = False,
     ) -> InstallOk | InstallError:
         """Install add-on from path or file-like object. Metadata is read
-        from the manifest file, with keys overriden by supplying a 'manifest'
+        from the manifest file, with keys overridden by supplying a 'manifest'
         dictionary"""
         try:
             zfile = ZipFile(file)
@@ -419,7 +426,9 @@ class AddonManager:
             conflicts = manifest.get("conflicts", [])
             found_conflicts = self._disableConflicting(package, conflicts)
             meta = self.addonMeta(package)
+            gui_hooks.addon_manager_will_install_addon(self, package)
             self._install(package, zfile)
+            gui_hooks.addon_manager_did_install_addon(self, package)
 
         schema = self._manifest_schema["properties"]
         manifest_meta = {
@@ -443,10 +452,11 @@ class AddonManager:
         base = self.addonsFolder(module)
         if os.path.exists(base):
             self.backupUserFiles(module)
-            if not self.deleteAddon(module):
+            try:
+                self.deleteAddon(module)
+            except Exception:
                 self.restoreUserFiles(module)
-                return
-
+                raise
         os.mkdir(base)
         self.restoreUserFiles(module)
 
@@ -462,17 +472,8 @@ class AddonManager:
                 continue
             zfile.extract(n, base)
 
-    # true on success
-    def deleteAddon(self, module: str) -> bool:
-        try:
-            send_to_trash(Path(self.addonsFolder(module)))
-            return True
-        except OSError as e:
-            showWarning(
-                tr.addons_unable_to_update_or_delete_addon(val=str(e)),
-                textFormat="plain",
-            )
-            return False
+    def deleteAddon(self, module: str) -> None:
+        send_to_trash(Path(self.addonsFolder(module)))
 
     # Processing local add-on files
     ######################################################################
@@ -483,7 +484,6 @@ class AddonManager:
         parent: QWidget | None = None,
         force_enable: bool = False,
     ) -> tuple[list[str], list[str]]:
-
         log = []
         errs = []
 
@@ -512,7 +512,6 @@ class AddonManager:
     def _installationErrorReport(
         self, result: InstallError, base: str, mode: str = "download"
     ) -> list[str]:
-
         messages = {
             "zip": tr.addons_corrupt_addon_file(),
             "manifest": tr.addons_invalid_addon_manifest(),
@@ -530,7 +529,6 @@ class AddonManager:
     def _installationSuccessReport(
         self, result: InstallOk, base: str, mode: str = "download"
     ) -> list[str]:
-
         name = result.name or base
         if mode == "download":
             template = tr.addons_downloaded_fnames(fname=name)
@@ -632,7 +630,8 @@ class AddonManager:
 
     def set_config_help_action(self, module: str, action: Callable[[], str]) -> None:
         "Set a callback used to produce config help."
-        self._config_help_actions[module] = action
+        addon = self.addonFromModule(module)
+        self._config_help_actions[addon] = action
 
     def addonConfigHelp(self, module: str) -> str:
         if action := self._config_help_actions.get(module, None):
@@ -908,12 +907,17 @@ class AddonsDialog(QDialog):
         if not askUser(tr.addons_delete_the_numd_selected_addon(count=len(selected))):
             return
         gui_hooks.addons_dialog_will_delete_addons(self, selected)
-        for module in selected:
-            # doing this before deleting, as `enabled` is always True afterwards
-            if self.mgr.addon_meta(module).enabled:
-                self._require_restart = True
-            if not self.mgr.deleteAddon(module):
-                break
+        try:
+            for module in selected:
+                # doing this before deleting, as `enabled` is always True afterwards
+                if self.mgr.addon_meta(module).enabled:
+                    self._require_restart = True
+                self.mgr.deleteAddon(module)
+        except OSError as e:
+            showWarning(
+                tr.addons_unable_to_update_or_delete_addon(val=str(e)),
+                textFormat="plain",
+            )
         self.form.addonList.clearSelection()
         self.redrawAddons()
 
@@ -1180,6 +1184,7 @@ class DownloaderInstaller(QObject):
 
     def _download_done(self, future: Future) -> None:
         self.mgr.mw.progress.finish()
+        future.result()
         # qt gets confused if on_done() opens new windows while the progress
         # modal is still cleaning up
         self.mgr.mw.progress.single_shot(50, lambda: self.on_done(self.log))
@@ -1542,6 +1547,7 @@ class ConfigEditor(QDialog):
         self.updateHelp()
         self.updateText(self.conf)
         restoreGeom(self, "addonconf")
+        self.form.splitter.setSizes([2 * self.width() // 3, self.width() // 3])
         restoreSplitter(self.form.splitter, "addonconf")
         self.setWindowTitle(
             without_unicode_isolation(
@@ -1566,9 +1572,9 @@ class ConfigEditor(QDialog):
     def updateHelp(self) -> None:
         txt = self.mgr.addonConfigHelp(self.addon)
         if txt:
-            self.form.label.setText(txt)
+            self.form.help.stdHtml(txt, js=[], css=["css/addonconf.css"], context=self)
         else:
-            self.form.scrollArea.setVisible(False)
+            self.form.help.setVisible(False)
 
     def updateText(self, conf: dict[str, Any]) -> None:
         text = json.dumps(
@@ -1593,7 +1599,7 @@ class ConfigEditor(QDialog):
 
     def accept(self) -> None:
         txt = self.form.editor.toPlainText()
-        txt = gui_hooks.addon_config_editor_will_save_json(txt)
+        txt = gui_hooks.addon_config_editor_will_update_json(txt, self.addon)
         try:
             new_conf = json.loads(txt)
             jsonschema.validate(new_conf, self.mgr._addon_schema(self.addon))
@@ -1652,7 +1658,6 @@ def installAddonPackages(
     advise_restart: bool = False,
     force_enable: bool = False,
 ) -> bool:
-
     if warn:
         names = ",<br>".join(f"<b>{os.path.basename(p)}</b>" for p in paths)
         q = tr.addons_important_as_addons_are_programs_downloaded() % dict(names=names)

@@ -1,20 +1,25 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+from __future__ import annotations
+
 import json
 import re
 from concurrent.futures import Future
-from typing import Any, Match, Optional
+from typing import Any, Match, Optional, cast
 
 import aqt
 import aqt.forms
 import aqt.operations
+from anki import stdmodels
 from anki.collection import OpChanges
 from anki.consts import *
-from anki.lang import without_unicode_isolation
+from anki.lang import with_collapsed_whitespace, without_unicode_isolation
 from anki.notes import Note
+from anki.notetypes_pb2 import StockNotetype
 from aqt import AnkiQt, gui_hooks
-from aqt.forms.browserdisp import Ui_Dialog
-from aqt.operations.notetype import update_notetype_legacy
+from aqt.forms import browserdisp
+from aqt.operations.notetype import restore_notetype_to_stock, update_notetype_legacy
 from aqt.qt import *
 from aqt.schema_change_tracker import ChangeTracker
 from aqt.sound import av_player, play_clicked_audio
@@ -35,7 +40,7 @@ from aqt.utils import (
     tooltip,
     tr,
 )
-from aqt.webview import AnkiWebView
+from aqt.webview import AnkiWebView, AnkiWebViewKind
 
 
 class CardLayout(QDialog):
@@ -247,7 +252,7 @@ class CardLayout(QDialog):
         tform.front_button.setText(tr.card_templates_front_template())
         tform.back_button.setText(tr.card_templates_back_template())
         tform.style_button.setText(tr.card_templates_template_styling())
-        tform.groupBox.setTitle(tr.card_templates_template_box())
+        tform.template_box.setTitle(tr.card_templates_template_box())
 
         cnt = self.mw.col.models.use_count(self.model)
         tform.changes_affect_label.setText(
@@ -334,7 +339,7 @@ class CardLayout(QDialog):
 
     def setup_preview(self) -> None:
         pform = self.pform
-        self.preview_web = AnkiWebView(title="card layout")
+        self.preview_web = AnkiWebView(kind=AnkiWebViewKind.CARD_LAYOUT)
         pform.verticalLayout.addWidget(self.preview_web)
         pform.verticalLayout.setStretch(1, 99)
         pform.preview_front.isChecked()
@@ -358,6 +363,10 @@ class CardLayout(QDialog):
         self.preview_web.allow_drops = True
         self.preview_web.eval("_blockDefaultDragDropBehavior();")
         self.preview_web.set_bridge_command(self._on_bridge_cmd, self)
+
+        gui_hooks.card_review_webview_did_init(
+            self.preview_web, AnkiWebViewKind.CARD_LAYOUT
+        )
 
         if self._isCloze():
             nums = list(self.note.cloze_numbers_in_fields())
@@ -586,7 +595,7 @@ class CardLayout(QDialog):
             repl = answerRepl
         out = re.sub(type_filter, repl, txt, count=1)
 
-        warning = f"<center><b>{tr.card_templates_type_boxes_warning()}</center><b>"
+        warning = f"<center><b>{tr.card_templates_type_boxes_warning()}</b></center>"
         return re.sub(type_filter, warning, out)
 
     # Card operations
@@ -692,6 +701,34 @@ class CardLayout(QDialog):
         self.ord = len(self.templates) - 1
         self.redraw_everything()
 
+    def on_restore_to_default(
+        self, force_kind: StockNotetype.Kind.V | None = None
+    ) -> None:
+        if force_kind is None and not self.model.get("originalStockKind", 0):
+            SelectStockNotetype(
+                mw=self.mw,
+                on_success=lambda kind: self.on_restore_to_default(force_kind=kind),
+                parent=self,
+            )
+            return
+
+        if not askUser(
+            with_collapsed_whitespace(
+                tr.card_templates_restore_to_default_confirmation()
+            ),
+            defaultno=True,
+        ):
+            return
+
+        def on_success(changes: OpChanges) -> None:
+            self.change_tracker.set_unchanged()
+            self.close()
+            showInfo(tr.card_templates_restored_to_default(), parent=self.mw)
+
+        restore_notetype_to_stock(
+            parent=self, notetype_id=self.model["id"], force_kind=force_kind
+        ).success(on_success).run_in_background()
+
     def onFlip(self) -> None:
         old = self.current_template()
         self._flipQA(old, old)
@@ -708,6 +745,14 @@ class CardLayout(QDialog):
 
     def onMore(self) -> None:
         m = QMenu(self)
+
+        a = m.addAction(
+            tr.actions_with_ellipsis(action=tr.card_templates_restore_to_default())
+        )
+        qconnect(
+            a.triggered,
+            lambda: self.on_restore_to_default(),  # pylint: disable=unnecessary-lambda
+        )
 
         if not self._isCloze():
             a = m.addAction(tr.card_templates_add_card_type())
@@ -752,7 +797,7 @@ class CardLayout(QDialog):
         qconnect(f.buttonBox.accepted, lambda: self.onBrowserDisplayOk(f))
         d.exec()
 
-    def onBrowserDisplayOk(self, f: Ui_Dialog) -> None:
+    def onBrowserDisplayOk(self, f: browserdisp.Ui_Dialog) -> None:
         t = self.current_template()
         self.change_tracker.mark_basic()
         t["bqfmt"] = f.qfmt.text().strip()
@@ -865,3 +910,42 @@ class CardLayout(QDialog):
 
     def onHelp(self) -> None:
         openHelp(HelpPage.TEMPLATES)
+
+
+class SelectStockNotetype(QDialog):
+    def __init__(
+        self,
+        mw: AnkiQt,
+        on_success: Callable[[StockNotetype.Kind.V], None],
+        parent: QWidget,
+    ) -> None:
+        self.mw = mw
+        QDialog.__init__(self, parent, Qt.WindowType.Window)
+        self.dialog = aqt.forms.addmodel.Ui_Dialog()
+        self.dialog.setupUi(self)
+        self.setWindowTitle("Anki")
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        disable_help_button(self)
+        stock_types = stdmodels.get_stock_notetypes(mw.col)
+
+        for name, func in stock_types:
+            item = QListWidgetItem(name)
+            self.dialog.models.addItem(item)
+        self.dialog.models.setCurrentRow(0)
+        # the list widget will swallow the enter key
+        s = QShortcut(QKeySequence("Return"), self)
+        qconnect(s.activated, self.accept)
+        # help
+        # self.dialog.buttonBox.standardButton(QDialogButtonBox.StandardButton.Help).
+        self.on_success = on_success
+        self.show()
+
+    def reject(self) -> None:
+        QDialog.reject(self)
+
+    def accept(self) -> None:
+        kind = cast(StockNotetype.Kind.ValueType, self.dialog.models.currentRow())
+        QDialog.accept(self)
+        # On Mac, we need to allow time for the existing modal to close or
+        # Qt gets confused.
+        self.mw.progress.single_shot(100, lambda: self.on_success(kind), True)
