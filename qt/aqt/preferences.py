@@ -3,15 +3,13 @@
 
 import functools
 import re
-from typing import Any, cast
 
 import anki.lang
 import aqt
 import aqt.forms
 import aqt.operations
 from anki.collection import OpChanges
-from anki.consts import new_card_scheduling_labels
-from aqt import AnkiQt, gui_hooks
+from aqt import AnkiQt
 from aqt.operations.collection import set_preferences
 from aqt.profiles import VideoDriver
 from aqt.qt import *
@@ -106,19 +104,8 @@ class Preferences(QDialog):
 
         scheduling = self.prefs.scheduling
 
-        version = scheduling.scheduler_version
-        form.dayLearnFirst.setVisible(version == 2)
-        form.legacy_timezone.setVisible(version >= 2)
-        form.newSpread.setVisible(version < 3)
-        form.sched2021.setVisible(version >= 2)
-
         form.lrnCutoff.setValue(int(scheduling.learn_ahead_secs / 60.0))
-        form.newSpread.addItems(list(new_card_scheduling_labels(self.mw.col).values()))
-        form.newSpread.setCurrentIndex(scheduling.new_review_mix)
-        form.dayLearnFirst.setChecked(scheduling.day_learn_first)
         form.dayOffset.setValue(scheduling.rollover)
-        form.legacy_timezone.setChecked(not scheduling.new_timezone)
-        form.sched2021.setChecked(version == 3)
 
         reviewing = self.prefs.reviewing
         form.timeLimit.setValue(int(reviewing.time_limit_secs / 60.0))
@@ -148,11 +135,8 @@ class Preferences(QDialog):
         form = self.form
 
         scheduling = self.prefs.scheduling
-        scheduling.new_review_mix = cast(Any, form.newSpread.currentIndex())
         scheduling.learn_ahead_secs = form.lrnCutoff.value() * 60
-        scheduling.day_learn_first = form.dayLearnFirst.isChecked()
         scheduling.rollover = form.dayOffset.value()
-        scheduling.new_timezone = not form.legacy_timezone.isChecked()
 
         reviewing = self.prefs.reviewing
         reviewing.show_remaining_due_counts = form.showProgress.isChecked()
@@ -177,12 +161,6 @@ class Preferences(QDialog):
 
         def after_prefs_update(changes: OpChanges) -> None:
             self.mw.apply_collection_options()
-            if scheduling.scheduler_version > 1:
-                want_v3 = form.sched2021.isChecked()
-                if self.mw.col.v3_scheduler() != want_v3:
-                    self.mw.col.set_v3_scheduler(want_v3)
-                    gui_hooks.operation_did_execute(OpChanges(study_queues=True), None)
-
             on_done()
 
         set_preferences(parent=self, preferences=self.prefs).success(
@@ -392,9 +370,6 @@ class Preferences(QDialog):
         self.form.video_driver.setCurrentIndex(
             self.video_drivers.index(self.mw.pm.video_driver())
         )
-        if qtmajor > 5:
-            self.form.video_driver_label.setVisible(False)
-            self.form.video_driver.setVisible(False)
 
     def update_video_driver(self) -> None:
         new_driver = self.video_drivers[self.form.video_driver.currentIndex()]
@@ -404,15 +379,22 @@ class Preferences(QDialog):
 
 
 def video_driver_name_for_platform(driver: VideoDriver) -> str:
-    if driver == VideoDriver.ANGLE:
-        return tr.preferences_video_driver_angle()
-    elif driver == VideoDriver.Software:
-        if is_mac:
-            return tr.preferences_video_driver_software_mac()
-        else:
-            return tr.preferences_video_driver_software_other()
-    else:
-        if is_mac:
-            return tr.preferences_video_driver_opengl_mac()
-        else:
-            return tr.preferences_video_driver_opengl_other()
+    if qtmajor < 6:
+        if driver == VideoDriver.ANGLE:
+            return tr.preferences_video_driver_angle()
+        elif driver == VideoDriver.Software:
+            if is_mac:
+                return tr.preferences_video_driver_software_mac()
+            else:
+                return tr.preferences_video_driver_software_other()
+        elif driver == VideoDriver.OpenGL:
+            if is_mac:
+                return tr.preferences_video_driver_opengl_mac()
+            else:
+                return tr.preferences_video_driver_opengl_other()
+
+    label = driver.name
+    if driver == VideoDriver.default_for_platform():
+        label += f" ({tr.preferences_video_driver_default()})"
+
+    return label

@@ -34,7 +34,9 @@ pub enum BoolKey {
     RandomOrderReposition,
     Sched2021,
     ShiftPositionOfExistingCards,
-
+    MergeNotetypes,
+    WithScheduling,
+    Fsrs,
     #[strum(to_string = "normalize_note_text")]
     NormalizeNoteText,
     #[strum(to_string = "dayLearnFirst")]

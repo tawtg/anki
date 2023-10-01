@@ -40,22 +40,13 @@ impl<'a> StateContext<'a> {
             (interval.round() as u32).clamp(minimum, maximum)
         }
     }
-
-    pub(crate) fn fuzzed_graduating_interval_good(&self) -> u32 {
-        let (minimum, maximum) = self.min_and_max_review_intervals(1);
-        self.with_review_fuzz(self.graduating_interval_good as f32, minimum, maximum)
-    }
-
-    pub(crate) fn fuzzed_graduating_interval_easy(&self) -> u32 {
-        let (minimum, maximum) = self.min_and_max_review_intervals(1);
-        self.with_review_fuzz(self.graduating_interval_easy as f32, minimum, maximum)
-    }
 }
 
 /// Return the bounds of the fuzz range, respecting `minimum` and `maximum`.
 /// Ensure the upper bound is larger than the lower bound, if `maximum` allows
 /// it and it is larger than 1.
 fn constrained_fuzz_bounds(interval: f32, minimum: u32, maximum: u32) -> (u32, u32) {
+    let minimum = minimum.min(maximum);
     let (mut lower, mut upper) = fuzz_bounds(interval);
 
     // minimum <= maximum and lower <= upper are assumed
@@ -146,5 +137,10 @@ mod test {
         assert_lower_middle_upper!(100.0, 101, 1000, 101, 104, 107);
         assert_lower_middle_upper!(100.0, 1, 99, 93, 96, 99);
         assert_lower_middle_upper!(100.0, 97, 103, 97, 100, 103);
+    }
+
+    #[test]
+    fn invalid_values_will_not_panic() {
+        constrained_fuzz_bounds(1.0, 3, 2);
     }
 }

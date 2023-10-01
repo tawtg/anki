@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Generator, Literal, Sequence, Union, cast
+from typing import Any, Generator, Iterable, Literal, Sequence, Union, cast
 
 from anki import (
+    ankiweb_pb2,
     card_rendering_pb2,
     collection_pb2,
     config_pb2,
@@ -13,8 +14,11 @@ from anki import (
     image_occlusion_pb2,
     import_export_pb2,
     links_pb2,
+    notes_pb2,
+    scheduler_pb2,
     search_pb2,
     stats_pb2,
+    sync_pb2,
 )
 from anki._legacy import DeprecatedNamesMixin, deprecated
 from anki.sync_pb2 import SyncLoginRequest
@@ -37,6 +41,7 @@ BrowserRow = search_pb2.BrowserRow
 BrowserColumns = search_pb2.BrowserColumns
 StripHtmlMode = card_rendering_pb2.StripHtmlRequest
 ImportLogWithChanges = import_export_pb2.ImportResponse
+ImportAnkiPackageRequest = import_export_pb2.ImportAnkiPackageRequest
 ImportCsvRequest = import_export_pb2.ImportCsvRequest
 CsvMetadata = import_export_pb2.CsvMetadata
 DupeResolution = CsvMetadata.DupeResolution
@@ -45,6 +50,11 @@ TtsVoice = card_rendering_pb2.AllTtsVoicesResponse.TtsVoice
 GetImageForOcclusionResponse = image_occlusion_pb2.GetImageForOcclusionResponse
 AddImageOcclusionNoteRequest = image_occlusion_pb2.AddImageOcclusionNoteRequest
 GetImageOcclusionNoteResponse = image_occlusion_pb2.GetImageOcclusionNoteResponse
+AddonInfo = ankiweb_pb2.AddonInfo
+CheckForUpdateResponse = ankiweb_pb2.CheckForUpdateResponse
+MediaSyncStatus = sync_pb2.MediaSyncStatusResponse
+FsrsItem = scheduler_pb2.FsrsItem
+FsrsReview = scheduler_pb2.FsrsReview
 
 import copy
 import os
@@ -68,8 +78,7 @@ from anki.lang import FormatTimeSpan
 from anki.media import MediaManager, media_paths_from_col_path
 from anki.models import ModelManager, NotetypeDict, NotetypeId
 from anki.notes import Note, NoteId
-from anki.scheduler.v1 import Scheduler as V1Scheduler
-from anki.scheduler.v2 import Scheduler as V2Scheduler
+from anki.scheduler.dummy import DummyScheduler
 from anki.scheduler.v3 import Scheduler as V3Scheduler
 from anki.sync import SyncAuth, SyncOutput, SyncStatus
 from anki.tags import TagManager
@@ -121,8 +130,21 @@ class CardIdsLimit:
 ExportLimit = Union[DeckIdLimit, NoteIdsLimit, CardIdsLimit, None]
 
 
+@dataclass
+class ComputedMemoryState:
+    desired_retention: float
+    stability: float | None = None
+    difficulty: float | None = None
+
+
+@dataclass
+class AddNoteRequest:
+    note: Note
+    deck_id: DeckId
+
+
 class Collection(DeprecatedNamesMixin):
-    sched: V1Scheduler | V2Scheduler | V3Scheduler
+    sched: V3Scheduler | DummyScheduler
 
     @staticmethod
     def initialize_backend_logging(path: str | None = None) -> None:
@@ -200,12 +222,17 @@ class Collection(DeprecatedNamesMixin):
     def _load_scheduler(self) -> None:
         ver = self.sched_ver()
         if ver == 1:
-            self.sched = V1Scheduler(self)
+            self.sched = DummyScheduler(self)
         elif ver == 2:
             if self.v3_scheduler():
                 self.sched = V3Scheduler(self)
+                # enable new timezone if not already enabled
+                if self.conf.get("creationOffset") is None:
+                    prefs = self._backend.get_preferences()
+                    prefs.scheduling.new_timezone = True
+                    self._backend.set_preferences(prefs)
             else:
-                self.sched = V2Scheduler(self)
+                self.sched = DummyScheduler(self)
 
     def upgrade_to_v2_scheduler(self) -> None:
         self._backend.upgrade_scheduler()
@@ -316,7 +343,6 @@ class Collection(DeprecatedNamesMixin):
                 collection_path=self.path,
                 media_folder_path=media_dir,
                 media_db_path=media_db,
-                force_schema11=False,
             )
         self.db = DBProxy(weakref.proxy(self._backend))
         self.db.begin()
@@ -393,8 +419,11 @@ class Collection(DeprecatedNamesMixin):
             out_path=out_path, include_media=include_media, legacy=legacy
         )
 
-    def import_anki_package(self, path: str) -> ImportLogWithChanges:
-        return self._backend.import_anki_package(package_path=path)
+    def import_anki_package(
+        self, request: ImportAnkiPackageRequest
+    ) -> ImportLogWithChanges:
+        log = self._backend.import_anki_package_raw(request.SerializeToString())
+        return ImportLogWithChanges.FromString(log)
 
     def export_anki_package(
         self,
@@ -570,6 +599,22 @@ class Collection(DeprecatedNamesMixin):
         hooks.note_will_be_added(self, note, deck_id)
         out = self._backend.add_note(note=note._to_backend_note(), deck_id=deck_id)
         note.id = NoteId(out.note_id)
+        return out.changes
+
+    def add_notes(self, requests: Iterable[AddNoteRequest]) -> OpChanges:
+        for request in requests:
+            hooks.note_will_be_added(self, request.note, request.deck_id)
+        out = self._backend.add_notes(
+            requests=[
+                notes_pb2.AddNoteRequest(
+                    note=request.note._to_backend_note(), deck_id=request.deck_id
+                )
+                for request in requests
+            ]
+        )
+        for idx, request in enumerate(requests):
+            request.note.id = NoteId(out.nids[idx])
+
         return out.changes
 
     def remove_notes(self, note_ids: Sequence[NoteId]) -> OpChangesWithCount:
@@ -1240,11 +1285,14 @@ class Collection(DeprecatedNamesMixin):
     def abort_sync(self) -> None:
         self._backend.abort_sync()
 
-    def full_upload(self, auth: SyncAuth) -> None:
-        self._backend.full_upload(auth)
-
-    def full_download(self, auth: SyncAuth) -> None:
-        self._backend.full_download(auth)
+    def full_upload_or_download(
+        self, *, auth: SyncAuth, server_usn: int | None, upload: bool
+    ) -> None:
+        self._backend.full_upload_or_download(
+            sync_pb2.FullUploadOrDownloadRequest(
+                auth=auth, server_usn=server_usn, upload=upload
+            )
+        )
 
     def sync_login(
         self, username: str, password: str, endpoint: str | None
@@ -1253,14 +1301,18 @@ class Collection(DeprecatedNamesMixin):
             SyncLoginRequest(username=username, password=password, endpoint=endpoint)
         )
 
-    def sync_collection(self, auth: SyncAuth) -> SyncOutput:
-        return self._backend.sync_collection(auth)
+    def sync_collection(self, auth: SyncAuth, sync_media: bool) -> SyncOutput:
+        return self._backend.sync_collection(auth=auth, sync_media=sync_media)
 
     def sync_media(self, auth: SyncAuth) -> None:
         self._backend.sync_media(auth)
 
     def sync_status(self, auth: SyncAuth) -> SyncStatus:
         return self._backend.sync_status(auth)
+
+    def media_sync_status(self) -> MediaSyncStatus:
+        "This will throw if the sync failed with an error."
+        return self._backend.media_sync_status()
 
     def get_preferences(self) -> Preferences:
         return self._backend.get_preferences()
@@ -1277,6 +1329,17 @@ class Collection(DeprecatedNamesMixin):
 
     def extract_cloze_for_typing(self, text: str, ordinal: int) -> str:
         return self._backend.extract_cloze_for_typing(text=text, ordinal=ordinal)
+
+    def compute_memory_state(self, card_id: CardId) -> ComputedMemoryState:
+        resp = self._backend.compute_memory_state(card_id)
+        if resp.HasField("state"):
+            return ComputedMemoryState(
+                desired_retention=resp.desired_retention,
+                stability=resp.state.stability,
+                difficulty=resp.state.difficulty,
+            )
+        else:
+            return ComputedMemoryState(desired_retention=resp.desired_retention)
 
     # Timeboxing
     ##########################################################################

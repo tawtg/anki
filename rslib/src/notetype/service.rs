@@ -53,11 +53,12 @@ impl crate::services::NotetypesService for Collection {
 
     fn update_notetype_legacy(
         &mut self,
-        input: generic::Json,
+        input: anki_proto::notetypes::UpdateNotetypeLegacyRequest,
     ) -> error::Result<anki_proto::collection::OpChanges> {
         let legacy: NotetypeSchema11 = serde_json::from_slice(&input.json)?;
         let mut notetype: Notetype = legacy.into();
-        self.update_notetype(&mut notetype, false).map(Into::into)
+        self.update_notetype(&mut notetype, input.skip_checks)
+            .map(Into::into)
     }
 
     fn add_or_update_notetype(
@@ -203,7 +204,7 @@ impl crate::services::NotetypesService for Collection {
         &mut self,
         input: anki_proto::notetypes::RestoreNotetypeToStockRequest,
     ) -> error::Result<anki_proto::collection::OpChanges> {
-        let force_kind = input.force_kind.and_then(StockKind::from_i32);
+        let force_kind = input.force_kind.and_then(|s| StockKind::try_from(s).ok());
 
         self.restore_notetype_to_stock(
             input.notetype_id.or_invalid("missing notetype id")?.into(),

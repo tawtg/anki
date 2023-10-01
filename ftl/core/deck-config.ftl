@@ -149,6 +149,7 @@ deck-config-new-gather-priority-tooltip-2 =
     
     `Random cards`: gathers cards completely randomly.
 deck-config-new-gather-priority-deck = Deck
+deck-config-new-gather-priority-deck-then-random-notes = Deck then random notes
 deck-config-new-gather-priority-position-lowest-first = Ascending position
 deck-config-new-gather-priority-position-highest-first = Descending position
 deck-config-new-gather-priority-random-notes = Random notes
@@ -203,6 +204,8 @@ deck-config-sort-order-ascending-intervals = Ascending intervals
 deck-config-sort-order-descending-intervals = Descending intervals
 deck-config-sort-order-ascending-ease = Ascending ease
 deck-config-sort-order-descending-ease = Descending ease
+deck-config-sort-order-ascending-difficulty = Ascending difficulty
+deck-config-sort-order-descending-difficulty = Descending difficulty
 deck-config-sort-order-relative-overdueness = Relative overdueness
 deck-config-display-order-will-use-current-deck =
     Anki will use the display order from the deck you 
@@ -231,7 +234,10 @@ deck-config-skip-question-when-replaying = Skip question when replaying answer
 deck-config-always-include-question-audio-tooltip =
     Whether the question audio should be included when the Replay action is
     used while looking at the answer side of a card.
-
+deck-config-stop-timer-on-answer = Stop timer on answer
+deck-config-stop-timer-on-answer-tooltip =
+    Whether to stop the timer when the answer is revealed.
+    This doesn't affect statistics.
 ## Advanced section
 
 deck-config-advanced-title = Advanced
@@ -307,6 +313,32 @@ deck-config-maximum-answer-secs-above-recommended = Anki can schedule your revie
 
 deck-config-which-deck = Which deck would you like to display options for?
 
+## Messages related to the FSRS scheduler
+
+deck-config-updating-cards = Updating cards: { $current_cards_count }/{ $total_cards_count }...
+deck-config-invalid-weights = Weights must be either left blank to use the defaults, or must be 17 comma-separated numbers.
+deck-config-not-enough-history = Insufficient review history to perform this operation.
+deck-config-must-have-1000-reviews =
+    { $count ->
+        [one] Only { $count } review was found.
+        *[other] Only { $count } reviews were found.
+    } You must have at least 1000 reviews to generate custom weights.
+# Numbers that control how aggressively the FSRS algorithm schedules cards
+deck-config-weights = Model weights
+deck-config-compute-optimal-weights = Optimize FSRS weights
+deck-config-compute-optimal-retention = Compute optimal retention
+deck-config-optimize-button = Optimize
+deck-config-compute-button = Compute
+deck-config-analyze-button = Analyze
+deck-config-desired-retention = Desired retention
+deck-config-smaller-is-better = Smaller numbers indicate a better fit to your review history.
+deck-config-steps-too-large-for-fsrs = When FSRS is enabled, learning steps over 1 day are not recommended.
+deck-config-get-params = Get Params
+deck-config-fsrs-on-all-clients =
+    Please ensure all of your Anki clients are Anki(Mobile) 23.10+ or AnkiDroid 2.17+. FSRS will
+    not work correctly if one of your clients is older.
+deck-config-set-optimal-retention = Set desired retention to { $num }
+deck-config-complete = { $num }% complete.
 
 ## NO NEED TO TRANSLATE. This text is no longer used by Anki, and will be removed in the future.
 

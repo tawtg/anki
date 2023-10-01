@@ -61,7 +61,10 @@ pub fn get_services(pool: &DescriptorPool) -> (Vec<CollectionService>, Vec<Backe
         // locate associated collection service
         let Some(col_service) = col_services
             .iter()
-            .find(|cs| cs.name == service.name.trim_start_matches("Backend")) else { panic!("missing associated service: {}", service.name) };
+            .find(|cs| cs.name == service.name.trim_start_matches("Backend"))
+        else {
+            panic!("missing associated service: {}", service.name)
+        };
 
         // add any methods that don't exist in backend trait methods to the delegating
         // methods
@@ -236,7 +239,7 @@ where
     E: Fn(&Utf8Path, &str) -> bool,
 {
     static MESSAGE_OR_ENUM_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r#"pub (struct|enum) ([[:alnum:]]+?)\s"#).unwrap());
+        Lazy::new(|| Regex::new(r"pub (struct|enum) ([[:alnum:]]+?)\s").unwrap());
     let contents = read_to_string(path)?;
     let contents = MESSAGE_OR_ENUM_RE.replace_all(&contents, |caps: &Captures| {
         let is_enum = caps.get(1).unwrap().as_str() == "enum";

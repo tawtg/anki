@@ -86,6 +86,8 @@ fn write_search_node(node: &SearchNode) -> String {
         Regex(s) => maybe_quote(&format!("re:{}", s)),
         NoCombining(s) => maybe_quote(&format!("nc:{}", s)),
         WordBoundary(s) => maybe_quote(&format!("w:{}", s)),
+        CustomData(k) => maybe_quote(&format!("has-cd:{}", k)),
+        Preset(s) => maybe_quote(&format!("preset:{}", s)),
     }
 }
 
@@ -166,12 +168,18 @@ fn write_property(operator: &str, kind: &PropertyKind) -> String {
         Lapses(u) => format!("prop:lapses{}{}", operator, u),
         Ease(f) => format!("prop:ease{}{}", operator, f),
         Position(u) => format!("prop:pos{}{}", operator, u),
+        Stability(u) => format!("prop:s{}{}", operator, u),
+        Difficulty(u) => format!("prop:d{}{}", operator, u),
+        Retrievability(u) => format!("prop:r{}{}", operator, u),
         Rated(u, ease) => match ease {
             RatingKind::AnswerButton(val) => format!("prop:rated{}{}:{}", operator, u, val),
             RatingKind::AnyAnswerButton => format!("prop:rated{}{}", operator, u),
             RatingKind::ManualReschedule => format!("prop:resched{}{}", operator, u),
         },
         CustomDataNumber { key, value } => format!("prop:cdn:{key}{operator}{value}"),
+        CustomDataString { key, value } => {
+            maybe_quote(&format!("prop:cds:{key}{operator}{value}",))
+        }
     }
 }
 

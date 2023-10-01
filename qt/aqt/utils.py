@@ -81,7 +81,7 @@ from aqt.qt import (
 from aqt.theme import theme_manager
 
 if TYPE_CHECKING:
-    TextFormat = Literal["plain", "rich"]
+    TextFormat = Literal["plain", "rich", "markdown"]
 
 
 def aqt_data_path() -> Path:
@@ -141,12 +141,13 @@ class MessageBox(QMessageBox):
         buttons: Sequence[str | QMessageBox.StandardButton] | None = None,
         default_button: int = 0,
         textFormat: Qt.TextFormat = Qt.TextFormat.PlainText,
+        modality: Qt.WindowModality = Qt.WindowModality.WindowModal,
     ) -> None:
         parent = parent or aqt.mw.app.activeWindow() or aqt.mw
         super().__init__(parent)
         self.setText(text)
         self.setWindowTitle(title)
-        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setWindowModality(modality)
         self.setIcon(icon)
         if icon == QMessageBox.Icon.Question and theme_manager.night_mode:
             img = self.iconPixmap().toImage()
@@ -282,6 +283,8 @@ def showInfo(
         mb.setTextFormat(Qt.TextFormat.PlainText)
     elif textFormat == "rich":
         mb.setTextFormat(Qt.TextFormat.RichText)
+    elif textFormat == "markdown":
+        mb.setTextFormat(Qt.TextFormat.MarkdownText)
     elif textFormat is not None:
         raise Exception("unexpected textFormat type")
     mb.setText(text)
@@ -712,9 +715,8 @@ def _qt_state_key(kind: _QtStateKeyKind, key: str) -> str:
 
 
 def saveGeom(widget: QWidget, key: str) -> None:
-    # restoring a fullscreen window is buggy
-    # (at the time of writing; Qt 6.2.2 and 5.15)
-    if not widget.isFullScreen():
+    # restoring a fullscreen window breaks the tab functionality of 5.15
+    if not widget.isFullScreen() or qtmajor == 6:
         key = _qt_state_key(_QtStateKeyKind.GEOMETRY, key)
         aqt.mw.pm.profile[key] = widget.saveGeometry()
 
@@ -1073,19 +1075,13 @@ def qtMenuShortcutWorkaround(qmenu: QMenu) -> None:
 
 
 def disallow_full_screen() -> bool:
-    """Test for OpenGl on Windows, which is known to cause issues with full screen mode.
-    On Qt6, the driver is not detectable, so check if it has been set explicitly.
-    """
+    """Test for OpenGl on Windows, which is known to cause issues with full screen mode."""
     from aqt import mw
     from aqt.profiles import VideoDriver
 
     return is_win and (
-        (qtmajor == 5 and mw.pm.video_driver() == VideoDriver.OpenGL)
-        or (
-            qtmajor == 6
-            and not os.environ.get("ANKI_SOFTWAREOPENGL")
-            and os.environ.get("QT_OPENGL") != "software"
-        )
+        mw.pm.video_driver() == VideoDriver.OpenGL
+        and not os.environ.get("ANKI_SOFTWAREOPENGL")
     )
 
 

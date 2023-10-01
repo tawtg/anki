@@ -4,9 +4,19 @@
 mod answering;
 mod states;
 
+use anki_proto::cards;
 use anki_proto::generic;
 use anki_proto::scheduler;
+use anki_proto::scheduler::ComputeFsrsWeightsResponse;
+use anki_proto::scheduler::ComputeMemoryStateResponse;
+use anki_proto::scheduler::ComputeOptimalRetentionRequest;
+use anki_proto::scheduler::ComputeOptimalRetentionResponse;
+use anki_proto::scheduler::GetOptimalRetentionParametersResponse;
+use fsrs::FSRSItem;
+use fsrs::FSRSReview;
+use fsrs::FSRS;
 
+use crate::backend::Backend;
 use crate::prelude::*;
 use crate::scheduler::new::NewCardDueOrder;
 use crate::scheduler::states::CardState;
@@ -125,7 +135,7 @@ impl crate::services::SchedulerService for Collection {
             input.reset_counts,
             input
                 .context
-                .and_then(scheduler::schedule_cards_as_new_request::Context::from_i32),
+                .and_then(|s| scheduler::schedule_cards_as_new_request::Context::try_from(s).ok()),
         )
         .map(Into::into)
     }
@@ -236,5 +246,81 @@ impl crate::services::SchedulerService for Collection {
         input: scheduler::CustomStudyDefaultsRequest,
     ) -> Result<scheduler::CustomStudyDefaultsResponse> {
         self.custom_study_defaults(input.deck_id.into())
+    }
+
+    fn compute_fsrs_weights(
+        &mut self,
+        input: scheduler::ComputeFsrsWeightsRequest,
+    ) -> Result<scheduler::ComputeFsrsWeightsResponse> {
+        self.compute_weights(&input.search)
+    }
+
+    fn compute_optimal_retention(
+        &mut self,
+        input: ComputeOptimalRetentionRequest,
+    ) -> Result<ComputeOptimalRetentionResponse> {
+        Ok(ComputeOptimalRetentionResponse {
+            optimal_retention: self.compute_optimal_retention(input)?,
+        })
+    }
+
+    fn evaluate_weights(
+        &mut self,
+        input: scheduler::EvaluateWeightsRequest,
+    ) -> Result<scheduler::EvaluateWeightsResponse> {
+        let ret = self.evaluate_weights(&input.weights, &input.search)?;
+        Ok(scheduler::EvaluateWeightsResponse {
+            log_loss: ret.log_loss,
+            rmse_bins: ret.rmse_bins,
+        })
+    }
+
+    fn get_optimal_retention_parameters(
+        &mut self,
+        input: scheduler::GetOptimalRetentionParametersRequest,
+    ) -> Result<scheduler::GetOptimalRetentionParametersResponse> {
+        self.get_optimal_retention_parameters(&input.search)
+            .map(|params| GetOptimalRetentionParametersResponse {
+                params: Some(params),
+            })
+    }
+
+    fn compute_memory_state(&mut self, input: cards::CardId) -> Result<ComputeMemoryStateResponse> {
+        self.compute_memory_state(input.into())
+    }
+}
+
+impl crate::services::BackendSchedulerService for Backend {
+    fn compute_fsrs_weights_from_items(
+        &self,
+        req: scheduler::ComputeFsrsWeightsFromItemsRequest,
+    ) -> Result<scheduler::ComputeFsrsWeightsResponse> {
+        let fsrs = FSRS::new(None)?;
+        let fsrs_items = req.items.len() as u32;
+        let weights = fsrs.compute_weights(
+            req.items.into_iter().map(fsrs_item_proto_to_fsrs).collect(),
+            None,
+        )?;
+        Ok(ComputeFsrsWeightsResponse {
+            weights,
+            fsrs_items,
+        })
+    }
+}
+
+fn fsrs_item_proto_to_fsrs(item: anki_proto::scheduler::FsrsItem) -> FSRSItem {
+    FSRSItem {
+        reviews: item
+            .reviews
+            .into_iter()
+            .map(fsrs_review_proto_to_fsrs)
+            .collect(),
+    }
+}
+
+fn fsrs_review_proto_to_fsrs(review: anki_proto::scheduler::FsrsReview) -> FSRSReview {
+    FSRSReview {
+        delta_t: review.delta_t,
+        rating: review.rating,
     }
 }

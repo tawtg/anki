@@ -33,6 +33,7 @@ syn.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true
+reqwest = { workspace = true, features = ["native-tls"] }
 wiremock.workspace = true
 
 [dependencies]
@@ -60,6 +61,7 @@ flate2.workspace = true
 fluent.workspace = true
 fluent-bundle.workspace = true
 fnv.workspace = true
+fsrs.workspace = true
 futures.workspace = true
 hex.workspace = true
 htmlescape.workspace = true
@@ -72,6 +74,7 @@ num_cpus.workspace = true
 num_enum.workspace = true
 once_cell.workspace = true
 percent-encoding-iri.workspace = true
+phf.workspace = true
 pin-project.workspace = true
 prost.workspace = true
 pulldown-cmark.workspace = true
@@ -103,5 +106,5 @@ zip.workspace = true
 zstd.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows]
-version = "0.48.0"
+version = "0.51.1"
 features = ["Media_SpeechSynthesis", "Foundation_Collections", "Storage_Streams"]

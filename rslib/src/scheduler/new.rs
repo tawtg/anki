@@ -57,6 +57,7 @@ impl Card {
             self.reps = 0;
             self.lapses = 0;
         }
+        self.memory_state = None;
 
         last_position.is_none()
     }

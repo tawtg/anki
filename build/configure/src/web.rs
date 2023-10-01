@@ -314,6 +314,17 @@ fn build_and_check_pages(build: &mut Build) -> Result<()> {
             ":sass"
         ],
     )?;
+    build_page(
+        "import-anki-package",
+        true,
+        inputs![
+            //
+            ":ts:lib",
+            ":ts:components",
+            ":ts:sveltelib",
+            ":sass"
+        ],
+    )?;
     // we use the generated .css file separately
     build_page(
         "editable",
@@ -340,7 +351,7 @@ fn build_and_check_pages(build: &mut Build) -> Result<()> {
         ],
     )?;
     build_page(
-        "import-log",
+        "import-page",
         true,
         inputs![
             //
@@ -363,6 +374,7 @@ fn build_and_check_editor(build: &mut Build) -> Result<()> {
         ":ts:sveltelib",
         ":ts:tag-editor",
         ":ts:html-filter",
+        ":ts:image-occlusion",
         ":sass",
         glob!("ts/{editable,editor}/**")
     ];

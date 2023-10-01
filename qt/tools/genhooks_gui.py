@@ -218,7 +218,16 @@ hooks = [
     Hook(
         name="audio_did_pause_or_unpause",
         args=["webview: aqt.webview.AnkiWebView"],
-        doc="""Called when the audio is paused or unpaused.""",
+        doc="""Called when the audio is paused or unpaused.
+        This hook is triggered by the action in Anki's More menu or the related key binding.
+        The webview is provided in case you wish to use this hook with web-based audio.""",
+    ),
+    Hook(
+        name="audio_did_seek_relative",
+        args=["webview: aqt.webview.AnkiWebView", "seek_seconds: int"],
+        doc="""Called when the audio is sought forward (positive seek) or backwards (negative seek).
+        This hook is triggered by the action in Anki's More menu or the related key binding.
+        The webview is provided in case you wish to use this hook with web-based audio.""",
     ),
     # Debug
     ###################
@@ -872,7 +881,7 @@ gui_hooks.webview_did_inject_style_into_page.append(mytest)
     ),
     Hook(
         name="media_sync_did_progress",
-        args=["entry: aqt.mediasync.LogEntryWithTime"],
+        args=["entry: str"],
     ),
     Hook(name="media_sync_did_start_or_stop", args=["running: bool"]),
     Hook(

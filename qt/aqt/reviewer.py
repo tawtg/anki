@@ -149,18 +149,19 @@ class Reviewer:
         self._card_info = ReviewerCardInfo(self.mw)
         self._previous_card_info = PreviousReviewerCardInfo(self.mw)
         self._states_mutated = True
+        self._reps: int = None
         hooks.card_did_leech.append(self.onLeech)
 
     def show(self) -> None:
-        if self.mw.col.sched_ver() == 1:
+        if self.mw.col.sched_ver() == 1 or not self.mw.col.v3_scheduler():
             self.mw.moveToState("deckBrowser")
-            show_warning(tr.scheduling_update_required())
+            show_warning(tr.scheduling_update_required().replace("V2", "v3"))
             return
         self.mw.setStateShortcuts(self._shortcutKeys())  # type: ignore
         self.web.set_bridge_command(self._linkHandler, self)
         self.bottom.web.set_bridge_command(self._linkHandler, ReviewerBottomBar(self))
         self._state_mutation_js = self.mw.col.get_config("cardStateCustomizer")
-        self._reps: int = None
+        self._reps = None
         self._refresh_needed = RefreshNeeded.QUEUES
         self.refresh_if_needed()
 
@@ -443,8 +444,6 @@ class Reviewer:
             return
         if self.state != "answer":
             return
-        if self.mw.col.sched.answerButtons(self.card) < ease:
-            return
         proceed, ease = gui_hooks.reviewer_will_answer_card(
             (True, ease), self, self.card
         )
@@ -525,7 +524,7 @@ class Reviewer:
             ("@", self.suspend_current_card),
             ("Ctrl+Alt+N", self.forget_current_card),
             ("Ctrl+Alt+E", self.on_create_copy),
-            ("Ctrl+Delete", self.delete_current_note),
+            ("Ctrl+Backspace" if is_mac else "Ctrl+Delete", self.delete_current_note),
             ("Ctrl+Shift+D", self.on_set_due),
             ("v", self.onReplayRecorded),
             ("Shift+v", self.onRecordVoice),
@@ -552,9 +551,11 @@ class Reviewer:
 
     def on_seek_backward(self) -> None:
         av_player.seek_relative(-self.seek_secs)
+        gui_hooks.audio_did_seek_relative(self.web, -self.seek_secs)
 
     def on_seek_forward(self) -> None:
         av_player.seek_relative(self.seek_secs)
+        gui_hooks.audio_did_seek_relative(self.web, self.seek_secs)
 
     def onEnterKey(self) -> None:
         if self.state == "question":
@@ -706,6 +707,7 @@ class Reviewer:
 </center>
 <script>
 time = %(time)d;
+timerStopped = false;
 </script>
 """ % dict(
             edit=tr.studying_edit(),
@@ -739,25 +741,18 @@ time = %(time)d;
             self.mw.progress.single_shot(50, self._showEaseButtons)
             return
         middle = self._answerButtons()
-        self.bottom.web.eval(f"showAnswer({json.dumps(middle)});")
+        conf = self.mw.col.decks.config_dict_for_deck_id(self.card.current_deck_id())
+        self.bottom.web.eval(
+            f"showAnswer({json.dumps(middle)}, {json.dumps(conf['stopTimerOnAnswer'])});"
+        )
 
     def _remaining(self) -> str:
         if not self.mw.col.conf["dueCounts"]:
             return ""
 
         counts: list[Union[int, str]]
-        if v3 := self._v3:
-            idx, counts_ = v3.counts()
-            counts = cast(list[Union[int, str]], counts_)
-        else:
-            # v1/v2 scheduler
-            if self.hadCardQueue:
-                # if it's come from the undo queue, don't count it separately
-                counts = list(self.mw.col.sched.counts())
-            else:
-                counts = list(self.mw.col.sched.counts(self.card))
-            idx = self.mw.col.sched.countIdx(self.card)
-
+        idx, counts_ = self._v3.counts()
+        counts = cast(list[Union[int, str]], counts_)
         counts[idx] = f"<u>{counts[idx]}</u>"
 
         return f"""
@@ -767,10 +762,7 @@ time = %(time)d;
 """
 
     def _defaultEase(self) -> Literal[2, 3]:
-        if self.mw.col.sched.answerButtons(self.card) == 4:
-            return 3
-        else:
-            return 2
+        return 3
 
     def _answerButtonList(self) -> tuple[tuple[int, str], ...]:
         button_count = self.mw.col.sched.answerButtons(self.card)
@@ -812,11 +804,16 @@ time = %(time)d;
             else:
                 extra = ""
             due = self._buttonTime(i, v3_labels=labels)
+            key = (
+                tr.actions_shortcut_key(val=aqt.mw.pm.get_answer_key(i))
+                if aqt.mw.pm.get_answer_key(i)
+                else ""
+            )
             return """
 <td align=center><button %s title="%s" data-ease="%s" onclick='pycmd("ease%d");'>\
 %s%s</button></td>""" % (
                 extra,
-                tr.actions_shortcut_key(val=i),
+                key,
                 i,
                 i,
                 label,
@@ -829,12 +826,9 @@ time = %(time)d;
         buf += "</tr></table>"
         return buf
 
-    def _buttonTime(self, i: int, v3_labels: Sequence[str] | None = None) -> str:
+    def _buttonTime(self, i: int, v3_labels: Sequence[str]) -> str:
         if self.mw.col.conf["estTimes"]:
-            if v3_labels:
-                txt = v3_labels[i - 1]
-            else:
-                txt = self.mw.col.sched.nextIvlStr(self.card, i, True) or ""
+            txt = v3_labels[i - 1]
             return f"""<span class="nobold">{txt}</span>"""
         else:
             return ""
@@ -913,7 +907,11 @@ time = %(time)d;
                 "Ctrl+Alt+E",
                 self.on_create_copy,
             ],
-            [tr.studying_delete_note(), "Ctrl+Delete", self.delete_current_note],
+            [
+                tr.studying_delete_note(),
+                "Ctrl+Backspace" if is_mac else "Ctrl+Delete",
+                self.delete_current_note,
+            ],
             None,
             [tr.actions_replay_audio(), "R", self.replayAudio],
             [tr.studying_pause_audio(), "5", self.on_pause_audio],

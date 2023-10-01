@@ -10,15 +10,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import type Modal from "bootstrap/js/dist/modal";
 
     import DynamicallySlottable from "../components/DynamicallySlottable.svelte";
+    import EnumSelectorRow from "../components/EnumSelectorRow.svelte";
+    import HelpModal from "../components/HelpModal.svelte";
     import Item from "../components/Item.svelte";
+    import SettingTitle from "../components/SettingTitle.svelte";
     import TitledContainer from "../components/TitledContainer.svelte";
-    import EnumSelectorRow from "./EnumSelectorRow.svelte";
-    import HelpModal from "./HelpModal.svelte";
+    import type { HelpItem } from "../components/types";
+    import { newInsertOrderChoices } from "./choices";
     import type { DeckOptionsState } from "./lib";
-    import SettingTitle from "./SettingTitle.svelte";
     import SpinBoxRow from "./SpinBoxRow.svelte";
     import StepsInputRow from "./StepsInputRow.svelte";
-    import type { DeckOption } from "./types";
     import Warning from "./Warning.svelte";
 
     export let state: DeckOptionsState;
@@ -26,13 +27,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     const config = state.currentConfig;
     const defaults = state.defaults;
-
-    const newInsertOrderChoices = [
-        tr.deckConfigNewInsertionOrderSequential(),
-        tr.deckConfigNewInsertionOrderRandom(),
-    ];
+    const fsrs = state.fsrs;
 
     let stepsExceedGraduatingInterval: string;
+    let stepsTooLargeForFsrs: string;
     $: {
         const lastLearnStepInDays = $config.learnSteps.length
             ? $config.learnSteps[$config.learnSteps.length - 1] / 60 / 24
@@ -40,6 +38,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         stepsExceedGraduatingInterval =
             lastLearnStepInDays > $config.graduatingIntervalGood
                 ? tr.deckConfigLearningStepAboveGraduatingInterval()
+                : "";
+        stepsTooLargeForFsrs =
+            $fsrs && lastLearnStepInDays >= 1
+                ? tr.deckConfigStepsTooLargeForFsrs()
                 : "";
     }
 
@@ -76,7 +78,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             url: HelpPage.DeckOptions.insertionOrder,
         },
     };
-    const helpSections = Object.values(settings) as DeckOption[];
+    const helpSections = Object.values(settings) as HelpItem[];
 
     let modal: Modal;
     let carousel: Carousel;
@@ -114,48 +116,56 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         </Item>
 
         <Item>
-            <SpinBoxRow
-                bind:value={$config.graduatingIntervalGood}
-                defaultValue={defaults.graduatingIntervalGood}
-            >
-                <SettingTitle
-                    on:click={() =>
-                        openHelpModal(
-                            Object.keys(settings).indexOf("graduatingInterval"),
-                        )}
+            <Warning warning={stepsTooLargeForFsrs} />
+        </Item>
+
+        {#if !$fsrs}
+            <Item>
+                <SpinBoxRow
+                    bind:value={$config.graduatingIntervalGood}
+                    defaultValue={defaults.graduatingIntervalGood}
                 >
-                    {settings.graduatingInterval.title}
-                </SettingTitle>
-            </SpinBoxRow>
-        </Item>
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf("graduatingInterval"),
+                            )}
+                    >
+                        {settings.graduatingInterval.title}
+                    </SettingTitle>
+                </SpinBoxRow>
+            </Item>
 
-        <Item>
-            <Warning warning={stepsExceedGraduatingInterval} />
-        </Item>
+            <Item>
+                <Warning warning={stepsExceedGraduatingInterval} />
+            </Item>
 
-        <Item>
-            <SpinBoxRow
-                bind:value={$config.graduatingIntervalEasy}
-                defaultValue={defaults.graduatingIntervalEasy}
-            >
-                <SettingTitle
-                    on:click={() =>
-                        openHelpModal(Object.keys(settings).indexOf("easyInterval"))}
+            <Item>
+                <SpinBoxRow
+                    bind:value={$config.graduatingIntervalEasy}
+                    defaultValue={defaults.graduatingIntervalEasy}
                 >
-                    {settings.easyInterval.title}
-                </SettingTitle>
-            </SpinBoxRow>
-        </Item>
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf("easyInterval"),
+                            )}
+                    >
+                        {settings.easyInterval.title}
+                    </SettingTitle>
+                </SpinBoxRow>
+            </Item>
 
-        <Item>
-            <Warning warning={goodExceedsEasy} />
-        </Item>
+            <Item>
+                <Warning warning={goodExceedsEasy} />
+            </Item>
+        {/if}
 
         <Item>
             <EnumSelectorRow
                 bind:value={$config.newCardInsertOrder}
                 defaultValue={defaults.newCardInsertOrder}
-                choices={newInsertOrderChoices}
+                choices={newInsertOrderChoices()}
                 breakpoint={"md"}
             >
                 <SettingTitle

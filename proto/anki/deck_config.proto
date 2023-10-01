@@ -43,6 +43,9 @@ message DeckConfig {
       // Decks in alphabetical order (preorder), then ascending position.
       // Siblings are consecutive, provided they have the same position.
       NEW_CARD_GATHER_PRIORITY_DECK = 0;
+      // Notes are randomly picked from each deck in alphabetical order.
+      // Siblings are consecutive, provided they have the same position.
+      NEW_CARD_GATHER_PRIORITY_DECK_THEN_RANDOM_NOTES = 5;
       // Ascending position.
       // Siblings are consecutive, provided they have the same position.
       NEW_CARD_GATHER_PRIORITY_LOWEST_POSITION = 1;
@@ -92,7 +95,9 @@ message DeckConfig {
     repeated float learn_steps = 1;
     repeated float relearn_steps = 2;
 
-    reserved 3 to 8;
+    repeated float fsrs_weights = 3;
+
+    reserved 4 to 8;
 
     uint32 new_per_day = 9;
     uint32 reviews_per_day = 10;
@@ -127,11 +132,14 @@ message DeckConfig {
     bool disable_autoplay = 23;
     uint32 cap_answer_time_to_secs = 24;
     bool show_timer = 25;
+    bool stop_timer_on_answer = 38;
     bool skip_question_when_replaying_answer = 26;
 
     bool bury_new = 27;
     bool bury_reviews = 28;
     bool bury_interday_learning = 29;
+
+    float desired_retention = 37;  // for fsrs
 
     bytes other = 255;
   }
@@ -174,6 +182,7 @@ message DeckConfigsForUpdate {
   string card_state_customizer = 6;
   // only applies to v3 scheduler
   bool new_cards_ignore_review_limit = 7;
+  bool fsrs = 8;
 }
 
 message UpdateDeckConfigsRequest {
@@ -186,4 +195,5 @@ message UpdateDeckConfigsRequest {
   string card_state_customizer = 5;
   DeckConfigsForUpdate.CurrentDeck.Limits limits = 6;
   bool new_cards_ignore_review_limit = 7;
+  bool fsrs = 8;
 }

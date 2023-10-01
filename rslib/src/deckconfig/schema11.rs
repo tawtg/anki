@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use phf::phf_set;
+use phf::Set;
 use serde::Deserialize as DeTrait;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -62,6 +64,13 @@ pub struct DeckConfSchema11 {
     new_gather_priority: i32,
     #[serde(default)]
     bury_interday_learning: bool,
+
+    #[serde(default)]
+    fsrs_weights: Vec<f32>,
+    #[serde(default)]
+    desired_retention: f32,
+    #[serde(default)]
+    stop_timer_on_answer: bool,
 
     #[serde(flatten)]
     other: HashMap<String, Value>,
@@ -235,6 +244,7 @@ impl Default for DeckConfSchema11 {
             max_taken: 60,
             autoplay: true,
             timer: 0,
+            stop_timer_on_answer: false,
             replayq: true,
             dynamic: false,
             new: Default::default(),
@@ -248,6 +258,8 @@ impl Default for DeckConfSchema11 {
             new_sort_order: 0,
             new_gather_priority: 0,
             bury_interday_learning: false,
+            fsrs_weights: vec![],
+            desired_retention: 0.9,
         }
     }
 }
@@ -312,10 +324,13 @@ impl From<DeckConfSchema11> for DeckConfig {
                 disable_autoplay: !c.autoplay,
                 cap_answer_time_to_secs: c.max_taken.max(0) as u32,
                 show_timer: c.timer != 0,
+                stop_timer_on_answer: c.stop_timer_on_answer,
                 skip_question_when_replaying_answer: !c.replayq,
                 bury_new: c.new.bury,
                 bury_reviews: c.rev.bury,
                 bury_interday_learning: c.bury_interday_learning,
+                fsrs_weights: c.fsrs_weights,
+                desired_retention: c.desired_retention,
                 other: other_bytes,
             },
         }
@@ -337,15 +352,19 @@ impl From<DeckConfig> for DeckConfSchema11 {
             if let Some(new) = top_other.remove("new") {
                 let val: HashMap<String, Value> = serde_json::from_value(new).unwrap_or_default();
                 new_other = val;
+                new_other.retain(|k, _v| !RESERVED_DECKCONF_NEW_KEYS.contains(k))
             }
             if let Some(rev) = top_other.remove("rev") {
                 let val: HashMap<String, Value> = serde_json::from_value(rev).unwrap_or_default();
                 rev_other = val;
+                rev_other.retain(|k, _v| !RESERVED_DECKCONF_REV_KEYS.contains(k))
             }
             if let Some(lapse) = top_other.remove("lapse") {
                 let val: HashMap<String, Value> = serde_json::from_value(lapse).unwrap_or_default();
                 lapse_other = val;
+                lapse_other.retain(|k, _v| !RESERVED_DECKCONF_LAPSE_KEYS.contains(k))
             }
+            top_other.retain(|k, _v| !RESERVED_DECKCONF_KEYS.contains(k));
         }
         let i = c.inner;
         let new_order = i.new_card_insert_order();
@@ -357,6 +376,7 @@ impl From<DeckConfig> for DeckConfSchema11 {
             max_taken: i.cap_answer_time_to_secs as i32,
             autoplay: !i.disable_autoplay,
             timer: i.show_timer.into(),
+            stop_timer_on_answer: i.stop_timer_on_answer,
             replayq: !i.skip_question_when_replaying_answer,
             dynamic: false,
             new: NewConfSchema11 {
@@ -403,17 +423,71 @@ impl From<DeckConfig> for DeckConfSchema11 {
             new_sort_order: i.new_card_sort_order,
             new_gather_priority: i.new_card_gather_priority,
             bury_interday_learning: i.bury_interday_learning,
+            fsrs_weights: i.fsrs_weights,
+            desired_retention: i.desired_retention,
         }
     }
 }
 
+static RESERVED_DECKCONF_KEYS: Set<&'static str> = phf_set! {
+    "id",
+    "newSortOrder",
+    "replayq",
+    "newPerDayMinimum",
+    "usn",
+    "autoplay",
+    "dyn",
+    "maxTaken",
+    "reviewOrder",
+    "buryInterdayLearning",
+    "newMix",
+    "mod",
+    "timer",
+    "name",
+    "interdayLearningMix",
+    "newGatherPriority",
+    "fsrsWeights",
+    "desiredRetention",
+    "stopTimerOnAnswer",
+};
+
+static RESERVED_DECKCONF_NEW_KEYS: Set<&'static str> = phf_set! {
+    "order", "delays", "bury", "perDay", "initialFactor", "ints"
+};
+
+static RESERVED_DECKCONF_REV_KEYS: Set<&'static str> = phf_set! {
+    "maxIvl", "hardFactor", "ease4", "ivlFct", "perDay", "bury"
+};
+
+static RESERVED_DECKCONF_LAPSE_KEYS: Set<&'static str> = phf_set! {
+    "leechFails", "mult", "leechAction", "delays", "minInt"
+};
+
 #[cfg(test)]
 mod test {
+    use itertools::Itertools;
     use serde::de::IntoDeserializer;
     use serde_json::json;
     use serde_json::Value;
 
     use super::*;
+    use crate::prelude::*;
+
+    #[test]
+    fn all_reserved_fields_are_removed() -> Result<()> {
+        let key_source = DeckConfSchema11::default();
+        let mut config = DeckConfig::default();
+        let empty: &[&String] = &[];
+
+        config.inner.other = serde_json::to_vec(&key_source)?;
+        let s11 = DeckConfSchema11::from(config);
+        assert_eq!(&s11.other.keys().collect_vec(), empty);
+        assert_eq!(&s11.new.other.keys().collect_vec(), empty);
+        assert_eq!(&s11.rev.other.keys().collect_vec(), empty);
+        assert_eq!(&s11.lapse.other.keys().collect_vec(), empty);
+
+        Ok(())
+    }
 
     #[test]
     fn new_intervals() {

@@ -45,11 +45,22 @@ service SchedulerService {
   rpc CustomStudyDefaults(CustomStudyDefaultsRequest)
       returns (CustomStudyDefaultsResponse);
   rpc RepositionDefaults(generic.Empty) returns (RepositionDefaultsResponse);
+  rpc ComputeFsrsWeights(ComputeFsrsWeightsRequest)
+      returns (ComputeFsrsWeightsResponse);
+  rpc GetOptimalRetentionParameters(GetOptimalRetentionParametersRequest)
+      returns (GetOptimalRetentionParametersResponse);
+  rpc ComputeOptimalRetention(ComputeOptimalRetentionRequest)
+      returns (ComputeOptimalRetentionResponse);
+  rpc EvaluateWeights(EvaluateWeightsRequest) returns (EvaluateWeightsResponse);
+  rpc ComputeMemoryState(cards.CardId) returns (ComputeMemoryStateResponse);
 }
 
 // Implicitly includes any of the above methods that are not listed in the
 // backend service.
-service BackendSchedulerService {}
+service BackendSchedulerService {
+  rpc ComputeFsrsWeightsFromItems(ComputeFsrsWeightsFromItemsRequest)
+      returns (ComputeFsrsWeightsResponse);
+}
 
 message SchedulingState {
   message New {
@@ -58,6 +69,7 @@ message SchedulingState {
   message Learning {
     uint32 remaining_steps = 1;
     uint32 scheduled_secs = 2;
+    optional cards.FsrsMemoryState memory_state = 6;
   }
   message Review {
     uint32 scheduled_days = 1;
@@ -65,6 +77,7 @@ message SchedulingState {
     float ease_factor = 3;
     uint32 lapses = 4;
     bool leeched = 5;
+    optional cards.FsrsMemoryState memory_state = 6;
   }
   message Relearning {
     Review review = 1;
@@ -316,4 +329,80 @@ message CustomStudyDefaultsResponse {
 message RepositionDefaultsResponse {
   bool random = 1;
   bool shift = 2;
+}
+
+message ComputeFsrsWeightsRequest {
+  /// The search used to gather cards for training
+  string search = 1;
+}
+
+message ComputeFsrsWeightsResponse {
+  repeated float weights = 1;
+  // if less than 1000, should warn user
+  uint32 fsrs_items = 2;
+}
+
+message ComputeFsrsWeightsFromItemsRequest {
+  repeated FsrsItem items = 1;
+}
+
+message FsrsItem {
+  repeated FsrsReview reviews = 1;
+}
+
+message FsrsReview {
+  uint32 rating = 1;
+  uint32 delta_t = 2;
+}
+
+message ComputeOptimalRetentionRequest {
+  repeated float weights = 1;
+  uint32 deck_size = 2;
+  uint32 days_to_simulate = 3;
+  uint32 max_minutes_of_study_per_day = 4;
+  uint32 max_interval = 5;
+  string search = 6;
+  double loss_aversion = 7;
+}
+
+message ComputeOptimalRetentionResponse {
+  float optimal_retention = 1;
+}
+
+message OptimalRetentionParameters {
+  double recall_secs_hard = 1;
+  double recall_secs_good = 2;
+  double recall_secs_easy = 3;
+  double forget_secs = 4;
+  double learn_secs = 5;
+  double first_rating_probability_again = 6;
+  double first_rating_probability_hard = 7;
+  double first_rating_probability_good = 8;
+  double first_rating_probability_easy = 9;
+  double review_rating_probability_hard = 10;
+  double review_rating_probability_good = 11;
+  double review_rating_probability_easy = 12;
+}
+
+message GetOptimalRetentionParametersRequest {
+  string search = 1;
+}
+
+message GetOptimalRetentionParametersResponse {
+  OptimalRetentionParameters params = 1;
+}
+
+message EvaluateWeightsRequest {
+  repeated float weights = 1;
+  string search = 2;
+}
+
+message EvaluateWeightsResponse {
+  float log_loss = 1;
+  float rmse_bins = 2;
+}
+
+message ComputeMemoryStateResponse {
+  optional cards.FsrsMemoryState state = 1;
+  float desired_retention = 2;
 }

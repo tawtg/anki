@@ -350,9 +350,12 @@ impl MediaChecker<'_> {
         for nid in nids {
             self.increment_progress()?;
             let mut note = self.col.storage.get_note(nid)?.unwrap();
-            let nt = notetypes.get(&note.notetype_id).ok_or_else(|| {
-                AnkiError::db_error("missing note type", DbErrorKind::MissingEntity)
-            })?;
+            let nt = notetypes
+                .iter()
+                .find(|nt| nt.id == note.notetype_id)
+                .ok_or_else(|| {
+                    AnkiError::db_error("missing note type", DbErrorKind::MissingEntity)
+                })?;
             let mut tracker = |fname| {
                 referenced_files
                     .entry(fname)
@@ -453,12 +456,12 @@ impl MediaChecker<'_> {
 
     fn maybe_extract_inline_image<'a>(&mut self, fname_decoded: &'a str) -> Result<Cow<'a, str>> {
         static BASE64_IMG: Lazy<Regex> = Lazy::new(|| {
-            Regex::new("(?i)^data:image/(jpg|jpeg|png|gif|webp);base64,(.+)$").unwrap()
+            Regex::new("(?i)^data:image/(jpg|jpeg|png|gif|webp|avif);base64,(.+)$").unwrap()
         });
 
         let Some(caps) = BASE64_IMG.captures(fname_decoded) else {
-        return Ok(fname_decoded.into());
-    };
+            return Ok(fname_decoded.into());
+        };
         let (_all, [ext, data]) = caps.extract();
         let data = data.trim();
         let data = match BASE64.decode(data.as_bytes()) {

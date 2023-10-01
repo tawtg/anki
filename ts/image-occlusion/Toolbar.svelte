@@ -3,22 +3,13 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script>
-    import { bridgeCommand } from "@tslib/bridgecommand";
     import * as tr from "@tslib/ftl";
     import DropdownItem from "components/DropdownItem.svelte";
     import IconButton from "components/IconButton.svelte";
     import Popover from "components/Popover.svelte";
     import WithFloating from "components/WithFloating.svelte";
 
-    import {
-        mdiChevronDown,
-        mdiEye,
-        mdiFormatAlignCenter,
-        mdiRefresh,
-        mdiSquare,
-        mdiViewDashboard,
-    } from "./icons";
-    import { setupMaskEditor } from "./mask-editor";
+    import { mdiEye, mdiFormatAlignCenter, mdiSquare, mdiViewDashboard } from "./icons";
     import { hideAllGuessOne } from "./store";
     import { drawEllipse, drawPolygon, drawRectangle } from "./tools/index";
     import { makeMaskTransparent } from "./tools/lib";
@@ -30,7 +21,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         zoomTools,
     } from "./tools/more-tools";
     import { tools } from "./tools/tool-buttons";
-    import { undoRedoTools } from "./tools/tool-undo-redo";
+    import { undoRedoTools, undoStack } from "./tools/tool-undo-redo";
 
     export let canvas;
     export let instance;
@@ -78,11 +69,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         canvas.selectionColor = "rgba(100, 100, 255, 0.3)";
     };
 
-    const resetIOImage = (path) => {
-        setupMaskEditor(path, instance);
-    };
-    globalThis.resetIOImage = resetIOImage;
-
     const setOcclusionFieldForDesktop = () => {
         const clist = document.body.classList;
         if (
@@ -112,16 +98,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 <div class="top-tool-bar-container">
     <div class="undo-redo-button" on:click={() => (showFloating = !showFloating)}>
-        {#if $hideAllGuessOne}
-            <IconButton class="top-tool-icon-button left-border-radius" {iconSize}>
-                {@html mdiViewDashboard}
-            </IconButton>
-        {:else}
-            <IconButton class="top-tool-icon-button left-border-radius" {iconSize}>
-                {@html mdiSquare}
-            </IconButton>
-        {/if}
-
         <WithFloating
             show={showFloating}
             closeOnInsideClick
@@ -132,8 +108,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             <IconButton
                 class="top-tool-icon-button right-border-radius dropdown-tool-mode"
                 slot="reference"
+                {iconSize}
             >
-                {@html mdiChevronDown}
+                {#if $hideAllGuessOne}
+                    {@html mdiViewDashboard}
+                {:else}
+                    {@html mdiSquare}
+                {/if}
             </IconButton>
 
             <Popover slot="floating" --popover-padding-inline="0">
@@ -157,19 +138,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         </WithFloating>
     </div>
 
-    <!-- refresh for changing image -->
-    <div class="undo-redo-button">
-        <IconButton
-            class="top-tool-icon-button icon-border-radius"
-            {iconSize}
-            on:click={() => {
-                bridgeCommand("addImageForOcclusion");
-            }}
-        >
-            {@html mdiRefresh}
-        </IconButton>
-    </div>
-
     <!-- undo & redo tools -->
     <div class="undo-redo-button">
         {#each undoRedoTools as tool}
@@ -178,9 +146,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                     ? 'left-border-radius'
                     : 'right-border-radius'}"
                 {iconSize}
-                on:click={() => {
-                    tool.action(canvas);
-                }}
+                on:click={tool.action}
+                disabled={tool.name === "undo"
+                    ? !$undoStack.undoable
+                    : !$undoStack.redoable}
             >
                 {@html tool.icon}
             </IconButton>

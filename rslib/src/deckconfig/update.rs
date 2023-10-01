@@ -11,10 +11,12 @@ use anki_proto::deck_config::deck_configs_for_update::current_deck::Limits;
 use anki_proto::deck_config::deck_configs_for_update::ConfigWithExtra;
 use anki_proto::deck_config::deck_configs_for_update::CurrentDeck;
 use anki_proto::decks::deck::normal::DayLimit;
+use fsrs::DEFAULT_WEIGHTS;
 
 use crate::config::StringKey;
 use crate::decks::NormalDeck;
 use crate::prelude::*;
+use crate::scheduler::fsrs::memory_state::WeightsAndDesiredRetention;
 use crate::search::JoinSearches;
 use crate::search::SearchNode;
 
@@ -28,6 +30,7 @@ pub struct UpdateDeckConfigsRequest {
     pub card_state_customizer: String,
     pub limits: Limits,
     pub new_cards_ignore_review_limit: bool,
+    pub fsrs: bool,
 }
 
 impl Collection {
@@ -36,10 +39,12 @@ impl Collection {
         &mut self,
         deck: DeckId,
     ) -> Result<anki_proto::deck_config::DeckConfigsForUpdate> {
+        let mut defaults = DeckConfig::default();
+        defaults.inner.fsrs_weights = DEFAULT_WEIGHTS.into();
         Ok(anki_proto::deck_config::DeckConfigsForUpdate {
             all_config: self.get_deck_config_with_extra_for_update()?,
             current_deck: Some(self.get_current_deck_for_update(deck)?),
-            defaults: Some(DeckConfig::default().into()),
+            defaults: Some(defaults.into()),
             schema_modified: self
                 .storage
                 .get_collection_timestamps()?
@@ -47,6 +52,7 @@ impl Collection {
             v3_scheduler: self.get_config_bool(BoolKey::Sched2021),
             card_state_customizer: self.get_config_string(StringKey::CardStateCustomizer),
             new_cards_ignore_review_limit: self.get_config_bool(BoolKey::NewCardsIgnoreReviewLimit),
+            fsrs: self.get_config_bool(BoolKey::Fsrs),
         })
     }
 
@@ -130,6 +136,10 @@ impl Collection {
 
         // add/update provided configs
         for conf in &mut input.configs {
+            let weight_len = conf.inner.fsrs_weights.len();
+            if weight_len != 0 && weight_len != 17 {
+                return Err(AnkiError::FsrsWeightsInvalid);
+            }
             self.add_or_update_deck_config(conf)?;
             configs_after_update.insert(conf.id, conf.clone());
         }
@@ -154,16 +164,23 @@ impl Collection {
         let usn = self.usn()?;
         let today = self.timing_today()?.days_elapsed;
         let selected_config = input.configs.last().unwrap();
+        let mut decks_needing_memory_recompute: HashMap<DeckConfigId, Vec<SearchNode>> =
+            Default::default();
+        let fsrs_toggled = self.get_config_bool(BoolKey::Fsrs) != input.fsrs;
+        if fsrs_toggled {
+            self.set_config_bool_inner(BoolKey::Fsrs, input.fsrs)?;
+        }
         for deck in self.storage.get_all_decks()? {
             if let Ok(normal) = deck.normal() {
                 let deck_id = deck.id;
 
-                // previous order
+                // previous order & weights
                 let previous_config_id = DeckConfigId(normal.config_id);
                 let previous_config = configs_before_update.get(&previous_config_id);
                 let previous_order = previous_config
                     .map(|c| c.inner.new_card_insert_order())
                     .unwrap_or_default();
+                let previous_weights = previous_config.map(|c| &c.inner.fsrs_weights);
 
                 // if a selected (sub)deck, or its old config was removed, update deck to point
                 // to new config
@@ -188,8 +205,35 @@ impl Collection {
                     self.sort_deck(deck_id, current_order, usn)?;
                 }
 
+                // if weights differ, memory state needs to be recomputed
+                let current_weights = current_config.map(|c| &c.inner.fsrs_weights);
+                if fsrs_toggled || previous_weights != current_weights {
+                    decks_needing_memory_recompute
+                        .entry(current_config_id)
+                        .or_default()
+                        .push(SearchNode::DeckIdWithoutChildren(deck_id));
+                }
+
                 self.adjust_remaining_steps_in_deck(deck_id, previous_config, current_config, usn)?;
             }
+        }
+
+        if !decks_needing_memory_recompute.is_empty() {
+            let input: Vec<(Option<WeightsAndDesiredRetention>, Vec<SearchNode>)> =
+                decks_needing_memory_recompute
+                    .into_iter()
+                    .map(|(conf_id, search)| {
+                        let weights = configs_after_update.get(&conf_id).and_then(|c| {
+                            if input.fsrs {
+                                Some((c.inner.fsrs_weights.clone(), c.inner.desired_retention))
+                            } else {
+                                None
+                            }
+                        });
+                        Ok((weights, search))
+                    })
+                    .collect::<Result<_>>()?;
+            self.update_memory_state(input)?;
         }
 
         self.set_config_string_inner(StringKey::CardStateCustomizer, &input.card_state_customizer)?;
@@ -325,6 +369,7 @@ mod test {
             card_state_customizer: "".to_string(),
             limits: Limits::default(),
             new_cards_ignore_review_limit: false,
+            fsrs: false,
         };
         assert!(!col.update_deck_configs(input.clone())?.changes.had_change());
 

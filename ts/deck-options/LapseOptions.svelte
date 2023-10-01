@@ -9,15 +9,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import type Modal from "bootstrap/js/dist/modal";
 
     import DynamicallySlottable from "../components/DynamicallySlottable.svelte";
+    import EnumSelectorRow from "../components/EnumSelectorRow.svelte";
+    import HelpModal from "../components/HelpModal.svelte";
     import Item from "../components/Item.svelte";
+    import SettingTitle from "../components/SettingTitle.svelte";
     import TitledContainer from "../components/TitledContainer.svelte";
-    import EnumSelectorRow from "./EnumSelectorRow.svelte";
-    import HelpModal from "./HelpModal.svelte";
+    import type { HelpItem } from "../components/types";
+    import { leechChoices } from "./choices";
     import type { DeckOptionsState } from "./lib";
-    import SettingTitle from "./SettingTitle.svelte";
     import SpinBoxRow from "./SpinBoxRow.svelte";
     import StepsInputRow from "./StepsInputRow.svelte";
-    import type { DeckOption } from "./types";
     import Warning from "./Warning.svelte";
 
     export let state: DeckOptionsState;
@@ -25,8 +26,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     const config = state.currentConfig;
     const defaults = state.defaults;
+    const fsrs = state.fsrs;
 
     let stepsExceedMinimumInterval: string;
+    let stepsTooLargeForFsrs: string;
     $: {
         const lastRelearnStepInDays = $config.relearnSteps.length
             ? $config.relearnSteps[$config.relearnSteps.length - 1] / 60 / 24
@@ -35,9 +38,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             lastRelearnStepInDays > $config.minimumLapseInterval
                 ? tr.deckConfigRelearningStepsAboveMinimumInterval()
                 : "";
+        stepsTooLargeForFsrs =
+            $fsrs && lastRelearnStepInDays >= 1
+                ? tr.deckConfigStepsTooLargeForFsrs()
+                : "";
     }
-
-    const leechChoices = [tr.actionsSuspendCard(), tr.schedulingTagOnly()];
 
     const settings = {
         relearningSteps: {
@@ -61,7 +66,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             url: HelpPage.Leeches.waiting,
         },
     };
-    const helpSections = Object.values(settings) as DeckOption[];
+    const helpSections = Object.values(settings) as HelpItem[];
 
     let modal: Modal;
     let carousel: Carousel;
@@ -99,19 +104,27 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         </Item>
 
         <Item>
-            <SpinBoxRow
-                bind:value={$config.minimumLapseInterval}
-                defaultValue={defaults.minimumLapseInterval}
-                min={1}
-            >
-                <SettingTitle
-                    on:click={() =>
-                        openHelpModal(Object.keys(settings).indexOf("minimumInterval"))}
-                >
-                    {settings.minimumInterval.title}
-                </SettingTitle>
-            </SpinBoxRow>
+            <Warning warning={stepsTooLargeForFsrs} />
         </Item>
+
+        {#if !$fsrs}
+            <Item>
+                <SpinBoxRow
+                    bind:value={$config.minimumLapseInterval}
+                    defaultValue={defaults.minimumLapseInterval}
+                    min={1}
+                >
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf("minimumInterval"),
+                            )}
+                    >
+                        {settings.minimumInterval.title}
+                    </SettingTitle>
+                </SpinBoxRow>
+            </Item>
+        {/if}
 
         <Item>
             <Warning warning={stepsExceedMinimumInterval} />
@@ -136,7 +149,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             <EnumSelectorRow
                 bind:value={$config.leechAction}
                 defaultValue={defaults.leechAction}
-                choices={leechChoices}
+                choices={leechChoices()}
                 breakpoint="md"
             >
                 <SettingTitle

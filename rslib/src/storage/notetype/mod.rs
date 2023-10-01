@@ -136,6 +136,13 @@ impl SqliteStorage {
             .collect()
     }
 
+    pub fn get_all_notetype_ids(&self) -> Result<Vec<NotetypeId>> {
+        self.db
+            .prepare_cached("SELECT id FROM notetypes")?
+            .query_and_then([], |row| row.get(0).map_err(Into::into))?
+            .collect()
+    }
+
     /// Returns list of (id, name, use_count)
     pub fn get_notetype_use_counts(&self) -> Result<Vec<(NotetypeId, String, u32)>> {
         self.db
@@ -361,7 +368,7 @@ impl SqliteStorage {
 
     pub(crate) fn downgrade_notetypes_from_schema15(&self) -> Result<()> {
         let nts = self.get_all_notetypes_as_schema11()?;
-        self.set_schema11_notetypes(&nts)
+        self.set_schema11_notetypes(nts)
     }
 
     fn get_schema11_notetypes(&self) -> Result<HashMap<NotetypeId, NotetypeSchema11>> {
@@ -379,9 +386,9 @@ impl SqliteStorage {
 
     pub(crate) fn set_schema11_notetypes(
         &self,
-        notetypes: &HashMap<NotetypeId, NotetypeSchema11>,
+        notetypes: HashMap<NotetypeId, NotetypeSchema11>,
     ) -> Result<()> {
-        let json = crate::serde::schema11_to_string(notetypes)?;
+        let json = serde_json::to_string(&notetypes)?;
         self.db.execute("update col set models = ?", [json])?;
         Ok(())
     }

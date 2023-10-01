@@ -112,11 +112,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 </Row>
             </Item>
 
-            <Item>
-                <Row class="row-columns">
-                    <Addons {state} />
-                </Row>
-            </Item>
+            {#if $addons.length}
+                <Item>
+                    <Row class="row-columns">
+                        <Addons {state} />
+                    </Row>
+                </Item>
+            {/if}
 
             <Item>
                 <Row class="row-columns">

@@ -8,6 +8,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use fsrs::MemoryState;
 use num_enum::TryFromPrimitive;
 use serde_repr::Deserialize_repr;
 use serde_repr::Serialize_repr;
@@ -71,7 +72,7 @@ pub enum CardQueueNumber {
     Invalid,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Card {
     pub(crate) id: CardId,
     pub(crate) note_id: NoteId,
@@ -92,9 +93,33 @@ pub struct Card {
     pub(crate) flags: u8,
     /// The position in the new queue before leaving it.
     pub(crate) original_position: Option<u32>,
+    pub(crate) memory_state: Option<FsrsMemoryState>,
+    pub(crate) desired_retention: Option<f32>,
     /// JSON object or empty; exposed through the reviewer for persisting custom
     /// state
     pub(crate) custom_data: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FsrsMemoryState {
+    /// The expected memory stability, in days.
+    pub stability: f32,
+    /// A number in the range 1.0-10.0. Use difficulty() for a normalized
+    /// number.
+    pub difficulty: f32,
+}
+
+impl FsrsMemoryState {
+    /// Returns the difficulty normalized to a 0.0-1.0 range.
+    pub(crate) fn difficulty(&self) -> f32 {
+        (self.difficulty - 1.0) / 9.0
+    }
+
+    /// Returns the difficulty normalized to a 0.1-1.1 range,
+    /// which is used in revlog entries.
+    pub(crate) fn difficulty_shifted(&self) -> f32 {
+        self.difficulty() + 0.1
+    }
 }
 
 impl Default for Card {
@@ -118,6 +143,8 @@ impl Default for Card {
             original_deck_id: DeckId(0),
             flags: 0,
             original_position: None,
+            memory_state: None,
+            desired_retention: None,
             custom_data: String::new(),
         }
     }
@@ -431,6 +458,24 @@ impl<'a> RemainingStepsAdjuster<'a> {
                 Entry::Vacant(e) => e.insert(col.deck_config_for_card(card)?),
             },
         )
+    }
+}
+
+impl From<FsrsMemoryState> for MemoryState {
+    fn from(value: FsrsMemoryState) -> Self {
+        MemoryState {
+            stability: value.stability,
+            difficulty: value.difficulty,
+        }
+    }
+}
+
+impl From<MemoryState> for FsrsMemoryState {
+    fn from(value: MemoryState) -> Self {
+        FsrsMemoryState {
+            stability: value.stability,
+            difficulty: value.difficulty,
+        }
     }
 }
 

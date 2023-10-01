@@ -6,6 +6,7 @@ use anki_proto::notetypes::notetype::config::Kind as NotetypeKind;
 use anki_proto::notetypes::stock_notetype::Kind;
 pub(crate) use anki_proto::notetypes::stock_notetype::Kind as StockKind;
 use anki_proto::notetypes::stock_notetype::OriginalStockKind;
+use anki_proto::notetypes::ClozeField;
 
 use super::NotetypeConfig;
 use crate::config::ConfigEntry;
@@ -169,9 +170,13 @@ pub(crate) fn cloze(tr: &I18n) -> Notetype {
         tr.notetypes_cloze_name(),
     );
     let text = tr.notetypes_text_field();
-    nt.add_field(text.as_ref());
+    let mut config = nt.add_field(text.as_ref());
+    config.tag = Some(ClozeField::Text as u32);
+    config.prevent_deletion = true;
+
     let back_extra = tr.notetypes_back_extra_field();
-    nt.add_field(back_extra.as_ref());
+    config = nt.add_field(back_extra.as_ref());
+    config.tag = Some(ClozeField::BackExtra as u32);
     let qfmt = format!("{{{{cloze:{}}}}}", text);
     let afmt = format!("{}<br>\n{{{{{}}}}}", qfmt, back_extra);
     nt.add_template(nt.name.clone(), qfmt, afmt);

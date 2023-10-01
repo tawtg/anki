@@ -25,7 +25,7 @@ import aqt
 import aqt.main
 import aqt.operations
 from anki import hooks
-from anki.collection import OpChanges, OpChangesOnly, SearchNode
+from anki.collection import OpChanges, OpChangesOnly, Progress, SearchNode
 from anki.decks import UpdateDeckConfigs
 from anki.scheduler.v3 import SchedulingStatesWithContext, SetSchedulingStatesRequest
 from anki.utils import dev_mode
@@ -33,6 +33,7 @@ from aqt.changenotetype import ChangeNotetypeDialog
 from aqt.deckoptions import DeckOptionsDialog
 from aqt.operations import on_op_finished
 from aqt.operations.deck import update_deck_configs as update_deck_configs_op
+from aqt.progress import ProgressUpdate
 from aqt.qt import *
 from aqt.utils import aqt_data_path
 
@@ -394,6 +395,16 @@ def update_deck_configs() -> bytes:
     input = UpdateDeckConfigs()
     input.ParseFromString(request.data)
 
+    def on_progress(progress: Progress, update: ProgressUpdate) -> None:
+        if not progress.HasField("compute_memory"):
+            return
+        val = progress.compute_memory
+        update.max = val.total_cards
+        update.value = val.current_cards
+        update.label = val.label
+        if update.user_wants_abort:
+            update.abort = True
+
     def on_success(changes: OpChanges) -> None:
         if isinstance(window := aqt.mw.app.activeWindow(), DeckOptionsDialog):
             window.reject()
@@ -401,7 +412,7 @@ def update_deck_configs() -> bytes:
     def handle_on_main() -> None:
         update_deck_configs_op(parent=aqt.mw, input=input).success(
             on_success
-        ).run_in_background()
+        ).with_backend_progress(on_progress).run_in_background()
 
     aqt.mw.taskman.run_on_main(handle_on_main)
     return b""
@@ -424,12 +435,9 @@ def set_scheduling_states() -> bytes:
 def import_done() -> bytes:
     def update_window_modality() -> None:
         if window := aqt.mw.app.activeWindow():
-            from aqt.import_export.import_csv_dialog import ImportCsvDialog
-            from aqt.import_export.import_log_dialog import ImportLogDialog
+            from aqt.import_export.import_dialog import ImportDialog
 
-            if isinstance(window, ImportCsvDialog) or isinstance(
-                window, ImportLogDialog
-            ):
+            if isinstance(window, ImportDialog):
                 window.hide()
                 window.setWindowModality(Qt.WindowModality.NonModal)
                 window.show()
@@ -517,6 +525,7 @@ exposed_backend_list = [
     "i18n_resources",
     # ImportExportService
     "get_csv_metadata",
+    "get_import_anki_package_presets",
     # NotesService
     "get_field_names",
     "get_note",
@@ -535,6 +544,13 @@ exposed_backend_list = [
     "add_image_occlusion_note",
     "get_image_occlusion_note",
     "update_image_occlusion_note",
+    "get_image_occlusion_fields",
+    # SchedulerService
+    "compute_fsrs_weights",
+    "compute_optimal_retention",
+    "set_wants_abort",
+    "evaluate_weights",
+    "get_optimal_retention_parameters",
 ]
 
 

@@ -42,6 +42,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <script lang="ts">
     import { bridgeCommand } from "@tslib/bridgecommand";
     import * as tr from "@tslib/ftl";
+    import { resetIOImage } from "image-occlusion/mask-editor";
     import { onMount, tick } from "svelte";
     import { get, writable } from "svelte/store";
 
@@ -266,7 +267,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         fontSize: fonts[index][1],
         direction: fonts[index][2] ? "rtl" : "ltr",
         collapsed: fieldsCollapsed[index],
-        hidden: hideFieldInOcclusionType(index),
+        hidden: hideFieldInOcclusionType(index, ioFields),
     })) as FieldData[];
 
     function saveTags({ detail }: CustomEvent): void {
@@ -301,7 +302,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         closeMathjaxEditor?.();
         $commitTagEdits();
         saveFieldNow();
-        imageOcclusionMode = undefined;
     }
 
     export function saveOnPageHide() {
@@ -384,6 +384,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         });
     }
 
+    import { ImageOcclusionFieldIndexes } from "@tslib/anki/image_occlusion_pb";
+    import { getImageOcclusionFields } from "@tslib/backend";
     import { wrapInternal } from "@tslib/wrap";
     import LabelButton from "components/LabelButton.svelte";
     import Shortcut from "components/Shortcut.svelte";
@@ -398,12 +400,23 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     let isIOImageLoaded = false;
     let imageOcclusionMode: IOMode | undefined;
+    let ioFields = new ImageOcclusionFieldIndexes({});
     async function setupMaskEditor(options: { html: string; mode: IOMode }) {
+        imageOcclusionMode = undefined;
+        const getIoFields = getImageOcclusionFields({
+            notetypeId: BigInt(notetypeMeta.id),
+        }).then((r) => (ioFields = r.fields!));
+        await Promise.all([tick(), getIoFields]);
         imageOcclusionMode = options.mode;
         if (options.mode.kind === "add") {
-            fieldStores[1].set(options.html);
+            fieldStores[ioFields.image].set(options.html);
+
+            // new image is being added
+            if (isIOImageLoaded) {
+                resetIOImage(options.mode.imagePath);
+            }
         } else {
-            const clozeNote = get(fieldStores[0]);
+            const clozeNote = get(fieldStores[ioFields.occlusions]);
             if (clozeNote.includes("oi=1")) {
                 $hideAllGuessOne = true;
             } else {
@@ -415,14 +428,14 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     function setImageField(html) {
-        fieldStores[1].set(html);
+        fieldStores[ioFields.image].set(html);
     }
     globalThis.setImageField = setImageField;
 
     // update cloze deletions and set occlusion fields, it call in saveNow to update cloze deletions
     function updateIONoteInEditMode() {
         if (isEditMode) {
-            const clozeNote = get(fieldStores[0]);
+            const clozeNote = get(fieldStores[ioFields.occlusions]);
             if (clozeNote.includes("oi=1")) {
                 setOcclusionField(true);
             } else {
@@ -434,7 +447,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     function setOcclusionFieldInner() {
         if (isImageOcclusion) {
             const occlusionsData = exportShapesToClozeDeletions($hideAllGuessOne);
-            fieldStores[0].set(occlusionsData.clozes);
+            fieldStores[ioFields.occlusions].set(occlusionsData.clozes);
         }
     }
     // global for calling this method in desktop note editor
@@ -455,14 +468,17 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         // set fields data for occlusion and image fields for io notes type
         if (isImageOcclusion) {
             const occlusionsData = exportShapesToClozeDeletions(occludeInactive);
-            fieldStores[0].set(occlusionsData.clozes);
+            fieldStores[ioFields.occlusions].set(occlusionsData.clozes);
         }
     }
 
-    // hide first two fields for occlusion type, first contains occlusion data and second contains image
-    function hideFieldInOcclusionType(index: number) {
+    /** hide occlusions and image */
+    function hideFieldInOcclusionType(
+        index: number,
+        ioFields: ImageOcclusionFieldIndexes,
+    ) {
         if (isImageOcclusion) {
-            if (index == 0 || index == 1) {
+            if (index === ioFields.occlusions || index === ioFields.image) {
                 return true;
             }
         }
@@ -581,6 +597,22 @@ the AddCards dialog) should be implemented in the user of this component.
                 }}
             >
                 {tr.notetypesIoSelectImage()}
+            </LabelButton>
+        </div>
+        <div
+            id="io-select-clipboard-image-div"
+            style="padding-top: 30px; text-align: center;"
+        >
+            <LabelButton
+                --border-left-radius="5px"
+                --border-right-radius="5px"
+                class="io-select-image-btn"
+                on:click={() => {
+                    imageOcclusionMode = undefined;
+                    bridgeCommand("addImageForOcclusionFromClipboard");
+                }}
+            >
+                {tr.notetypesIoPasteImageFromClipboard()}
             </LabelButton>
         </div>
     {/if}

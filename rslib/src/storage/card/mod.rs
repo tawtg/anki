@@ -80,6 +80,8 @@ fn row_to_card(row: &Row) -> result::Result<Card, rusqlite::Error> {
         original_deck_id: row.get(15)?,
         flags: row.get(16)?,
         original_position: data.original_position,
+        memory_state: data.memory_state(),
+        desired_retention: data.fsrs_desired_retention,
         custom_data: data.custom_data,
     })
 }
@@ -124,7 +126,7 @@ impl super::SqliteStorage {
             card.original_due,
             card.original_deck_id,
             card.flags,
-            CardData::from_card(card),
+            CardData::from_card(card).convert_to_json()?,
             card.id,
         ])?;
         Ok(())
@@ -151,7 +153,7 @@ impl super::SqliteStorage {
             card.original_due,
             card.original_deck_id,
             card.flags,
-            CardData::from_card(card),
+            CardData::from_card(card).convert_to_json()?,
         ])?;
         card.id = CardId(self.db.last_insert_rowid());
         Ok(())
@@ -179,7 +181,7 @@ impl super::SqliteStorage {
                 card.original_due,
                 card.original_deck_id,
                 card.flags,
-                CardData::from_card(card),
+                CardData::from_card(card).convert_to_json()?,
             ])
             .map(|n_rows| n_rows == 1)
             .map_err(Into::into)
@@ -206,7 +208,7 @@ impl super::SqliteStorage {
             card.original_due,
             card.original_deck_id,
             card.flags,
-            CardData::from_card(card),
+            CardData::from_card(card).convert_to_json()?,
         ])?;
 
         Ok(())
@@ -251,12 +253,13 @@ impl super::SqliteStorage {
         day_cutoff: u32,
         order: ReviewCardOrder,
         kind: DueCardKind,
+        fsrs: bool,
         mut func: F,
     ) -> Result<()>
     where
         F: FnMut(DueCard) -> Result<bool>,
     {
-        let order_clause = review_order_sql(order, day_cutoff);
+        let order_clause = review_order_sql(order, day_cutoff, fsrs);
         let mut stmt = self.db.prepare_cached(&format!(
             "{} order by {}",
             include_str!("due_cards.sql"),
@@ -286,13 +289,19 @@ impl super::SqliteStorage {
 
     /// Call func() for each new card in the provided deck, stopping when it
     /// returns or no more cards found.
-    pub(crate) fn for_each_new_card_in_deck<F>(&self, deck: DeckId, mut func: F) -> Result<()>
+    pub(crate) fn for_each_new_card_in_deck<F>(
+        &self,
+        deck: DeckId,
+        sort: NewCardSorting,
+        mut func: F,
+    ) -> Result<()>
     where
         F: FnMut(NewCard) -> Result<bool>,
     {
         let mut stmt = self.db.prepare_cached(&format!(
-            "{} ORDER BY due, ord ASC",
-            include_str!("new_cards.sql")
+            "{} ORDER BY {}",
+            include_str!("new_cards.sql"),
+            sort.write()
         ))?;
         let mut rows = stmt.query(params![deck])?;
         while let Some(row) = rows.next()? {
@@ -691,7 +700,16 @@ enum ReviewOrderSubclause {
     IntervalsDescending,
     EaseAscending,
     EaseDescending,
-    RelativeOverdueness { today: u32 },
+    /// FSRS
+    DifficultyAscending,
+    /// FSRS
+    DifficultyDescending,
+    RelativeOverdueness {
+        today: u32,
+    },
+    RelativeOverduenessFsrs {
+        today: u32,
+    },
 }
 
 impl fmt::Display for ReviewOrderSubclause {
@@ -705,8 +723,14 @@ impl fmt::Display for ReviewOrderSubclause {
             ReviewOrderSubclause::IntervalsDescending => "ivl desc",
             ReviewOrderSubclause::EaseAscending => "factor asc",
             ReviewOrderSubclause::EaseDescending => "factor desc",
+            ReviewOrderSubclause::DifficultyAscending => "extract_fsrs_variable(data, 'd') asc",
+            ReviewOrderSubclause::DifficultyDescending => "extract_fsrs_variable(data, 'd') desc",
             ReviewOrderSubclause::RelativeOverdueness { today } => {
                 temp_string = format!("ivl / cast({today}-due+0.001 as real)", today = today);
+                &temp_string
+            }
+            ReviewOrderSubclause::RelativeOverduenessFsrs { today } => {
+                temp_string = format!("extract_fsrs_relative_overdueness(data, due, {today}) desc");
                 &temp_string
             }
         };
@@ -714,17 +738,31 @@ impl fmt::Display for ReviewOrderSubclause {
     }
 }
 
-fn review_order_sql(order: ReviewCardOrder, today: u32) -> String {
+fn review_order_sql(order: ReviewCardOrder, today: u32, fsrs: bool) -> String {
     let mut subclauses = match order {
         ReviewCardOrder::Day => vec![ReviewOrderSubclause::Day],
         ReviewCardOrder::DayThenDeck => vec![ReviewOrderSubclause::Day, ReviewOrderSubclause::Deck],
         ReviewCardOrder::DeckThenDay => vec![ReviewOrderSubclause::Deck, ReviewOrderSubclause::Day],
         ReviewCardOrder::IntervalsAscending => vec![ReviewOrderSubclause::IntervalsAscending],
         ReviewCardOrder::IntervalsDescending => vec![ReviewOrderSubclause::IntervalsDescending],
-        ReviewCardOrder::EaseAscending => vec![ReviewOrderSubclause::EaseAscending],
-        ReviewCardOrder::EaseDescending => vec![ReviewOrderSubclause::EaseDescending],
+        ReviewCardOrder::EaseAscending => {
+            vec![if fsrs {
+                ReviewOrderSubclause::DifficultyDescending
+            } else {
+                ReviewOrderSubclause::EaseAscending
+            }]
+        }
+        ReviewCardOrder::EaseDescending => vec![if fsrs {
+            ReviewOrderSubclause::DifficultyAscending
+        } else {
+            ReviewOrderSubclause::EaseDescending
+        }],
         ReviewCardOrder::RelativeOverdueness => {
-            vec![ReviewOrderSubclause::RelativeOverdueness { today }]
+            vec![if fsrs {
+                ReviewOrderSubclause::RelativeOverduenessFsrs { today }
+            } else {
+                ReviewOrderSubclause::RelativeOverdueness { today }
+            }]
         }
         ReviewCardOrder::Random => vec![],
     };
@@ -777,7 +815,7 @@ mod test {
     fn add_card() {
         let tr = I18n::template_only();
         let storage =
-            SqliteStorage::open_or_create(Path::new(":memory:"), &tr, false, false, false).unwrap();
+            SqliteStorage::open_or_create(Path::new(":memory:"), &tr, false, false).unwrap();
         let mut card = Card::default();
         storage.add_card(&mut card).unwrap();
         let id1 = card.id;

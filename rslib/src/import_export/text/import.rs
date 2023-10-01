@@ -146,7 +146,7 @@ impl Duplicate {
 impl DeckIdsByNameOrId {
     fn new(col: &mut Collection, default: &NameOrId) -> Result<Self> {
         let names: HashMap<String, DeckId> = col
-            .get_all_normal_deck_names()?
+            .get_all_normal_deck_names(false)?
             .into_iter()
             .map(|(id, name)| (name, id))
             .collect();
@@ -558,7 +558,7 @@ impl ForeignNote {
         note.tags.extend(extra_tags.into_iter().cloned());
         note.fields_mut()
             .iter_mut()
-            .zip(self.fields.into_iter())
+            .zip(self.fields)
             .for_each(|(field, new)| {
                 if let Some(s) = new {
                     *field = s;

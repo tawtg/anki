@@ -37,10 +37,10 @@ from anki.utils import (
     dev_mode,
     ids2str,
     int_time,
+    int_version,
     is_lin,
     is_mac,
     is_win,
-    point_version,
     split_fields,
 )
 from aqt import gui_hooks
@@ -494,8 +494,9 @@ class AnkiQt(QMainWindow):
             self.pendingImport = None
         gui_hooks.profile_did_open()
 
-        def _onsuccess() -> None:
-            self._refresh_after_sync()
+        def _onsuccess(synced: bool) -> None:
+            if synced:
+                self._refresh_after_sync()
             if onsuccess:
                 onsuccess()
             if not self.safeMode:
@@ -628,7 +629,7 @@ class AnkiQt(QMainWindow):
             self._unloadCollection()
             onsuccess()
 
-        def after_sync() -> None:
+        def after_sync(synced: bool) -> None:
             self.media_syncer.show_diag_until_finished(after_media_sync)
 
         def before_sync() -> None:
@@ -954,7 +955,7 @@ title="{}" {}>{}</button>""".format(
             if on_done:
                 on_done()
 
-        if elap > 86_400 or self.pm.last_run_version != point_version():
+        if elap > 86_400 or self.pm.last_run_version != int_version():
             check_and_prompt_for_updates(
                 self,
                 self.addonManager,
@@ -1018,9 +1019,6 @@ title="{}" {}>{}</button>""".format(
 
     def _sync_collection_and_media(self, after_sync: Callable[[], None]) -> None:
         "Caller should ensure auth available."
-        # start media sync if not already running
-        if not self.media_syncer.is_syncing():
-            self.media_syncer.start()
 
         def on_collection_sync_finished() -> None:
             self.col.clear_python_undo()
@@ -1033,12 +1031,12 @@ title="{}" {}>{}</button>""".format(
         gui_hooks.sync_will_start()
         sync_collection(self, on_done=on_collection_sync_finished)
 
-    def maybe_auto_sync_on_open_close(self, after_sync: Callable[[], None]) -> None:
+    def maybe_auto_sync_on_open_close(self, after_sync: Callable[[bool], None]) -> None:
         "If disabled, after_sync() is called immediately."
         if self.can_auto_sync():
-            self._sync_collection_and_media(after_sync)
+            self._sync_collection_and_media(lambda: after_sync(True))
         else:
-            after_sync()
+            after_sync(False)
 
     def maybe_auto_sync_media(self) -> None:
         if self.can_auto_sync():
@@ -1367,7 +1365,7 @@ title="{}" {}>{}</button>""".format(
     def on_toggle_full_screen(self) -> None:
         if disallow_full_screen():
             showWarning(
-                tr.actions_currently_unsupported(),
+                tr.actions_fullscreen_unsupported(),
                 parent=self,
                 help=HelpPage.FULL_SCREEN_ISSUE,
             )
@@ -1401,29 +1399,9 @@ title="{}" {}>{}</button>""".format(
     ##########################################################################
 
     def setupAutoUpdate(self) -> None:
-        import aqt.update
+        from aqt.update import check_for_update
 
-        self.autoUpdate = aqt.update.LatestVersionFinder(self)
-        qconnect(self.autoUpdate.newVerAvail, self.newVerAvail)
-        qconnect(self.autoUpdate.newMsg, self.newMsg)
-        qconnect(self.autoUpdate.clockIsOff, self.clockIsOff)
-        self.autoUpdate.start()
-
-    def newVerAvail(self, ver: str) -> None:
-        if self.pm.meta.get("suppressUpdate", None) != ver:
-            aqt.update.askAndUpdate(self, ver)
-
-    def newMsg(self, data: dict) -> None:
-        aqt.update.showMessages(self, data)
-
-    def clockIsOff(self, diff: int) -> None:
-        if dev_mode:
-            print("clock is off; ignoring")
-            return
-        diffText = tr.qt_misc_second(count=diff)
-        warn = tr.qt_misc_in_order_to_ensure_your_collection(val="%s") % diffText
-        showWarning(warn)
-        self.app.closeAllWindows()
+        check_for_update()
 
     # Timers
     ##########################################################################

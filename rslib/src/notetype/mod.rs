@@ -5,10 +5,11 @@ mod cardgen;
 mod checks;
 mod emptycards;
 mod fields;
+mod merge;
 mod notetypechange;
 mod render;
 mod restore;
-mod schema11;
+pub(crate) mod schema11;
 mod schemachange;
 mod service;
 pub(crate) mod stock;
@@ -213,16 +214,11 @@ impl Collection {
         }
     }
 
-    pub fn get_all_notetypes(&mut self) -> Result<HashMap<NotetypeId, Arc<Notetype>>> {
+    pub fn get_all_notetypes(&mut self) -> Result<Vec<Arc<Notetype>>> {
         self.storage
-            .get_all_notetype_names()?
+            .get_all_notetype_ids()?
             .into_iter()
-            .map(|(ntid, _)| {
-                self.get_notetype(ntid)
-                    .transpose()
-                    .unwrap()
-                    .map(|nt| (ntid, nt))
-            })
+            .filter_map(|ntid| self.get_notetype(ntid).transpose())
             .collect()
     }
 
@@ -460,8 +456,9 @@ impl Notetype {
         }
     }
 
-    pub(crate) fn add_field<S: Into<String>>(&mut self, name: S) {
+    pub(crate) fn add_field<S: Into<String>>(&mut self, name: S) -> &mut NoteFieldConfig {
         self.fields.push(NoteField::new(name));
+        self.fields.last_mut().map(|f| &mut f.config).unwrap()
     }
 
     pub(crate) fn add_template<S1, S2, S3>(&mut self, name: S1, qfmt: S2, afmt: S3)
@@ -554,13 +551,21 @@ impl Notetype {
         fields: HashMap<String, Option<String>>,
         parsed: &mut [(Option<ParsedTemplate>, Option<ParsedTemplate>)],
     ) {
+        let first_remaining_field_name = &self.fields.get(0).unwrap().name;
+        let is_cloze = self.is_cloze();
         for (idx, (q_opt, a_opt)) in parsed.iter_mut().enumerate() {
             if let Some(q) = q_opt {
                 q.rename_and_remove_fields(&fields);
+                if !q.contains_field_replacement() || is_cloze && !q.contains_cloze_replacement() {
+                    q.add_missing_field_replacement(first_remaining_field_name, is_cloze);
+                }
                 self.templates[idx].config.q_format = q.template_to_string();
             }
             if let Some(a) = a_opt {
                 a.rename_and_remove_fields(&fields);
+                if is_cloze && !a.contains_cloze_replacement() {
+                    a.add_missing_field_replacement(first_remaining_field_name, is_cloze);
+                }
                 self.templates[idx].config.a_format = a.template_to_string();
             }
         }
@@ -718,7 +723,7 @@ impl Collection {
         Ok(())
     }
 
-    fn remove_notetype_inner(&mut self, ntid: NotetypeId) -> Result<()> {
+    pub(crate) fn remove_notetype_inner(&mut self, ntid: NotetypeId) -> Result<()> {
         let notetype = if let Some(notetype) = self.storage.get_notetype(ntid)? {
             notetype
         } else {
@@ -746,5 +751,75 @@ impl Collection {
         } else {
             self.set_current_notetype_id(all[0].0)
         }
+    }
+}
+
+// Tests
+//---------------------------------------
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn update_templates_after_removing_crucial_fields() {
+        // Normal Test (all front fields removed)
+        let mut nt_norm = Notetype::default();
+        nt_norm.add_field("baz"); // Fields "foo" and "bar" were removed
+        nt_norm.fields[0].ord = Some(2);
+
+        nt_norm.add_template("Card 1", "front {{foo}}", "back {{bar}}");
+        nt_norm.templates[0].ord = Some(0);
+        let mut parsed = nt_norm.parsed_templates();
+
+        let mut field_map: HashMap<String, Option<String>> = HashMap::new();
+        field_map.insert("foo".to_owned(), None);
+        field_map.insert("bar".to_owned(), None);
+
+        nt_norm.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        assert_eq!(nt_norm.templates[0].config.q_format, "front {{baz}}");
+        assert_eq!(nt_norm.templates[0].config.a_format, "back ");
+
+        // Cloze Test 1/2 (front and back cloze fields removed)
+        let mut nt_cloze = Notetype {
+            config: Notetype::new_cloze_config(),
+            ..Default::default()
+        };
+        nt_cloze.add_field("baz"); // Fields "foo" and "bar" were removed
+        nt_cloze.fields[0].ord = Some(2);
+
+        nt_cloze.add_template("Card 1", "front {{cloze:foo}}", "back {{cloze:bar}}");
+        nt_cloze.templates[0].ord = Some(0);
+        let mut parsed = nt_cloze.parsed_templates();
+
+        let mut field_map: HashMap<String, Option<String>> = HashMap::new();
+        field_map.insert("foo".to_owned(), None);
+        field_map.insert("bar".to_owned(), None);
+
+        nt_cloze.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        assert_eq!(nt_cloze.templates[0].config.q_format, "front {{cloze:baz}}");
+        assert_eq!(nt_cloze.templates[0].config.a_format, "back {{cloze:baz}}");
+
+        // Cloze Test 2/2 (only back cloze field is removed)
+        let mut nt_cloze = Notetype {
+            config: Notetype::new_cloze_config(),
+            ..Default::default()
+        };
+        nt_cloze.add_field("foo");
+        nt_cloze.fields[0].ord = Some(0);
+        nt_cloze.add_field("baz");
+        nt_cloze.fields[1].ord = Some(2);
+        // ^ only field "bar" was removed
+
+        nt_cloze.add_template("Card 1", "front {{cloze:foo}}", "back {{cloze:bar}}");
+        nt_cloze.templates[0].ord = Some(0);
+        let mut parsed = nt_cloze.parsed_templates();
+
+        let mut field_map: HashMap<String, Option<String>> = HashMap::new();
+        field_map.insert("bar".to_owned(), None);
+
+        nt_cloze.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        assert_eq!(nt_cloze.templates[0].config.q_format, "front {{cloze:foo}}");
+        assert_eq!(nt_cloze.templates[0].config.a_format, "back {{cloze:foo}}");
     }
 }

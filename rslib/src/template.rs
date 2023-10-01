@@ -550,13 +550,13 @@ fn append_str_to_nodes(nodes: &mut Vec<RenderedNode>, text: &str) {
 pub(crate) fn field_is_empty(text: &str) -> bool {
     lazy_static! {
         static ref RE: Regex = Regex::new(
-            r#"(?xsi)
+            r"(?xsi)
             ^(?:
             [[:space:]]
             |
             </?(?:br|div)\ ?/?>
             )*$
-        "#
+        "
         )
         .unwrap();
     }
@@ -647,7 +647,7 @@ pub fn render_card(
     context.frontside = if context.partial_for_python {
         Some("")
     } else {
-        let Some(RenderedNode::Text {text }) = &qnodes.get(0) else {
+        let Some(RenderedNode::Text { text }) = &qnodes.get(0) else {
             invalid_input!("should not happen: first node not text");
         };
         Some(text)
@@ -729,6 +729,30 @@ impl ParsedTemplate {
     pub(crate) fn rename_and_remove_fields(&mut self, fields: &HashMap<String, Option<String>>) {
         let old_nodes = std::mem::take(&mut self.0);
         self.0 = rename_and_remove_fields(old_nodes, fields);
+    }
+
+    pub(crate) fn contains_cloze_replacement(&self) -> bool {
+        self.0.iter().any(|node| {
+            matches!(
+                node,
+                ParsedNode::Replacement {key:_, filters} if filters.iter().any(|f| f=="cloze")
+            )
+        })
+    }
+
+    pub(crate) fn contains_field_replacement(&self) -> bool {
+        self.0
+            .iter()
+            .any(|node| matches!(node, ParsedNode::Replacement { key: _, filters: _ }))
+    }
+
+    pub(crate) fn add_missing_field_replacement(&mut self, field_name: &str, is_cloze: bool) {
+        let key = String::from(field_name);
+        let filters = match is_cloze {
+            true => vec![String::from("cloze")],
+            false => Vec::new(),
+        };
+        self.0.push(ParsedNode::Replacement { key, filters });
     }
 }
 
@@ -986,7 +1010,7 @@ mod test {
 
     #[test]
     fn requirements() {
-        let field_map: FieldMap = vec!["a", "b", "c"]
+        let field_map: FieldMap = ["a", "b", "c"]
             .iter()
             .enumerate()
             .map(|(a, b)| (*b, a as u16))

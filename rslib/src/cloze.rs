@@ -22,11 +22,11 @@ use crate::text::strip_html_preserving_entities;
 
 lazy_static! {
     static ref MATHJAX: Regex = Regex::new(
-        r#"(?xsi)
+        r"(?xsi)
             (\\[(\[])       # 1 = mathjax opening tag
             (.*?)           # 2 = inner content
             (\\[])])        # 3 = mathjax closing tag
-           "#
+           "
     )
     .unwrap();
 }
@@ -142,8 +142,12 @@ impl ExtractedCloze<'_> {
 
     /// If cloze starts with image-occlusion:, return the text following that.
     fn image_occlusion(&self) -> Option<&str> {
-        let Some(first_node) = self.nodes.get(0) else { return None };
-        let TextOrCloze::Text(text) = first_node else { return None };
+        let Some(first_node) = self.nodes.get(0) else {
+            return None;
+        };
+        let TextOrCloze::Text(text) = first_node else {
+            return None;
+        };
         text.strip_prefix("image-occlusion:")
     }
 }

@@ -2,13 +2,27 @@
 Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
+<script context="module" lang="ts">
+    import { writable } from "svelte/store";
+
+    const changeSignal = writable(Symbol());
+
+    export function emitChangeSignal() {
+        changeSignal.set(Symbol());
+    }
+</script>
+
 <script lang="ts">
     import type { PanZoom } from "panzoom";
     import panzoom from "panzoom";
-    import { createEventDispatcher } from "svelte";
+    import { createEventDispatcher, onDestroy, onMount } from "svelte";
 
     import type { IOMode } from "./lib";
-    import { setupMaskEditor, setupMaskEditorForEdit } from "./mask-editor";
+    import {
+        setCanvasZoomRatio,
+        setupMaskEditor,
+        setupMaskEditorForEdit,
+    } from "./mask-editor";
     import Toolbar from "./Toolbar.svelte";
 
     export let mode: IOMode;
@@ -23,6 +37,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     function onChange() {
         dispatch("change", { canvas });
     }
+
+    $: $changeSignal, onChange();
 
     function init(node) {
         instance = panzoom(node, {
@@ -44,6 +60,18 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             });
         }
     }
+
+    onMount(() => {
+        window.addEventListener("resize", () => {
+            setCanvasZoomRatio(canvas, instance);
+        });
+    });
+
+    onDestroy(() => {
+        window.removeEventListener("resize", () => {
+            setCanvasZoomRatio(canvas, instance);
+        });
+    });
 </script>
 
 <Toolbar {canvas} {instance} {iconSize} activeTool={startingTool} />

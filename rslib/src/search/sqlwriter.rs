@@ -179,7 +179,9 @@ impl SqlWriter<'_> {
                 write!(self.sql, "c.id in ({})", cids).unwrap();
             }
             SearchNode::Property { operator, kind } => self.write_prop(operator, kind)?,
+            SearchNode::CustomData(key) => self.write_custom_data(key)?,
             SearchNode::WholeCollection => write!(self.sql, "true").unwrap(),
+            SearchNode::Preset(name) => self.write_deck_preset(name)?,
         };
         Ok(())
     }
@@ -359,11 +361,39 @@ impl SqlWriter<'_> {
             PropertyKind::CustomDataNumber { key, value } => {
                 write!(
                     self.sql,
-                    "extract_custom_data_number(c.data, '{key}') {op} {value}"
+                    "cast(extract_custom_data(c.data, '{key}') as float) {op} {value}"
                 )
                 .unwrap();
             }
+            PropertyKind::CustomDataString { key, value } => {
+                write!(
+                    self.sql,
+                    "extract_custom_data(c.data, '{key}') {op} '{value}'"
+                )
+                .unwrap();
+            }
+            PropertyKind::Stability(s) => {
+                write!(self.sql, "extract_fsrs_variable(c.data, 's') {op} {s}").unwrap()
+            }
+            PropertyKind::Difficulty(d) => {
+                let d = d * 9.0 + 1.0;
+                write!(self.sql, "extract_fsrs_variable(c.data, 'd') {op} {d}").unwrap()
+            }
+            PropertyKind::Retrievability(r) => {
+                let elap = self.col.timing_today()?.days_elapsed;
+                write!(
+                    self.sql,
+                    "extract_fsrs_retrievability(c.data, c.due, c.ivl, {elap}) {op} {r}"
+                )
+                .unwrap()
+            }
         }
+
+        Ok(())
+    }
+
+    fn write_custom_data(&mut self, key: &str) -> Result<()> {
+        write!(self.sql, "extract_custom_data(c.data, '{key}') is not null").unwrap();
 
         Ok(())
     }
@@ -593,11 +623,10 @@ impl SqlWriter<'_> {
         &mut self,
         field_name: &str,
     ) -> Result<Vec<FieldQualifiedSearchContext>> {
-        let notetypes = self.col.get_all_notetypes()?;
         let matches_glob = glob_matcher(field_name);
 
         let mut field_map = vec![];
-        for nt in notetypes.values() {
+        for nt in self.col.get_all_notetypes()? {
             let matched_fields = nt
                 .fields
                 .iter()
@@ -624,11 +653,10 @@ impl SqlWriter<'_> {
         &mut self,
         field_name: &str,
     ) -> Result<Vec<(NotetypeId, Vec<u32>)>> {
-        let notetypes = self.col.get_all_notetypes()?;
         let matches_glob = glob_matcher(field_name);
 
         let mut field_map = vec![];
-        for nt in notetypes.values() {
+        for nt in self.col.get_all_notetypes()? {
             let matched_fields: Vec<u32> = nt
                 .fields
                 .iter()
@@ -648,10 +676,9 @@ impl SqlWriter<'_> {
     }
 
     fn included_fields_by_notetype(&mut self) -> Result<Option<Vec<UnqualifiedSearchContext>>> {
-        let notetypes = self.col.get_all_notetypes()?;
         let mut any_excluded = false;
         let mut field_map = vec![];
-        for nt in notetypes.values() {
+        for nt in self.col.get_all_notetypes()? {
             let mut sortf_excluded = false;
             let matched_fields = nt
                 .fields
@@ -684,10 +711,9 @@ impl SqlWriter<'_> {
     fn included_fields_for_unqualified_regex(
         &mut self,
     ) -> Result<Option<Vec<UnqualifiedRegexSearchContext>>> {
-        let notetypes = self.col.get_all_notetypes()?;
         let mut any_excluded = false;
         let mut field_map = vec![];
-        for nt in notetypes.values() {
+        for nt in self.col.get_all_notetypes()? {
             let matched_fields: Vec<u32> = nt
                 .fields
                 .iter()
@@ -810,6 +836,25 @@ impl SqlWriter<'_> {
             self.col.get_config_bool(BoolKey::IgnoreAccentsInSearch),
         )
     }
+    fn write_deck_preset(&mut self, name: &str) -> Result<()> {
+        let dcid = self.col.storage.get_deck_config_id_by_name(name)?;
+        let mut str_ids = String::new();
+        let deck_ids = self
+            .col
+            .storage
+            .get_all_decks()?
+            .into_iter()
+            .filter_map(|d| {
+                if d.config_id() == dcid {
+                    Some(d.id)
+                } else {
+                    None
+                }
+            });
+        ids_to_string(&mut str_ids, deck_ids);
+        write!(self.sql, "c.did in {str_ids}").unwrap();
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -927,6 +972,7 @@ impl SearchNode {
             SearchNode::Flag(_) => RequiredTable::Cards,
             SearchNode::CardIds(_) => RequiredTable::Cards,
             SearchNode::Property { .. } => RequiredTable::Cards,
+            SearchNode::CustomData { .. } => RequiredTable::Cards,
 
             SearchNode::UnqualifiedText(_) => RequiredTable::Notes,
             SearchNode::SingleField { .. } => RequiredTable::Notes,
@@ -943,6 +989,7 @@ impl SearchNode {
             SearchNode::WholeCollection => RequiredTable::CardsOrNotes,
 
             SearchNode::CardTemplate(_) => RequiredTable::CardsAndNotes,
+            SearchNode::Preset(_) => RequiredTable::Cards,
         }
     }
 }
@@ -987,7 +1034,7 @@ mod test {
         );
         assert_eq!(s(ctx, "te%st").1, vec![r"%te\%st%".to_string()]);
         // user should be able to escape wildcards
-        assert_eq!(s(ctx, r#"te\*s\_t"#).1, vec!["%te*s\\_t%".to_string()]);
+        assert_eq!(s(ctx, r"te\*s\_t").1, vec!["%te*s\\_t%".to_string()]);
 
         // field search
         assert_eq!(
@@ -1179,7 +1226,11 @@ c.odue != 0 then c.odue else c.due end) != {days}) or (c.queue in (1,4) and
         assert_eq!(s(ctx, "prop:rated>-5:3").0, s(ctx, "rated:5:3").0);
         assert_eq!(
             &s(ctx, "prop:cdn:r=1").0,
-            "(extract_custom_data_number(c.data, 'r') = 1)"
+            "(cast(extract_custom_data(c.data, 'r') as float) = 1)"
+        );
+        assert_eq!(
+            &s(ctx, "prop:cds:r=s").0,
+            "(extract_custom_data(c.data, 'r') = 's')"
         );
 
         // note types by name
@@ -1221,6 +1272,12 @@ c.odue != 0 then c.odue else c.due end) != {days}) or (c.queue in (1,4) and
                 vec![r"(?i)\b.*fo.o.*\b".into()]
             )
         );
+
+        // has-cd
+        assert_eq!(
+            &s(ctx, "has-cd:r").0,
+            "(extract_custom_data(c.data, 'r') is not null)"
+        );
     }
 
     #[test]
@@ -1255,6 +1312,7 @@ c.odue != 0 then c.odue else c.due end) != {days}) or (c.queue in (1,4) and
         );
     }
 
+    #[allow(clippy::single_range_in_vec_init)]
     #[test]
     fn ranges() {
         assert_eq!([1, 2, 3].collect_ranges(), [1..4]);

@@ -16,7 +16,7 @@ use crate::text::strip_html;
 
 lazy_static! {
     static ref LINEBREAKS: Regex = Regex::new(
-        r#"(?six)
+        r"(?six)
         (
             \n
             |
@@ -24,7 +24,7 @@ lazy_static! {
             |
             </?div>
         )+
-    "#
+    "
     )
     .unwrap();
 }
@@ -92,7 +92,7 @@ impl DiffContext {
         format!(
             "<code id=typeans>{}</code>",
             if self.provided.is_empty() {
-                self.expected.iter().collect()
+                htmlescape::encode_minimal(&self.expected.iter().collect::<String>())
             } else if self.provided == self.expected {
                 provided
             } else {

@@ -8,6 +8,8 @@ mod relearning;
 mod review;
 mod revlog;
 
+use fsrs::NextStates;
+use fsrs::FSRS;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use revlog::RevlogEntryPartial;
@@ -22,10 +24,13 @@ use super::states::StateContext;
 use super::timespan::answer_button_time_collapsible;
 use super::timing::SchedTimingToday;
 use crate::card::CardQueue;
+use crate::card::CardType;
 use crate::deckconfig::DeckConfig;
 use crate::deckconfig::LeechAction;
 use crate::decks::Deck;
 use crate::prelude::*;
+use crate::scheduler::fsrs::memory_state::single_card_revlog_to_item;
+use crate::search::SearchNode;
 
 #[derive(Copy, Clone)]
 pub enum Rating {
@@ -60,6 +65,10 @@ struct CardStateUpdater {
     timing: SchedTimingToday,
     now: TimestampSecs,
     fuzz_seed: Option<u64>,
+    /// Set if FSRS is enabled.
+    fsrs_next_states: Option<NextStates>,
+    /// Set if FSRS is enabled.
+    desired_retention: Option<f32>,
 }
 
 impl CardStateUpdater {
@@ -87,6 +96,7 @@ impl CardStateUpdater {
             } else {
                 0
             },
+            fsrs_next_states: self.fsrs_next_states.clone(),
         }
     }
 
@@ -150,6 +160,7 @@ impl CardStateUpdater {
     ) -> RevlogEntryPartial {
         self.card.reps += 1;
         self.card.original_due = 0;
+        self.card.desired_retention = self.desired_retention;
 
         let revlog = match next {
             NormalState::New(next) => self.apply_new_state(current, next),
@@ -335,13 +346,38 @@ impl Collection {
         )
     }
 
-    fn card_state_updater(&mut self, card: Card) -> Result<CardStateUpdater> {
+    fn card_state_updater(&mut self, mut card: Card) -> Result<CardStateUpdater> {
         let timing = self.timing_today()?;
         let deck = self
             .storage
             .get_deck(card.deck_id)?
             .or_not_found(card.deck_id)?;
         let config = self.home_deck_config(deck.config_id(), card.original_deck_id)?;
+        let fsrs_enabled = self.get_config_bool(BoolKey::Fsrs);
+        let fsrs_next_states = if fsrs_enabled {
+            let fsrs = FSRS::new(Some(&config.inner.fsrs_weights))?;
+            if card.memory_state.is_none() && card.ctype != CardType::New {
+                // Card has been moved or imported into an FSRS deck after weights were set,
+                // and will need its initial memory state to be calculated based on review
+                // history.
+                let revlog = self.revlog_for_srs(SearchNode::CardIds(card.id.to_string()))?;
+                let item = single_card_revlog_to_item(revlog, timing.next_day_at);
+                card.set_memory_state(&fsrs, item);
+            }
+            let days_elapsed = self
+                .storage
+                .time_of_last_review(card.id)?
+                .map(|ts| ts.elapsed_days_since(timing.next_day_at))
+                .unwrap_or_default() as u32;
+            Some(fsrs.next_states(
+                card.memory_state.map(Into::into),
+                config.inner.desired_retention,
+                days_elapsed,
+            ))
+        } else {
+            None
+        };
+        let desired_retention = fsrs_enabled.then_some(config.inner.desired_retention);
         Ok(CardStateUpdater {
             fuzz_seed: get_fuzz_seed(&card),
             card,
@@ -349,6 +385,8 @@ impl Collection {
             config,
             timing,
             now: TimestampSecs::now(),
+            fsrs_next_states,
+            desired_retention,
         })
     }
 

@@ -13,7 +13,7 @@ import { notesDataStore, tagsWritable, zoomResetValue } from "./store";
 import Toast from "./Toast.svelte";
 import { addShapesToCanvasFromCloze } from "./tools/add-from-cloze";
 import { enableSelectable, moveShapeToCanvasBoundaries } from "./tools/lib";
-import { undoRedoInit } from "./tools/tool-undo-redo";
+import { undoStack } from "./tools/tool-undo-redo";
 import type { Size } from "./types";
 
 export const setupMaskEditor = async (
@@ -34,6 +34,7 @@ export const setupMaskEditor = async (
         image.height = size.height;
         image.width = size.width;
         setCanvasZoomRatio(canvas, instance);
+        undoStack.reset();
     };
 
     return canvas;
@@ -75,6 +76,7 @@ export const setupMaskEditorForEdit = async (
         addShapesToCanvasFromCloze(canvas, clozeNote.occlusions);
         enableSelectable(canvas, true);
         addClozeNotesToTextEditor(clozeNote.header, clozeNote.backExtra, clozeNote.tags);
+        undoStack.reset();
         window.requestAnimationFrame(() => {
             image.style.visibility = "visible";
         });
@@ -87,11 +89,11 @@ function initCanvas(onChange: () => void): fabric.Canvas {
     const canvas = new fabric.Canvas("canvas");
     tagsWritable.set([]);
     globalThis.canvas = canvas;
+    undoStack.setCanvas(canvas);
     // enables uniform scaling by default without the need for the Shift key
     canvas.uniformScaling = false;
     canvas.uniScaleKey = "none";
     moveShapeToCanvasBoundaries(canvas);
-    undoRedoInit(canvas);
     canvas.on("object:modified", onChange);
     canvas.on("object:removed", onChange);
     return canvas;
@@ -102,7 +104,7 @@ const getImageData = (imageData): string => {
     return "data:image/png;base64," + b64encoded;
 };
 
-const setCanvasZoomRatio = (
+export const setCanvasZoomRatio = (
     canvas: fabric.Canvas,
     instance: PanZoom,
 ): void => {
@@ -140,3 +142,22 @@ function containerSize(): Size {
         height: container.clientHeight,
     };
 }
+
+export async function resetIOImage(path) {
+    const imageData = await getImageForOcclusion({ path });
+    const image = document.getElementById("image") as HTMLImageElement;
+    image.src = getImageData(imageData.data!);
+    const canvas = globalThis.canvas;
+
+    image.onload = function() {
+        const size = optimumCssSizeForCanvas(
+            { width: image.naturalWidth, height: image.naturalHeight },
+            containerSize(),
+        );
+        canvas.setWidth(size.width);
+        canvas.setHeight(size.height);
+        image.height = size.height;
+        image.width = size.width;
+    };
+}
+globalThis.resetIOImage = resetIOImage;

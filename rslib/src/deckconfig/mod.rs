@@ -62,10 +62,13 @@ const DEFAULT_DECK_CONFIG_INNER: DeckConfigInner = DeckConfigInner {
     disable_autoplay: false,
     cap_answer_time_to_secs: 60,
     show_timer: false,
+    stop_timer_on_answer: false,
     skip_question_when_replaying_answer: false,
     bury_new: false,
     bury_reviews: false,
     bury_interday_learning: false,
+    fsrs_weights: vec![],
+    desired_retention: 0.9,
     other: Vec::new(),
 };
 
@@ -135,12 +138,12 @@ impl Collection {
         &mut self,
         config: &mut DeckConfig,
     ) -> Result<()> {
-        let usn = Some(self.usn()?);
+        let usn = self.usn()?;
 
         if config.id.0 == 0 {
-            self.add_deck_config_inner(config, usn)
+            self.add_deck_config_inner(config, Some(usn))
         } else {
-            config.set_modified(usn.unwrap());
+            config.set_modified(usn);
             self.storage
                 .add_or_update_deck_config_with_existing_id(config)
         }
@@ -264,6 +267,12 @@ pub(crate) fn ensure_deck_config_values_valid(config: &mut DeckConfigInner) {
         default.cap_answer_time_to_secs,
         1,
         9999,
+    );
+    ensure_f32_valid(
+        &mut config.desired_retention,
+        default.desired_retention,
+        0.7,
+        0.97,
     );
 }
 

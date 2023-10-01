@@ -3,6 +3,7 @@
 
 mod adding;
 mod ankidroid;
+mod ankiweb;
 mod card_rendering;
 mod collection;
 mod config;
@@ -13,33 +14,49 @@ mod import_export;
 mod ops;
 mod sync;
 
+use std::ops::Deref;
 use std::result;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
+use futures::future::AbortHandle;
 use once_cell::sync::OnceCell;
 use prost::Message;
+use reqwest::Client;
 use tokio::runtime;
 use tokio::runtime::Runtime;
 
 use crate::backend::dbproxy::db_command_bytes;
 use crate::backend::sync::SyncState;
 use crate::prelude::*;
-use crate::progress::AbortHandleSlot;
 use crate::progress::Progress;
 use crate::progress::ProgressState;
 use crate::progress::ThrottlingProgressHandler;
 
-pub struct Backend {
-    col: Arc<Mutex<Option<Collection>>>,
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct Backend(Arc<BackendInner>);
+
+impl Deref for Backend {
+    type Target = BackendInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct BackendInner {
+    col: Mutex<Option<Collection>>,
     pub(crate) tr: I18n,
     server: bool,
-    sync_abort: AbortHandleSlot,
+    sync_abort: Mutex<Option<AbortHandle>>,
     progress_state: Arc<Mutex<ProgressState>>,
     runtime: OnceCell<Runtime>,
-    state: Arc<Mutex<BackendState>>,
-    backup_task: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
+    state: Mutex<BackendState>,
+    backup_task: Mutex<Option<JoinHandle<Result<()>>>>,
+    media_sync_task: Mutex<Option<JoinHandle<Result<()>>>>,
+    web_client: OnceCell<Client>,
 }
 
 #[derive(Default)]
@@ -61,19 +78,21 @@ pub fn init_backend(init_msg: &[u8]) -> result::Result<Backend, String> {
 
 impl Backend {
     pub fn new(tr: I18n, server: bool) -> Backend {
-        Backend {
-            col: Arc::new(Mutex::new(None)),
+        Backend(Arc::new(BackendInner {
+            col: Mutex::new(None),
             tr,
             server,
-            sync_abort: Arc::new(Mutex::new(None)),
+            sync_abort: Mutex::new(None),
             progress_state: Arc::new(Mutex::new(ProgressState {
                 want_abort: false,
                 last_progress: None,
             })),
             runtime: OnceCell::new(),
-            state: Arc::new(Mutex::new(BackendState::default())),
-            backup_task: Arc::new(Mutex::new(None)),
-        }
+            state: Mutex::new(BackendState::default()),
+            backup_task: Mutex::new(None),
+            media_sync_task: Mutex::new(None),
+            web_client: OnceCell::new(),
+        }))
     }
 
     pub fn i18n(&self) -> &I18n {
@@ -116,6 +135,12 @@ impl Backend {
             })
             .handle()
             .clone()
+    }
+
+    fn web_client(&self) -> &Client {
+        // currently limited to http1, as nginx doesn't support http2 proxies
+        self.web_client
+            .get_or_init(|| Client::builder().http1_only().build().unwrap())
     }
 
     fn db_command(&self, input: &[u8]) -> Result<Vec<u8>> {
