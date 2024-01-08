@@ -127,7 +127,7 @@ impl Card {
     /// date' or an add-on has changed the due date, this won't be accurate.
     pub(crate) fn days_since_last_review(&self, timing: &SchedTimingToday) -> Option<u32> {
         if !self.is_due_in_days() {
-            Some(0)
+            Some((timing.next_day_at.0 as u32).saturating_sub(self.due.max(0) as u32) / 86_400)
         } else {
             self.due_time(timing).map(|due| {
                 due.adding_secs(-86_400 * self.interval as i64)
@@ -152,7 +152,7 @@ impl Column {
         match self {
             Self::Answer => tr.browsing_answer(),
             Self::CardMod => tr.search_card_modified(),
-            Self::Cards => tr.browsing_card(),
+            Self::Cards => tr.card_stats_card_template(),
             Self::Deck => tr.decks_deck(),
             Self::Due => tr.statistics_due_date(),
             Self::Custom => tr.browsing_addon(),
@@ -161,7 +161,7 @@ impl Column {
             Self::Lapses => tr.scheduling_lapses(),
             Self::NoteCreation => tr.browsing_created(),
             Self::NoteMod => tr.search_note_modified(),
-            Self::Notetype => tr.browsing_note(),
+            Self::Notetype => tr.card_stats_note_type(),
             Self::Question => tr.browsing_question(),
             Self::Reps => tr.scheduling_reviews(),
             Self::SortField => tr.browsing_sort_field(),
@@ -204,7 +204,15 @@ impl Column {
         .into()
     }
 
-    pub fn default_order(self) -> anki_proto::search::browser_columns::Sorting {
+    pub fn default_cards_order(self) -> anki_proto::search::browser_columns::Sorting {
+        self.default_order(false)
+    }
+
+    pub fn default_notes_order(self) -> anki_proto::search::browser_columns::Sorting {
+        self.default_order(true)
+    }
+
+    fn default_order(self, notes: bool) -> anki_proto::search::browser_columns::Sorting {
         use anki_proto::search::browser_columns::Sorting;
         match self {
             Column::Question | Column::Answer | Column::Custom => Sorting::None,
@@ -219,10 +227,14 @@ impl Column {
             | Column::Interval
             | Column::NoteCreation
             | Column::NoteMod
-            | Column::Stability
-            | Column::Difficulty
-            | Column::Retrievability
             | Column::Reps => Sorting::Descending,
+            Column::Stability | Column::Difficulty | Column::Retrievability => {
+                if notes {
+                    Sorting::None
+                } else {
+                    Sorting::Descending
+                }
+            }
         }
     }
 

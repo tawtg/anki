@@ -1,6 +1,5 @@
 ### Text shown on the "Deck Options" screen
 
-
 ## Top section
 
 # Used in the deck configuration screen to show how many decks are used
@@ -44,6 +43,11 @@ deck-config-new-cards-ignore-review-limit-tooltip =
     By default, the review limit also applies to new cards, and no new cards will be
     shown when the review limit has been reached. If this option is enabled, new cards
     will be shown regardless of the review limit.
+deck-config-apply-all-parent-limits = Limits start from top
+deck-config-apply-all-parent-limits-tooltip =
+    By default, limits start from the deck you select. If this option is enabled, the limits will
+    start from the top-level deck instead, which can be useful if you wish to study individual
+    sub-decks, while enforcing a total limit on cards/day.
 deck-config-affects-entire-collection = Affects the entire collection.
 
 ## Daily limit tabs: please try to keep these as short as the English version,
@@ -118,7 +122,7 @@ deck-config-bury-priority-tooltip =
     When Anki gathers cards, it first gathers intraday learning cards, then
     interday learning cards, then reviews, and finally new cards. This affects
     how burying works:
-
+    
     - If you have all burying options enabled, the sibling that comes earliest in
     that list will be shown. For example, a review card will be shown in preference
     to a new card.
@@ -222,6 +226,20 @@ deck-config-maximum-answer-secs-tooltip =
 deck-config-show-answer-timer-tooltip =
     In the review screen, show a timer that counts the number of seconds you're
     taking to review each card.
+deck-config-stop-timer-on-answer = Stop timer on answer
+deck-config-stop-timer-on-answer-tooltip =
+    Whether to stop the timer when the answer is revealed.
+    This doesn't affect statistics.
+
+## Auto Advance section
+
+deck-config-seconds-to-show-question = Seconds to show question for
+deck-config-seconds-to-show-question-tooltip-2 = When auto advance is activated, the number of seconds to wait before revealing the answer. Set to 0 to disable.
+deck-config-seconds-to-show-answer = Seconds to show answer for
+deck-config-seconds-to-show-answer-tooltip-2 = When auto advance is activated, the number of seconds to wait before applying the answer action. Set to 0 to disable.
+deck-config-answer-action = Answer action
+deck-config-answer-action-tooltip = The action to perform on the current card before automatically advancing to the next one.
+deck-config-wait-for-audio-tooltip = Wait for audio to finish before automatically revealing answer or next question
 
 ## Audio section
 
@@ -234,10 +252,6 @@ deck-config-skip-question-when-replaying = Skip question when replaying answer
 deck-config-always-include-question-audio-tooltip =
     Whether the question audio should be included when the Replay action is
     used while looking at the answer side of a card.
-deck-config-stop-timer-on-answer = Stop timer on answer
-deck-config-stop-timer-on-answer-tooltip =
-    Whether to stop the timer when the answer is revealed.
-    This doesn't affect statistics.
 ## Advanced section
 
 deck-config-advanced-title = Advanced
@@ -281,6 +295,7 @@ deck-config-confirm-remove-name = Remove { $name }?
 
 deck-config-save-button = Save
 deck-config-save-to-all-subdecks = Save to All Subdecks
+deck-config-save-and-optimize = Optimize All Presets
 deck-config-revert-button-tooltip = Restore this setting to its default value.
 
 ## These strings are shown via the Description button at the bottom of the
@@ -316,29 +331,108 @@ deck-config-which-deck = Which deck would you like to display options for?
 ## Messages related to the FSRS scheduler
 
 deck-config-updating-cards = Updating cards: { $current_cards_count }/{ $total_cards_count }...
-deck-config-invalid-weights = Weights must be either left blank to use the defaults, or must be 17 comma-separated numbers.
+deck-config-invalid-weights = Parameters must be either left blank to use the defaults, or must be 17 comma-separated numbers.
 deck-config-not-enough-history = Insufficient review history to perform this operation.
+deck-config-unable-to-determine-desired-retention =
+    Unable to determine an optimal retention.
 deck-config-must-have-1000-reviews =
     { $count ->
         [one] Only { $count } review was found.
-        *[other] Only { $count } reviews were found.
-    } You must have at least 1000 reviews to generate custom weights.
+       *[other] Only { $count } reviews were found.
+    } You must have at least 1000 reviews to generate custom parameters.
 # Numbers that control how aggressively the FSRS algorithm schedules cards
-deck-config-weights = Model weights
-deck-config-compute-optimal-weights = Optimize FSRS weights
+deck-config-weights = FSRS parameters
+deck-config-compute-optimal-weights = Optimize FSRS parameters
 deck-config-compute-optimal-retention = Compute optimal retention
 deck-config-optimize-button = Optimize
 deck-config-compute-button = Compute
-deck-config-analyze-button = Analyze
+deck-config-optimize-all-tip = You can optimize all presets at once by using the button at the top.
+deck-config-evaluate-button = Evaluate
 deck-config-desired-retention = Desired retention
+deck-config-sm2-retention = SM2 retention
 deck-config-smaller-is-better = Smaller numbers indicate a better fit to your review history.
-deck-config-steps-too-large-for-fsrs = When FSRS is enabled, learning steps over 1 day are not recommended.
+deck-config-steps-too-large-for-fsrs = When FSRS is enabled, steps of 1 day or more are not recommended.
 deck-config-get-params = Get Params
 deck-config-fsrs-on-all-clients =
     Please ensure all of your Anki clients are Anki(Mobile) 23.10+ or AnkiDroid 2.17+. FSRS will
     not work correctly if one of your clients is older.
-deck-config-set-optimal-retention = Set desired retention to { $num }
+deck-config-estimated-retention = Estimated retention: { $num }
 deck-config-complete = { $num }% complete.
+deck-config-iterations = Iteration: { $count }...
+deck-config-reschedule-cards-on-change = Reschedule cards on change
+deck-config-fsrs-tooltip =
+    Affects the entire collection.
+
+    The Free Spaced Repetition Scheduler (FSRS) is an alternative to Anki's legacy SuperMemo 2 (SM2) scheduler.
+    By more accurately determining when you are likely to forget, it can help you remember
+    more material in the same amount of time. This setting is shared by all deck presets.
+
+    If you previously used the 'custom scheduling' version of FSRS, please make
+    sure you clear out the custom scheduling section before enabling this option.
+deck-config-desired-retention-tooltip =
+    The default value of 0.9 will schedule cards so you have a 90% chance of remembering them when
+    they come up for review again. If you increase this value, Anki will show cards more frequently
+    to increase the chances of you remembering them. If you decrease the value, Anki will show cards
+    less frequently, and you will forget more of them. Be conservative when adjusting this - higher
+    values will greatly increase your workload, and lower values can be demoralizing when you forget
+    a lot of material.
+deck-config-sm2-retention-tooltip =
+    If your actual retention before switching to FSRS was significantly different from 0.9, adjusting
+    this value will allow Anki to better estimate your memory state when it encounters cards that are
+    missing review logs. Since review logs typically won't be missing unless you explicitly deleted them
+    to free up space, most users will not need to adjust this.
+deck-config-weights-tooltip =
+    FSRS parameters affect how cards are scheduled. Anki will start with default parameters. Once
+    you've accumulated 1000+ reviews, you can use the option below to optimize the parameters to best
+    match your performance in decks using this preset.
+deck-config-reschedule-cards-on-change-tooltip =
+    Affects the entire collection, and is not saved.
+
+    This option controls whether the due dates of cards will be changed when you enable FSRS, or optimize
+    the parameters. The default is not to reschedule cards: future reviews will use the new scheduling, but
+    there will be no immediate change to your workload. If rescheduling is enabled, the due dates of cards
+    will be changed.
+deck-config-reschedule-cards-warning =
+    Depending on your desired retention, this can result in a large number of cards becoming
+    due, so is not recommended when first switching from SM2.
+
+    Use this option sparingly, as it will add a review entry to each of your cards, and
+    increase the size of your collection.
+deck-config-compute-optimal-weights-tooltip =
+    Once you've done 1000+ reviews in Anki, you can use the Optimize button to analyze your review history,
+    and automatically generate parameters that are optimal for your memory and the content you're studying.
+    If you have decks that vary wildly in difficulty, it is recommended to assign them separate presets, as
+    the parameters for easy decks and hard decks will be different. There is no need to optimize your parameters
+    frequently - once every few months is sufficient.
+    
+    By default, parameters will be calculated from the review history of all decks using the current preset. You can
+    optionally adjust the search before calculating the parameters, if you'd like to alter which cards are used for
+    optimizing the parameters.
+deck-config-compute-optimal-retention-tooltip =
+    This tool assumes you're starting with 0 cards, and will attempt to calculate the amount of material you'll
+    be able to retain in the given time frame. The estimated retention will greatly depend on your inputs, and
+    if it significantly differs from 0.9, it's a sign that the time you've allocated each day is either too low
+    or too high for the amount of cards you're trying to learn. This number can be useful as a reference, but it
+    is not recommended to copy it into the desired retention field.
+deck-config-please-save-your-changes-first = Please save your changes first.
+deck-config-a-100-day-interval = 
+    { $days ->
+        [one] A 100 day interval will become { $days } day.
+       *[other] A 100 day interval will become { $days } days.
+    }
+deck-config-percent-of-reviews =  
+    { $reviews ->
+        [one] { $pct }% of { $reviews } review
+       *[other] { $pct }% of { $reviews } reviews
+    }
+deck-config-optimizing-preset = Optimizing preset { $current_count }/{ $total_count }...
+deck-config-fsrs-must-be-enabled = FSRS must be enabled first.
+
+deck-config-wait-for-audio = Wait for audio
+deck-config-show-reminder = Show Reminder
+deck-config-answer-again = Answer Again
+deck-config-answer-hard = Answer Hard
+deck-config-answer-good = Answer Good
 
 ## NO NEED TO TRANSLATE. This text is no longer used by Anki, and will be removed in the future.
 

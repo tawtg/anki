@@ -5,10 +5,13 @@ import type fabric from "fabric";
 import type { PanZoom } from "panzoom";
 import { get } from "svelte/store";
 
-import { zoomResetValue } from "../store";
+import { opacityStateStore, zoomResetValue, zoomResetX } from "../store";
 
 export const SHAPE_MASK_COLOR = "#ffeba2";
 export const BORDER_COLOR = "#212121";
+export const TEXT_BACKGROUND_COLOR = "#ffffff";
+export const TEXT_FONT_FAMILY = "Arial";
+export const TEXT_PADDING = 5;
 
 let _clipboard;
 
@@ -18,7 +21,10 @@ export const stopDraw = (canvas: fabric.Canvas): void => {
     canvas.off("mouse:move");
 };
 
-export const enableSelectable = (canvas: fabric.Canvas, select: boolean): void => {
+export const enableSelectable = (
+    canvas: fabric.Canvas,
+    select: boolean,
+): void => {
     canvas.selection = select;
     canvas.forEachObject(function(o) {
         o.selectable = select;
@@ -53,8 +59,15 @@ export const groupShapes = (canvas: fabric.Canvas): void => {
         return;
     }
 
-    canvas.getActiveObject().toGroup();
-    canvas.requestRenderAll();
+    const activeObject = canvas.getActiveObject();
+    const items = activeObject.getObjects();
+    items.forEach((item) => {
+        item.set({ opacity: 1 });
+    });
+    activeObject.toGroup().set({
+        opacity: get(opacityStateStore) ? 0.4 : 1,
+    });
+    redraw(canvas);
 };
 
 export const unGroupShapes = (canvas: fabric.Canvas): void => {
@@ -71,23 +84,43 @@ export const unGroupShapes = (canvas: fabric.Canvas): void => {
     canvas.remove(group);
 
     items.forEach((item) => {
+        item.set({ opacity: get(opacityStateStore) ? 0.4 : 1 });
         canvas.add(item);
     });
 
-    canvas.requestRenderAll();
+    redraw(canvas);
 };
 
 export const zoomIn = (instance: PanZoom): void => {
-    instance.smoothZoom(0, 0, 1.25);
+    const center = getCanvasCenter();
+    instance.smoothZoom(center.x, center.y, 1.25);
 };
 
 export const zoomOut = (instance: PanZoom): void => {
-    instance.smoothZoom(0, 0, 0.5);
+    const center = getCanvasCenter();
+    instance.smoothZoom(center.x, center.y, 0.8);
 };
 
 export const zoomReset = (instance: PanZoom): void => {
-    instance.moveTo(0, 0);
-    instance.smoothZoomAbs(0, 0, get(zoomResetValue));
+    setCenterXForZoom(globalThis.canvas);
+    instance.moveTo(get(zoomResetX), 0);
+    instance.smoothZoomAbs(get(zoomResetX), 0, get(zoomResetValue));
+};
+
+export const getCanvasCenter = () => {
+    const canvas = globalThis.canvas.getElement();
+    const rect = canvas.getBoundingClientRect();
+    const centerX = rect.x + rect.width / 2;
+    const centerY = rect.y + rect.height / 2;
+    return { x: centerX, y: centerY };
+};
+
+export const setCenterXForZoom = (canvas: fabric.Canvas) => {
+    const editor = document.querySelector(".editor-main")!;
+    const editorWidth = editor.clientWidth;
+    const canvasWidth = canvas.getElement().offsetWidth;
+    const centerX = editorWidth / 2 - canvasWidth / 2;
+    zoomResetX.set(centerX);
 };
 
 const copyItem = (canvas: fabric.Canvas): void => {
@@ -131,11 +164,15 @@ const pasteItem = (canvas: fabric.Canvas): void => {
         _clipboard.top += 10;
         _clipboard.left += 10;
         canvas.setActiveObject(clonedObj);
-        canvas.requestRenderAll();
+        redraw(canvas);
     });
 };
 
-export const makeMaskTransparent = (canvas: fabric.Canvas, opacity = false): void => {
+export const makeMaskTransparent = (
+    canvas: fabric.Canvas,
+    opacity = false,
+): void => {
+    opacityStateStore.set(opacity);
     const objects = canvas.getObjects();
     objects.forEach((object) => {
         object.set({
@@ -152,16 +189,22 @@ export const moveShapeToCanvasBoundaries = (canvas: fabric.Canvas): void => {
         if (!activeObject) {
             return;
         }
-        if (activeObject.type === "activeSelection" || activeObject.type === "rect") {
-            modifiedSelection(canvas, activeObject);
+        if (activeObject.type === "rect") {
+            modifiedRectangle(canvas, activeObject);
         }
         if (activeObject.type === "ellipse") {
             modifiedEllipse(canvas, activeObject);
         }
+        if (activeObject.type === "i-text") {
+            modifiedText(canvas, activeObject);
+        }
     });
 };
 
-const modifiedSelection = (canvas: fabric.Canvas, object: fabric.Object): void => {
+const modifiedRectangle = (
+    canvas: fabric.Canvas,
+    object: fabric.Object,
+): void => {
     const newWidth = object.width * object.scaleX;
     const newHeight = object.height * object.scaleY;
 
@@ -174,7 +217,10 @@ const modifiedSelection = (canvas: fabric.Canvas, object: fabric.Object): void =
     setShapePosition(canvas, object);
 };
 
-const modifiedEllipse = (canvas: fabric.Canvas, object: fabric.Object): void => {
+const modifiedEllipse = (
+    canvas: fabric.Canvas,
+    object: fabric.Object,
+): void => {
     const newRx = object.rx * object.scaleX;
     const newRy = object.ry * object.scaleY;
     const newWidth = object.width * object.scaleX;
@@ -191,28 +237,81 @@ const modifiedEllipse = (canvas: fabric.Canvas, object: fabric.Object): void => 
     setShapePosition(canvas, object);
 };
 
-const setShapePosition = (canvas: fabric.Canvas, object: fabric.Object): void => {
+const modifiedText = (canvas: fabric.Canvas, object: fabric.Object): void => {
+    setShapePosition(canvas, object);
+};
+
+const setShapePosition = (
+    canvas: fabric.Canvas,
+    object: fabric.Object,
+): void => {
     if (object.left < 0) {
         object.set({ left: 0 });
     }
     if (object.top < 0) {
         object.set({ top: 0 });
     }
-    if (object.left + object.width + object.strokeWidth > canvas.width) {
-        object.set({ left: canvas.width - object.width });
+    if (object.left + object.width * object.scaleX + object.strokeWidth > canvas.width) {
+        object.set({ left: canvas.width - object.width * object.scaleX });
     }
-    if (object.top + object.height + object.strokeWidth > canvas.height) {
-        object.set({ top: canvas.height - object.height });
+    if (object.top + object.height * object.scaleY + object.strokeWidth > canvas.height) {
+        object.set({ top: canvas.height - object.height * object.scaleY });
     }
     object.setCoords();
 };
 
-export function disableRotation(obj: fabric.Object): void {
-    obj.setControlsVisibility({
-        mtr: false,
+export function enableUniformScaling(canvas: fabric.Canvas, obj: fabric.Object): void {
+    obj.setControlsVisibility({ mb: false, ml: false, mt: false, mr: false });
+    let timer: number;
+    obj.on("scaling", (e) => {
+        if (["bl", "br", "tr", "tl"].includes(e.transform.corner)) {
+            clearTimeout(timer);
+            canvas.uniformScaling = true;
+            timer = setTimeout(() => {
+                canvas.uniformScaling = false;
+            }, 500);
+        }
     });
 }
 
 export function addBorder(obj: fabric.Object): void {
     obj.stroke = BORDER_COLOR;
 }
+
+export const redraw = (canvas: fabric.Canvas): void => {
+    canvas.requestRenderAll();
+};
+
+export const clear = (canvas: fabric.Canvas): void => {
+    canvas.clear();
+};
+
+export const makeShapeRemainInCanvas = (canvas: fabric.Canvas) => {
+    canvas.on("object:moving", function(e) {
+        const obj = e.target;
+        if (obj.getScaledHeight() > obj.canvas.height || obj.getScaledWidth() > obj.canvas.width) {
+            return;
+        }
+
+        obj.setCoords();
+
+        if (obj.getBoundingRect().top < 0 || obj.getBoundingRect().left < 0) {
+            obj.top = Math.max(obj.top, obj.top - obj.getBoundingRect().top);
+            obj.left = Math.max(obj.left, obj.left - obj.getBoundingRect().left);
+        }
+
+        if (
+            obj.getBoundingRect().top + obj.getBoundingRect().height > obj.canvas.height
+            || obj.getBoundingRect().left + obj.getBoundingRect().width > obj.canvas.width
+        ) {
+            obj.top = Math.min(
+                obj.top,
+                obj.canvas.height - obj.getBoundingRect().height + obj.top - obj.getBoundingRect().top,
+            );
+            obj.left = Math.min(
+                obj.left,
+                obj.canvas.width - obj.getBoundingRect().width + obj.left - obj.getBoundingRect().left,
+            );
+        }
+    });
+};

@@ -138,7 +138,10 @@ class MessageBox(QMessageBox):
         icon: QMessageBox.Icon = QMessageBox.Icon.NoIcon,
         help: HelpPageArgument | None = None,
         title: str = "Anki",
-        buttons: Sequence[str | QMessageBox.StandardButton] | None = None,
+        buttons: Sequence[
+            str | QMessageBox.StandardButton | tuple[str, QMessageBox.ButtonRole]
+        ]
+        | None = None,
         default_button: int = 0,
         textFormat: Qt.TextFormat = Qt.TextFormat.PlainText,
         modality: Qt.WindowModality = Qt.WindowModality.WindowModal,
@@ -161,6 +164,11 @@ class MessageBox(QMessageBox):
                 b = self.addButton(button, QMessageBox.ButtonRole.ActionRole)
             elif isinstance(button, QMessageBox.StandardButton):
                 b = self.addButton(button)
+                # a translator has complained the default Qt translation is inappropriate, so we override it
+                if button == QMessageBox.StandardButton.Discard:
+                    b.setText(tr.actions_discard())
+            elif isinstance(button, tuple):
+                b = self.addButton(button[0], button[1])
             else:
                 continue
             if callback is not None:
@@ -193,7 +201,10 @@ def ask_user(
 def ask_user_dialog(
     text: str,
     callback: Callable[[int], None],
-    buttons: Sequence[str | QMessageBox.StandardButton] | None = None,
+    buttons: Sequence[
+        str | QMessageBox.StandardButton | tuple[str, QMessageBox.ButtonRole]
+    ]
+    | None = None,
     default_button: int = 1,
     **kwargs: Any,
 ) -> MessageBox:
@@ -494,6 +505,7 @@ class GetTextDialog(QDialog):
                 b.button(QDialogButtonBox.StandardButton.Help).clicked,
                 self.helpRequested,
             )
+        self.l.setFocus()
 
     def accept(self) -> None:
         return QDialog.accept(self)
@@ -1098,39 +1110,23 @@ def add_ellipsis_to_action_label(*actions: QAction) -> None:
 
 def supportText() -> str:
     import platform
-    import time
 
     from aqt import mw
 
     platname = platform.platform()
 
-    def schedVer() -> str:
-        try:
-            if mw.col.v3_scheduler():
-                return "3"
-            else:
-                return str(mw.col.sched_ver())
-        except:
-            return "?"
-
-    lc = mw.pm.last_addon_update_check()
-    lcfmt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lc))
-
     return """\
-Anki {} Python {} Qt {} PyQt {}
+Anki {} {} {}
+Python {} Qt {} PyQt {}
 Platform: {}
-Flags: frz={} ao={} sv={}
-Add-ons, last update check: {}
 """.format(
         version_with_build(),
+        "(src)" if not getattr(sys, "frozen", False) else "",
+        "(ao)" if mw.addonManager.dirty else "",
         platform.python_version(),
         qVersion(),
         PYQT_VERSION_STR,
         platname,
-        getattr(sys, "frozen", False),
-        mw.addonManager.dirty,
-        schedVer(),
-        lcfmt,
     )
 
 

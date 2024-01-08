@@ -5,6 +5,7 @@ import type { PlainMessage } from "@bufbuild/protobuf";
 import type {
     DeckConfigsForUpdate,
     DeckConfigsForUpdate_CurrentDeck,
+    UpdateDeckConfigsMode,
     UpdateDeckConfigsRequest,
 } from "@tslib/anki/deck_config_pb";
 import { DeckConfig, DeckConfig_Config, DeckConfigsForUpdate_CurrentDeck_Limits } from "@tslib/anki/deck_config_pb";
@@ -23,11 +24,6 @@ export interface ConfigWithCount {
     useCount: number;
 }
 
-export interface ParentLimits {
-    newCards: number;
-    reviews: number;
-}
-
 /** Info for showing the top selector */
 export interface ConfigListEntry {
     idx: number;
@@ -40,25 +36,25 @@ export class DeckOptionsState {
     readonly currentConfig: Writable<DeckConfig_Config>;
     readonly currentAuxData: Writable<Record<string, unknown>>;
     readonly configList: Readable<ConfigListEntry[]>;
-    readonly parentLimits: Readable<ParentLimits>;
     readonly cardStateCustomizer: Writable<string>;
     readonly currentDeck: DeckConfigsForUpdate_CurrentDeck;
     readonly deckLimits: Writable<DeckConfigsForUpdate_CurrentDeck_Limits>;
     readonly defaults: DeckConfig_Config;
     readonly addonComponents: Writable<DynamicSvelteComponent[]>;
-    readonly v3Scheduler: boolean;
     readonly newCardsIgnoreReviewLimit: Writable<boolean>;
+    readonly applyAllParentLimits: Writable<boolean>;
     readonly fsrs: Writable<boolean>;
+    readonly fsrsReschedule: Writable<boolean> = writable(false);
     readonly currentPresetName: Writable<string>;
 
     private targetDeckId: DeckOptionsId;
     private configs: ConfigWithCount[];
     private selectedIdx: number;
     private configListSetter!: (val: ConfigListEntry[]) => void;
-    private parentLimitsSetter!: (val: ParentLimits) => void;
     private modifiedConfigs: Set<DeckOptionsId> = new Set();
     private removedConfigs: DeckOptionsId[] = [];
     private schemaModified: boolean;
+    private _presetAssignmentsChanged = false;
 
     constructor(targetDeckId: DeckOptionsId, data: DeckConfigsForUpdate) {
         this.targetDeckId = targetDeckId;
@@ -77,10 +73,10 @@ export class DeckOptionsState {
             this.configs.findIndex((c) => c.config.id === this.currentDeck.configId),
         );
         this.sortConfigs();
-        this.v3Scheduler = data.v3Scheduler;
         this.cardStateCustomizer = writable(data.cardStateCustomizer);
         this.deckLimits = writable(data.currentDeck?.limits ?? createLimits());
         this.newCardsIgnoreReviewLimit = writable(data.newCardsIgnoreReviewLimit);
+        this.applyAllParentLimits = writable(data.applyAllParentLimits);
         this.fsrs = writable(data.fsrs);
 
         // decrement the use count of the starting item, as we'll apply +1 to currently
@@ -93,17 +89,12 @@ export class DeckOptionsState {
             this.configListSetter = set;
             return;
         });
-        this.parentLimits = readable(this.getParentLimits(), (set) => {
-            this.parentLimitsSetter = set;
-            return;
-        });
         this.schemaModified = data.schemaModified;
         this.addonComponents = writable([]);
 
         // create a temporary subscription to force our setters to be set immediately,
         // so unit tests don't get stale results
         get(this.configList);
-        get(this.parentLimits);
 
         // update our state when the current config is changed
         this.currentConfig.subscribe((val) => this.onCurrentConfigChanged(val));
@@ -112,6 +103,7 @@ export class DeckOptionsState {
 
     setCurrentIndex(index: number): void {
         this.selectedIdx = index;
+        this._presetAssignmentsChanged = true;
         this.updateCurrentConfig();
         // use counts have changed
         this.updateConfigList();
@@ -156,6 +148,7 @@ export class DeckOptionsState {
         const configWithCount = { config, useCount: 0 };
         this.configs.push(configWithCount);
         this.selectedIdx = this.configs.length - 1;
+        this._presetAssignmentsChanged = true;
         this.sortConfigs();
         this.updateCurrentConfig();
         this.updateConfigList();
@@ -181,12 +174,13 @@ export class DeckOptionsState {
         }
         this.configs.splice(this.selectedIdx, 1);
         this.selectedIdx = Math.max(0, this.selectedIdx - 1);
+        this._presetAssignmentsChanged = true;
         this.updateCurrentConfig();
         this.updateConfigList();
     }
 
     dataForSaving(
-        applyToChildren: boolean,
+        mode: UpdateDeckConfigsMode,
     ): PlainMessage<UpdateDeckConfigsRequest> {
         const modifiedConfigsExcludingCurrent = this.configs
             .map((c) => c.config)
@@ -205,17 +199,23 @@ export class DeckOptionsState {
             targetDeckId: this.targetDeckId,
             removedConfigIds: this.removedConfigs,
             configs,
-            applyToChildren,
+            mode,
             cardStateCustomizer: get(this.cardStateCustomizer),
             limits: get(this.deckLimits),
             newCardsIgnoreReviewLimit: get(this.newCardsIgnoreReviewLimit),
+            applyAllParentLimits: get(this.applyAllParentLimits),
             fsrs: get(this.fsrs),
+            fsrsReschedule: get(this.fsrsReschedule),
         };
     }
 
-    async save(applyToChildren: boolean): Promise<void> {
+    presetAssignmentsChanged(): boolean {
+        return this._presetAssignmentsChanged;
+    }
+
+    async save(mode: UpdateDeckConfigsMode): Promise<void> {
         await updateDeckConfigs(
-            this.dataForSaving(applyToChildren),
+            this.dataForSaving(mode),
         );
     }
 
@@ -227,7 +227,6 @@ export class DeckOptionsState {
                 this.modifiedConfigs.add(configOuter.id);
             }
         }
-        this.parentLimitsSetter?.(this.getParentLimits());
     }
 
     private onCurrentAuxDataChanged(data: Record<string, unknown>): void {
@@ -253,7 +252,6 @@ export class DeckOptionsState {
     private updateCurrentConfig(): void {
         this.currentConfig.set(this.getCurrentConfig());
         this.currentAuxData.set(this.getCurrentAuxData());
-        this.parentLimitsSetter?.(this.getParentLimits());
     }
 
     private updateConfigList(): void {
@@ -291,22 +289,6 @@ export class DeckOptionsState {
             };
         });
         return list;
-    }
-
-    private getParentLimits(): ParentLimits {
-        const parentConfigs = this.configs.filter((c) => this.currentDeck.parentConfigIds.includes(c.config.id));
-        const newCards = parentConfigs.reduce(
-            (previous, current) => Math.min(previous, current.config.config?.newPerDay ?? 0),
-            2 ** 31,
-        );
-        const reviews = parentConfigs.reduce(
-            (previous, current) => Math.min(previous, current.config.config?.reviewsPerDay ?? 0),
-            2 ** 31,
-        );
-        return {
-            newCards,
-            reviews,
-        };
     }
 }
 

@@ -173,6 +173,20 @@ Please see [this separate page](./editing.md) for setting up an editor/IDE.
 
 See [this page](./build.md)
 
+## Generating documentation
+
+For Rust:
+
+```
+cargo doc --open
+```
+
+For Python:
+
+```
+./ninja python:sphinx && open out/python/sphinx/html/py-modindex.html
+```
+
 ## Environmental Variables
 
 If ANKIDEV is set before starting Anki, some extra log messages will be printed on stdout,
@@ -191,7 +205,8 @@ If ANKI_PROFILE_CODE is set, Python profiling data will be written on exit.
 Anki's official binary packages are created with `./ninja bundle`. The bundling
 process was created specifically for the official builds, and is provided as-is;
 we are unfortunately not able to provide assistance with any issues you may run
-into when using it.
+into when using it. You'll need to run
+`git submodule update --checkout qt/bundle/PyOxidizer` first.
 
 ## Mixing development and study
 

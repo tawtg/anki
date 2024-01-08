@@ -335,16 +335,18 @@ impl<'a> Context<'a> {
 
     fn import_note(&mut self, ctx: NoteContext, log: &mut NoteLog) -> Result<()> {
         match self.dupe_resolution {
-            _ if !ctx.is_dupe() => self.add_note(ctx, log)?,
-            DupeResolution::Duplicate if ctx.is_guid_dupe() => {
-                log.duplicate.push(ctx.note.into_log_note())
-            }
+            _ if ctx.dupes.is_empty() => self.add_note(ctx, log)?,
+            DupeResolution::Duplicate if ctx.is_guid_dupe() => log
+                .duplicate
+                .push(ctx.dupes.into_iter().next().unwrap().note.into_log_note()),
             DupeResolution::Duplicate if !ctx.has_first_field() => {
                 log.empty_first_field.push(ctx.note.into_log_note())
             }
             DupeResolution::Duplicate => self.add_note(ctx, log)?,
             DupeResolution::Update => self.update_with_note(ctx, log)?,
-            DupeResolution::Preserve => log.first_field_match.push(ctx.note.into_log_note()),
+            DupeResolution::Preserve => log
+                .first_field_match
+                .push(ctx.dupes.into_iter().next().unwrap().note.into_log_note()),
         }
         Ok(())
     }
@@ -479,13 +481,9 @@ impl DuplicateUpdateResult {
 }
 
 impl NoteContext<'_> {
-    fn is_dupe(&self) -> bool {
-        !self.dupes.is_empty()
-    }
-
     fn is_guid_dupe(&self) -> bool {
         self.dupes
-            .get(0)
+            .first()
             .map_or(false, |d| d.note.guid == self.note.guid)
     }
 
@@ -572,11 +570,11 @@ impl ForeignNote {
     }
 
     fn first_field_is_the_empty_string(&self) -> bool {
-        matches!(self.fields.get(0), Some(Some(s)) if s.is_empty())
+        matches!(self.fields.first(), Some(Some(s)) if s.is_empty())
     }
 
     fn first_field_is_unempty(&self) -> bool {
-        matches!(self.fields.get(0), Some(Some(s)) if !s.is_empty())
+        matches!(self.fields.first(), Some(Some(s)) if !s.is_empty())
     }
 
     fn normalize_fields(&mut self, normalize_text: bool) {
@@ -597,7 +595,7 @@ impl ForeignNote {
 
     fn first_field_stripped(&self) -> Option<Cow<str>> {
         self.fields
-            .get(0)
+            .first()
             .and_then(|s| s.as_ref())
             .map(|field| strip_html_preserving_media_filenames(field.as_str()))
     }

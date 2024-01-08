@@ -4,23 +4,26 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
     import * as tr from "@tslib/ftl";
+    import { renderMarkdown } from "@tslib/helpers";
     import Carousel from "bootstrap/js/dist/carousel";
     import Modal from "bootstrap/js/dist/modal";
-    import { createEventDispatcher, getContext, onMount } from "svelte";
+    import { createEventDispatcher, getContext, onDestroy, onMount } from "svelte";
 
+    import { registerModalClosingHandler } from "../sveltelib/modal-closing";
     import { pageTheme } from "../sveltelib/theme";
     import Badge from "./Badge.svelte";
     import Col from "./Col.svelte";
     import { modalsKey } from "./context-keys";
     import HelpSection from "./HelpSection.svelte";
-    import { infoCircle, manualIcon } from "./icons";
+    import { infoCircle } from "./icons";
     import Row from "./Row.svelte";
-    import type { HelpItem } from "./types";
+    import { type HelpItem, HelpItemScheduler } from "./types";
 
     export let title: string;
     export let url: string;
     export let startIndex = 0;
     export let helpSections: HelpItem[];
+    export let fsrs = false;
 
     export const modalKey: string = Math.random().toString(36).substring(2);
 
@@ -38,8 +41,21 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     const dispatch = createEventDispatcher();
 
+    const { set: setModalOpen, remove: removeModalClosingHandler } =
+        registerModalClosingHandler(onOkClicked);
+
+    function onShown() {
+        setModalOpen(true);
+    }
+
+    function onHidden() {
+        setModalOpen(false);
+    }
+
     onMount(() => {
-        modal = new Modal(modalRef);
+        modalRef.addEventListener("shown.bs.modal", onShown);
+        modalRef.addEventListener("hidden.bs.modal", onHidden);
+        modal = new Modal(modalRef, { keyboard: false });
         carousel = new Carousel(carouselRef, { interval: false, ride: false });
         /* Bootstrap's Carousel.Event interface doesn't seem to work as a type here */
         carouselRef.addEventListener("slide.bs.carousel", (e: any) => {
@@ -49,10 +65,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         modals.set(modalKey, modal);
     });
 
+    onDestroy(() => {
+        removeModalClosingHandler();
+        modalRef.removeEventListener("shown.bs.modal", onShown);
+        modalRef.removeEventListener("hidden.bs.modal", onHidden);
+    });
+
     let activeIndex = startIndex;
 </script>
 
-<Badge on:click={() => modal.show()}>
+<Badge on:click={() => modal.show()} iconSize={125}>
     {@html infoCircle}
 </Badge>
 
@@ -66,26 +88,31 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h1 class="modal-title" id="modalLabel">
-                    {title}
-                </h1>
+                <div style="display: flex;">
+                    <h1 class="modal-title" id="modalLabel">
+                        {title}
+                    </h1>
+                    <button
+                        type="button"
+                        class="btn-close"
+                        class:invert={$pageTheme.isDark}
+                        data-bs-dismiss="modal"
+                        aria-label="Close"
+                    />
+                </div>
                 {#if url}
-                    <a class="manual-badge" href={url}>
-                        <Badge
-                            iconSize={120}
-                            tooltip={tr.helpOpenManualChapter({ name: title })}
-                        >
-                            {@html manualIcon}
-                        </Badge>
-                    </a>
+                    <div class="chapter-redirect">
+                        {@html renderMarkdown(
+                            tr.helpForMoreInfo({
+                                link: `<a href="${url}" title="${tr.helpOpenManualChapter(
+                                    {
+                                        name: title,
+                                    },
+                                )}">${title}</a>`,
+                            }),
+                        )}
+                    </div>
                 {/if}
-                <button
-                    type="button"
-                    class="btn-close"
-                    class:invert={$pageTheme.isDark}
-                    data-bs-dismiss="modal"
-                    aria-label="Close"
-                />
             </div>
             <div class="modal-body">
                 <Row --cols={4}>
@@ -93,7 +120,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                         <nav>
                             <div id="nav">
                                 <ul>
-                                    {#each helpSections as section, i}
+                                    {#each helpSections as item, i}
                                         <li>
                                             <button
                                                 on:click={() => {
@@ -101,8 +128,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                                                     carousel.to(activeIndex);
                                                 }}
                                                 class:active={i == activeIndex}
+                                                class:d-none={fsrs
+                                                    ? item.sched ===
+                                                      HelpItemScheduler.SM2
+                                                    : item.sched ==
+                                                      HelpItemScheduler.FSRS}
                                             >
-                                                {section.title}
+                                                {item.title}
                                             </button>
                                         </li>
                                     {/each}
@@ -121,6 +153,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                                     <div
                                         class="carousel-item"
                                         class:active={i == startIndex}
+                                        class:d-none={fsrs
+                                            ? item.sched === HelpItemScheduler.SM2
+                                            : item.sched == HelpItemScheduler.FSRS}
                                     >
                                         <HelpSection {item} />
                                     </div>
@@ -132,7 +167,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-primary" on:click={onOkClicked}>
-                    OK
+                    {tr.helpOk()}
                 </button>
             </div>
         </div>
@@ -145,15 +180,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     .modal-title {
-        margin-right: 0.75rem;
-    }
-
-    .manual-badge {
-        text-decoration: none;
-        color: var(--fg-subtle);
-        &:hover {
-            color: var(--fg);
-        }
+        margin-inline-end: 0.75rem;
     }
 
     .modal-content {
@@ -176,7 +203,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         display: block;
         padding: 0.5rem 0.75rem;
         text-decoration: none;
-        text-align: left;
+        text-align: start;
         min-width: 250px;
         background-color: var(--canvas);
         border: none;
@@ -186,7 +213,19 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             background-color: var(--canvas-inset);
         }
         &.active {
-            border-left: 4px solid var(--border-focus);
+            border-inline-start: 4px solid var(--border-focus);
         }
+    }
+
+    .modal-header {
+        flex-direction: column;
+        align-items: normal;
+        padding-bottom: 0;
+    }
+
+    .chapter-redirect {
+        width: 100%;
+        color: var(--fg-subtle);
+        font-size: small;
     }
 </style>

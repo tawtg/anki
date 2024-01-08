@@ -6,13 +6,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import type { Writable } from "svelte/store";
 
     import Container from "../components/Container.svelte";
-    import DynamicallySlottable from "../components/DynamicallySlottable.svelte";
-    import Item from "../components/Item.svelte";
     import Row from "../components/Row.svelte";
     import type { DynamicSvelteComponent } from "../sveltelib/dynamicComponent";
     import Addons from "./Addons.svelte";
     import AdvancedOptions from "./AdvancedOptions.svelte";
     import AudioOptions from "./AudioOptions.svelte";
+    import AutoAdvance from "./AutoAdvance.svelte";
     import BuryOptions from "./BuryOptions.svelte";
     import ConfigSelector from "./ConfigSelector.svelte";
     import DailyLimits from "./DailyLimits.svelte";
@@ -67,65 +66,51 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         --gutter-block="0.75rem"
         class="container-columns"
     >
-        <DynamicallySlottable slotHost={Item} api={options}>
-            <Item>
-                <Row class="row-columns">
-                    <DailyLimits {state} api={dailyLimits} bind:onPresetChange />
-                </Row>
-            </Item>
+        <div>
+            <Row class="row-columns">
+                <DailyLimits {state} api={dailyLimits} bind:onPresetChange />
+            </Row>
 
-            <Item>
-                <Row class="row-columns">
-                    <NewOptions {state} api={newOptions} />
-                </Row>
-            </Item>
+            <Row class="row-columns">
+                <NewOptions {state} api={newOptions} />
+            </Row>
 
-            <Item>
-                <Row class="row-columns">
-                    <LapseOptions {state} api={lapseOptions} />
-                </Row>
-            </Item>
+            <Row class="row-columns">
+                <LapseOptions {state} api={lapseOptions} />
+            </Row>
 
-            {#if state.v3Scheduler}
-                <Item>
-                    <Row class="row-columns">
-                        <DisplayOrder {state} api={displayOrder} />
-                    </Row>
-                </Item>
-            {/if}
+            <Row class="row-columns">
+                <DisplayOrder {state} api={displayOrder} />
+            </Row>
 
-            <Item>
-                <Row class="row-columns">
-                    <TimerOptions {state} api={timerOptions} />
-                </Row>
-            </Item>
+            <Row class="row-columns">
+                <BuryOptions {state} api={buryOptions} />
+            </Row>
+        </div>
 
-            <Item>
-                <Row class="row-columns">
-                    <BuryOptions {state} api={buryOptions} />
-                </Row>
-            </Item>
+        <div>
+            <Row class="row-columns">
+                <AudioOptions {state} api={audioOptions} />
+            </Row>
 
-            <Item>
-                <Row class="row-columns">
-                    <AudioOptions {state} api={audioOptions} />
-                </Row>
-            </Item>
+            <Row class="row-columns">
+                <TimerOptions {state} api={timerOptions} />
+            </Row>
+
+            <Row class="row-columns">
+                <AutoAdvance {state} api={timerOptions} />
+            </Row>
 
             {#if $addons.length}
-                <Item>
-                    <Row class="row-columns">
-                        <Addons {state} />
-                    </Row>
-                </Item>
+                <Row class="row-columns">
+                    <Addons {state} />
+                </Row>
             {/if}
 
-            <Item>
-                <Row class="row-columns">
-                    <AdvancedOptions {state} api={advancedOptions} />
-                </Row>
-            </Item>
-        </DynamicallySlottable>
+            <Row class="row-columns">
+                <AdvancedOptions {state} api={advancedOptions} />
+            </Row>
+        </div>
     </Container>
 </div>
 
@@ -135,22 +120,14 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     .deck-options-page {
         overflow-x: hidden;
 
+        :global(.container-columns) {
+            display: grid;
+            gap: 20px;
+        }
+
         @include bp.with-breakpoint("lg") {
-            :global(.container) {
-                display: block;
-            }
-
             :global(.container-columns) {
-                column-count: 2;
-                column-gap: 5em;
-
-                :global(.container) {
-                    break-inside: avoid;
-                }
-            }
-
-            :global(.row-columns) {
-                display: block;
+                grid-template-columns: repeat(2, 1fr);
             }
         }
     }

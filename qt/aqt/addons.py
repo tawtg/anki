@@ -31,6 +31,7 @@ import aqt.main
 from anki.collection import AddonInfo
 from anki.httpclient import HttpClient
 from anki.lang import without_unicode_isolation
+from anki.utils import int_version_to_str
 from aqt import gui_hooks
 from aqt.qt import *
 from aqt.utils import (
@@ -49,6 +50,7 @@ from aqt.utils import (
     showInfo,
     showText,
     showWarning,
+    supportText,
     tooltip,
     tr,
 )
@@ -229,6 +231,10 @@ class AddonManager:
         return os.path.join(root, module)
 
     def loadAddons(self) -> None:
+        from aqt import mw
+
+        broken: list[str] = []
+        error_text = ""
         for addon in self.all_addon_meta():
             if not addon.enabled:
                 continue
@@ -240,18 +246,56 @@ class AddonManager:
             except AbortAddonImport:
                 pass
             except:
-                error = html.escape(
-                    tr.addons_failed_to_load(
-                        name=addon.human_name(),
-                        traceback=traceback.format_exc(),
-                    )
-                )
-                txt = f"<h1>{tr.qt_misc_error()}</h1><div style='white-space: pre-wrap'>{error}</div>"
-                showText(
-                    txt,
-                    type="html",
-                    copyBtn=True,
-                )
+                name = html.escape(addon.human_name())
+                page = addon.page()
+                if page:
+                    broken.append(f"<a href={page}>{name}</a>")
+                else:
+                    broken.append(name)
+                tb = traceback.format_exc()
+                print(tb)
+                error_text += f"When loading {name}:\n{tb}\n"
+
+        if broken:
+            addons = "\n\n- " + "\n- ".join(broken)
+            error = tr.addons_failed_to_load2(
+                addons=addons,
+            )
+            txt = f"# {tr.addons_startup_failed()}\n{error}"
+            html2 = markdown.markdown(txt)
+            box: QDialogButtonBox
+            (diag, box) = showText(
+                html2,
+                type="html",
+                run=False,
+            )
+
+            def on_check() -> None:
+                tooltip(tr.addons_checking())
+
+                def on_done(log: list[DownloadLogEntry]) -> None:
+                    if not log:
+                        tooltip(tr.addons_no_updates_available())
+
+                mw.check_for_addon_updates(by_user=True, on_done=on_done)
+
+            def on_copy() -> None:
+                txt = supportText() + "\n" + error_text
+                QApplication.clipboard().setText(txt)
+                tooltip(tr.about_copied_to_clipboard(), parent=diag)
+
+            check = box.addButton(
+                tr.addons_check_for_updates(), QDialogButtonBox.ButtonRole.ActionRole
+            )
+            check.clicked.connect(on_check)
+
+            copy = box.addButton(
+                tr.about_copy_debug_info(), QDialogButtonBox.ButtonRole.ActionRole
+            )
+            copy.clicked.connect(on_copy)
+
+            # calling show immediately appears to crash
+            mw.progress.single_shot(1000, diag.show)
 
     def onAddonsDialog(self) -> None:
         aqt.dialogs.open("AddonsDialog", self)
@@ -782,10 +826,12 @@ class AddonsDialog(QDialog):
     def compatible_string(self, addon: AddonMeta) -> str:
         min = addon.min_version
         if min is not None and min > _current_version:
-            return f"Anki >= 2.1.{min}"
+            ver = int_version_to_str(min)
+            return f"Anki >= {ver}"
         else:
             max = abs(addon.max_version)
-            return f"Anki <= 2.1.{max}"
+            ver = int_version_to_str(max)
+            return f"Anki <= {ver}"
 
     def should_grey(self, addon: AddonMeta) -> bool:
         return not addon.enabled or not addon.compatible()
@@ -1311,12 +1357,14 @@ class ChooseAddonsToUpdateList(QListWidget):
 
 
 class ChooseAddonsToUpdateDialog(QDialog):
+    _on_done: Callable[[list[int]], None]
+
     def __init__(
         self, parent: QWidget, mgr: AddonManager, updated_addons: list[AddonInfo]
     ) -> None:
         QDialog.__init__(self, parent)
         self.setWindowTitle(tr.addons_choose_update_window_title())
-        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self.mgr = mgr
         self.updated_addons = updated_addons
         self.setup()
@@ -1343,15 +1391,15 @@ class ChooseAddonsToUpdateDialog(QDialog):
         layout.addWidget(button_box)
         self.setLayout(layout)
 
-    def ask(self) -> list[int]:
-        "Returns a list of selected addons' ids"
-        ret = self.exec()
+    def ask(self, on_done: Callable[[list[int]], None]) -> None:
+        self._on_done = on_done
+        self.show()
+
+    def accept(self) -> None:
         saveGeom(self, "addonsChooseUpdate")
         self.addons_list_widget.save_check_state()
-        if ret == QDialog.DialogCode.Accepted:
-            return self.addons_list_widget.get_selected_addon_ids()
-        else:
-            return []
+        self._on_done(self.addons_list_widget.get_selected_addon_ids())
+        QDialog.accept(self)
 
 
 def fetch_update_info(ids: list[int]) -> list[AddonInfo]:
@@ -1448,10 +1496,11 @@ def prompt_to_update(
         if not prompt_update:
             return
 
-    ids = ChooseAddonsToUpdateDialog(parent, mgr, updated_addons).ask()
-    if not ids:
-        return
-    download_addons(parent, mgr, ids, on_done, client)
+    def after_choosing(ids: list[int]) -> None:
+        if ids:
+            download_addons(parent, mgr, ids, on_done, client)
+
+    ChooseAddonsToUpdateDialog(parent, mgr, updated_addons).ask(after_choosing)
 
 
 # Editing config

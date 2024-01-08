@@ -90,6 +90,18 @@ class EditorMode(Enum):
     BROWSER = 2
 
 
+class EditorState(Enum):
+    """
+    Current input state of the editing UI.
+    """
+
+    INITIAL = -1
+    FIELDS = 0
+    IO_PICKER = 1
+    IO_MASKS = 2
+    IO_FIELDS = 3
+
+
 class Editor:
     """The screen that embeds an editing widget should listen for changes via
     the `operation_did_execute` hook, and call set_note() when the editor needs
@@ -124,6 +136,7 @@ class Editor:
         self.last_field_index: int | None = None
         # current card, for card layout
         self.card: Card | None = None
+        self.state: EditorState = EditorState.INITIAL
         self._init_links()
         self.setupOuter()
         self.add_webview()
@@ -474,6 +487,22 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
             collapsed = collapsed_string == "true"
             self.setTagsCollapsed(collapsed)
 
+        elif cmd.startswith("editorState"):
+            (_, new_state_id, old_state_id) = cmd.split(":", 2)
+            self.signal_state_change(
+                EditorState(int(new_state_id)), EditorState(int(old_state_id))
+            )
+
+        elif cmd.startswith("ioImageLoaded"):
+            (_, path_or_nid_data) = cmd.split(":", 1)
+            path_or_nid = json.loads(path_or_nid_data)
+            if self.addMode:
+                gui_hooks.editor_mask_editor_did_load_image(self, path_or_nid)
+            else:
+                gui_hooks.editor_mask_editor_did_load_image(
+                    self, NoteId(int(path_or_nid))
+                )
+
         elif cmd in self._links:
             return self._links[cmd](self)
 
@@ -482,6 +511,12 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
 
     def mungeHTML(self, txt: str) -> str:
         return gui_hooks.editor_will_munge_html(txt, self)
+
+    def signal_state_change(
+        self, new_state: EditorState, old_state: EditorState
+    ) -> None:
+        self.state = new_state
+        gui_hooks.editor_state_did_change(self, new_state, old_state)
 
     # Setting/unsetting the current note
     ######################################################################
@@ -551,7 +586,6 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
             setCloseHTMLTags({json.dumps(self.mw.col.get_config("closeHTMLTags", True))});
             triggerChanges();
             setIsImageOcclusion({json.dumps(self.current_notetype_is_image_occlusion())});
-            setIsEditMode({json.dumps(self.editorMode != EditorMode.ADD_CARDS)});
             """
 
         if self.addMode:
@@ -1090,6 +1124,12 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
             self.web.eval(f"setImageField({json.dumps(image_field_html)})")
         self._setup_mask_editor(io_options)
 
+    def reset_image_occlusion(self) -> None:
+        self.web.eval("resetIOImageLoaded()")
+
+    def update_occlusions_field(self) -> None:
+        self.web.eval("updateOcclusionsField()")
+
     def _setup_mask_editor(self, io_options: dict):
         self.web.eval(
             'require("anki/ui").loaded.then(() =>'
@@ -1363,14 +1403,17 @@ class EditorWebView(AnkiWebView):
         # when we detect the user copying from a field, we store the content
         # here, and use it when they paste, so we avoid filtering field content
         self._internal_field_text_for_paste: str | None = None
+        self._last_known_clipboard_mime: QMimeData | None = None
         clip = self.editor.mw.app.clipboard()
-        qconnect(clip.dataChanged, self._on_clipboard_change)
+        clip.dataChanged.connect(self._on_clipboard_change)
         gui_hooks.editor_web_view_did_init(self)
 
     def user_cut_or_copied(self) -> None:
         self._store_field_content_on_next_clipboard_change = True
+        self._internal_field_text_for_paste = None
 
     def _on_clipboard_change(self) -> None:
+        self._last_known_clipboard_mime = self.editor.mw.app.clipboard().mimeData()
         if self._store_field_content_on_next_clipboard_change:
             # if the flag was set, save the field data
             self._internal_field_text_for_paste = self._get_clipboard_html_for_field()
@@ -1403,9 +1446,11 @@ class EditorWebView(AnkiWebView):
         return not strip_html
 
     def _onPaste(self, mode: QClipboard.Mode) -> None:
+        # Since _on_clipboard_change doesn't always trigger properly on macOS, we do a double check if any changes were made before pasting
+        if self._last_known_clipboard_mime != self.editor.mw.app.clipboard().mimeData():
+            self._on_clipboard_change()
         extended = self._wantsExtendedPaste()
         if html := self._internal_field_text_for_paste:
-            self._internal_field_text_for_paste = None
             print("reuse internal")
             self.editor.doPaste(html, True, extended)
         else:

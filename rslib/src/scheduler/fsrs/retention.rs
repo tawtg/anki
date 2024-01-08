@@ -50,12 +50,13 @@ impl Collection {
                         p.review_rating_probability_easy,
                     ],
                     loss_aversion: req.loss_aversion,
+                    learn_limit: usize::MAX,
+                    review_limit: usize::MAX,
                 },
                 &req.weights,
                 |ip| {
                     anki_progress
                         .update(false, |p| {
-                            p.total = ip.total as u32;
                             p.current = ip.current as u32;
                         })
                         .is_ok()
@@ -73,7 +74,7 @@ impl Collection {
             .search_cards_into_table(search, SortMode::NoOrder)?
             .col
             .storage
-            .get_revlog_entries_for_searched_cards_in_order()?;
+            .get_revlog_entries_for_searched_cards_in_card_order()?;
 
         let first_rating_count = revlogs
             .iter()
@@ -122,7 +123,11 @@ impl Collection {
             let mut arr = default;
             revlogs
                 .iter()
-                .filter(|r| r.review_kind == RevlogReviewKind::Review && r.button_chosen > 0)
+                .filter(|r| {
+                    r.review_kind == RevlogReviewKind::Review
+                        && r.button_chosen > 0
+                        && r.taken_millis > 0
+                })
                 .sorted_by(|a, b| a.button_chosen.cmp(&b.button_chosen))
                 .group_by(|r| r.button_chosen)
                 .into_iter()
@@ -140,10 +145,15 @@ impl Collection {
         let learn_cost = {
             let revlogs_filter = revlogs
                 .iter()
-                .filter(|r| r.review_kind == RevlogReviewKind::Learning && r.button_chosen >= 1)
+                .filter(|r| {
+                    r.review_kind == RevlogReviewKind::Learning
+                        && r.button_chosen >= 1
+                        && r.taken_millis > 0
+                })
                 .map(|r| r.taken_millis);
-            if total_first > 0.0 {
-                revlogs_filter.sum::<u32>() as f64 / total_first / 1000.0
+            let length = revlogs_filter.clone().count() as f64;
+            if length > 0.0 {
+                revlogs_filter.sum::<u32>() as f64 / length / 1000.0
             } else {
                 return Err(AnkiError::FsrsInsufficientData);
             }
@@ -174,11 +184,12 @@ impl Collection {
             }
             let mut arr = [0.0; 5];
             for (review_kind, group) in group_sec_by_review_kind.iter().enumerate() {
-                if group.is_empty() && review_kind == RevlogReviewKind::Relearning as usize {
-                    return Err(AnkiError::FsrsInsufficientData);
-                }
                 let average_secs = group.iter().sum::<u32>() as f64 / group.len() as f64 / 1000.0;
-                arr[review_kind] = average_secs
+                arr[review_kind] = if average_secs.is_nan() {
+                    0.0
+                } else {
+                    average_secs
+                }
             }
             arr
         };

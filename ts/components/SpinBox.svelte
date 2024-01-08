@@ -35,7 +35,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     function decimalPlaces(value: number) {
-        if (Math.floor(value) === value) return 0;
+        if (Math.floor(value) === value) {
+            return 0;
+        }
         return value.toString().split(".")[1].length || 0;
     }
 
@@ -94,11 +96,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         on:focusout={() => (focused = false)}
     />
     {#if isDesktop()}
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
         <div
             class="spinner decrement"
             class:active={value > min}
             tabindex="-1"
             title={tr.actionsDecrementValue()}
+            role="button"
             on:click={() => {
                 input.focus();
                 if (value > min) {
@@ -120,11 +124,13 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 {@html chevronDown}
             </IconConstrain>
         </div>
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
         <div
             class="spinner increment"
             class:active={value < max}
             tabindex="-1"
             title={tr.actionsIncrementValue()}
+            role="button"
             on:click={() => {
                 input.focus();
                 if (value < max) {

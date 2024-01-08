@@ -24,6 +24,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     export let options: ImportAnkiPackageOptions;
 
     const settings = {
+        withScheduling: {
+            title: tr.importingAlsoImportProgress(),
+            help: tr.importingIncludeReviewsHelp(),
+            url: HelpPage.PackageImporting.scheduling,
+        },
+        withDeckConfigs: {
+            title: tr.importingWithDeckConfigs(),
+            help: tr.importingWithDeckConfigsHelp(),
+            url: HelpPage.PackageImporting.scheduling,
+        },
         mergeNotetypes: {
             title: tr.importingMergeNotetypes(),
             help: tr.importingMergeNotetypesHelp(),
@@ -38,11 +48,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             title: tr.importingUpdateNotetypes(),
             help: tr.importingUpdateNotetypesHelp(),
             url: HelpPage.PackageImporting.updating,
-        },
-        withScheduling: {
-            title: tr.importingIncludeReviews(),
-            help: tr.importingIncludeReviewsHelp(),
-            url: HelpPage.PackageImporting.scheduling,
         },
     };
     const helpSections = Object.values(settings) as HelpItem[];
@@ -75,41 +80,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 }}
             />
 
-            <SwitchRow bind:value={options.mergeNotetypes} defaultValue={false}>
-                <SettingTitle
-                    on:click={() =>
-                        openHelpModal(Object.keys(settings).indexOf("mergeNotetypes"))}
-                >
-                    {settings.mergeNotetypes.title}
-                </SettingTitle>
-            </SwitchRow>
-
-            <EnumSelectorRow
-                bind:value={options.updateNotes}
-                defaultValue={0}
-                choices={updateChoices()}
-            >
-                <SettingTitle
-                    on:click={() =>
-                        openHelpModal(Object.keys(settings).indexOf("updateNotes"))}
-                >
-                    {settings.updateNotes.title}
-                </SettingTitle>
-            </EnumSelectorRow>
-
-            <EnumSelectorRow
-                bind:value={options.updateNotetypes}
-                defaultValue={0}
-                choices={updateChoices()}
-            >
-                <SettingTitle
-                    on:click={() =>
-                        openHelpModal(Object.keys(settings).indexOf("updateNotetypes"))}
-                >
-                    {settings.updateNotetypes.title}
-                </SettingTitle>
-            </EnumSelectorRow>
-
             <SwitchRow bind:value={options.withScheduling} defaultValue={false}>
                 <SettingTitle
                     on:click={() =>
@@ -118,6 +88,57 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                     {settings.withScheduling.title}
                 </SettingTitle>
             </SwitchRow>
+
+            <SwitchRow bind:value={options.withDeckConfigs} defaultValue={false}>
+                <SettingTitle
+                    on:click={() =>
+                        openHelpModal(Object.keys(settings).indexOf("withDeckConfigs"))}
+                >
+                    {settings.withDeckConfigs.title}
+                </SettingTitle>
+            </SwitchRow>
+
+            <details>
+                <summary>{tr.importingUpdates()}</summary>
+                <SwitchRow bind:value={options.mergeNotetypes} defaultValue={false}>
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf("mergeNotetypes"),
+                            )}
+                    >
+                        {settings.mergeNotetypes.title}
+                    </SettingTitle>
+                </SwitchRow>
+
+                <EnumSelectorRow
+                    bind:value={options.updateNotes}
+                    defaultValue={0}
+                    choices={updateChoices()}
+                >
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(Object.keys(settings).indexOf("updateNotes"))}
+                    >
+                        {settings.updateNotes.title}
+                    </SettingTitle>
+                </EnumSelectorRow>
+
+                <EnumSelectorRow
+                    bind:value={options.updateNotetypes}
+                    defaultValue={0}
+                    choices={updateChoices()}
+                >
+                    <SettingTitle
+                        on:click={() =>
+                            openHelpModal(
+                                Object.keys(settings).indexOf("updateNotetypes"),
+                            )}
+                    >
+                        {settings.updateNotetypes.title}
+                    </SettingTitle>
+                </EnumSelectorRow>
+            </details>
         </TitledContainer>
     </Row>
 </ImportPage>

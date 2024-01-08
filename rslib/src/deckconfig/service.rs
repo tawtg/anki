@@ -51,7 +51,7 @@ impl crate::services::DeckConfigService for Collection {
     ) -> Result<generic::Json> {
         let conf = Collection::get_deck_config(self, input.into(), true)?.unwrap();
         let conf: DeckConfSchema11 = conf.into();
-        Ok(serde_json::to_vec(&conf)?).map(Into::into)
+        Ok(serde_json::to_vec(&conf)?.into())
     }
 
     fn new_deck_config_legacy(&mut self) -> Result<generic::Json> {
@@ -94,15 +94,18 @@ impl From<DeckConfig> for anki_proto::deck_config::DeckConfig {
 
 impl From<anki_proto::deck_config::UpdateDeckConfigsRequest> for UpdateDeckConfigsRequest {
     fn from(c: anki_proto::deck_config::UpdateDeckConfigsRequest) -> Self {
+        let mode = c.mode();
         UpdateDeckConfigsRequest {
             target_deck_id: c.target_deck_id.into(),
             configs: c.configs.into_iter().map(Into::into).collect(),
             removed_config_ids: c.removed_config_ids.into_iter().map(Into::into).collect(),
-            apply_to_children: c.apply_to_children,
+            mode,
             card_state_customizer: c.card_state_customizer,
             limits: c.limits.unwrap_or_default(),
             new_cards_ignore_review_limit: c.new_cards_ignore_review_limit,
+            apply_all_parent_limits: c.apply_all_parent_limits,
             fsrs: c.fsrs,
+            fsrs_reschedule: c.fsrs_reschedule,
         }
     }
 }

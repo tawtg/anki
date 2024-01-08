@@ -111,7 +111,7 @@ impl crate::services::NotetypesService for Collection {
 
         let schema11: NotetypeSchema11 =
             self.storage.get_notetype(ntid)?.or_not_found(ntid)?.into();
-        Ok(serde_json::to_vec(&schema11)?).map(Into::into)
+        Ok(serde_json::to_vec(&schema11)?.into())
     }
 
     fn get_notetype_names(&mut self) -> error::Result<anki_proto::notetypes::NotetypeNames> {
@@ -283,6 +283,7 @@ impl From<ChangeNotetypeInput> for anki_proto::notetypes::ChangeNotetypeRequest 
                 .into_iter()
                 .map(|idx| idx.map(|v| v as i32).unwrap_or(-1))
                 .collect(),
+            is_cloze: i.new_templates.is_none(),
             new_templates: i
                 .new_templates
                 .unwrap_or_default()

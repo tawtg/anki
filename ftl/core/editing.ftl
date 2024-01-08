@@ -70,7 +70,32 @@ editing-from-clipboard = From Clipboard
 editing-alignment = Alignment
 editing-equations = Equations
 editing-no-image-found-on-clipboard = No image found on clipboard.
-
+editing-image-occlusion-mode = Image Occlusion Mode
+editing-image-occlusion-zoom-out = Zoom Out
+editing-image-occlusion-zoom-in = Zoom In
+editing-image-occlusion-zoom-reset = Reset Zoom
+editing-image-occlusion-toggle-translucent = Toggle Translucency
+editing-image-occlusion-delete = Delete
+editing-image-occlusion-duplicate = Duplicate
+editing-image-occlusion-group = Group Selection
+editing-image-occlusion-ungroup = Ungroup Selection
+editing-image-occlusion-alignment = Alignment
+editing-image-occlusion-align-left = Align Left
+editing-image-occlusion-align-h-center = Align Horizontal Centers
+editing-image-occlusion-align-right = Align Right
+editing-image-occlusion-align-top = Align Top
+editing-image-occlusion-align-v-center = Align Vertical Centers
+editing-image-occlusion-align-bottom = Align Bottom
+editing-image-occlusion-select-tool = Select
+editing-image-occlusion-zoom-tool = Zoom
+editing-image-occlusion-rectangle-tool = Rectangle
+editing-image-occlusion-ellipse-tool = Ellipse
+editing-image-occlusion-polygon-tool = Polygon
+editing-image-occlusion-text-tool = Text
+editing-image-occlusion-toggle-mask-editor = Toggle Mask Editor
+editing-image-occlusion-reset = Reset Image Occlusion
+editing-image-occlusion-confirm-reset = Are you sure you want to reset this image occlusion?
+ 
 ## You don't need to translate these strings, as they will be replaced with different ones soon.
 
 editing-html-editor = HTML Editor

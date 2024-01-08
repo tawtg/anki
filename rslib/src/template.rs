@@ -647,7 +647,7 @@ pub fn render_card(
     context.frontside = if context.partial_for_python {
         Some("")
     } else {
-        let Some(RenderedNode::Text { text }) = &qnodes.get(0) else {
+        let Some(RenderedNode::Text { text }) = &qnodes.first() else {
             invalid_input!("should not happen: first node not text");
         };
         Some(text)
@@ -741,9 +741,9 @@ impl ParsedTemplate {
     }
 
     pub(crate) fn contains_field_replacement(&self) -> bool {
-        self.0
-            .iter()
-            .any(|node| matches!(node, ParsedNode::Replacement { key: _, filters: _ }))
+        let mut set = HashSet::new();
+        find_field_references(&self.0, &mut set, false, false);
+        !set.is_empty()
     }
 
     pub(crate) fn add_missing_field_replacement(&mut self, field_name: &str, is_cloze: bool) {

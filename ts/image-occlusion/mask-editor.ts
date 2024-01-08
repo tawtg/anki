@@ -12,21 +12,34 @@ import { optimumCssSizeForCanvas } from "./canvas-scale";
 import { notesDataStore, tagsWritable, zoomResetValue } from "./store";
 import Toast from "./Toast.svelte";
 import { addShapesToCanvasFromCloze } from "./tools/add-from-cloze";
-import { enableSelectable, moveShapeToCanvasBoundaries } from "./tools/lib";
+import {
+    enableSelectable,
+    makeShapeRemainInCanvas,
+    moveShapeToCanvasBoundaries,
+    setCenterXForZoom,
+    zoomReset,
+} from "./tools/lib";
+import { modifiedPolygon } from "./tools/tool-polygon";
 import { undoStack } from "./tools/tool-undo-redo";
 import type { Size } from "./types";
+
+export interface ImageLoadedEvent {
+    path?: string;
+    noteId?: bigint;
+}
 
 export const setupMaskEditor = async (
     path: string,
     instance: PanZoom,
     onChange: () => void,
+    onImageLoaded: (event: ImageLoadedEvent) => void,
 ): Promise<fabric.Canvas> => {
     const imageData = await getImageForOcclusion({ path });
     const canvas = initCanvas(onChange);
 
     // get image width and height
     const image = document.getElementById("image") as HTMLImageElement;
-    image.src = getImageData(imageData.data!);
+    image.src = getImageData(imageData.data!, path);
     image.onload = function() {
         const size = optimumCssSizeForCanvas({ width: image.width, height: image.height }, containerSize());
         canvas.setWidth(size.width);
@@ -35,6 +48,7 @@ export const setupMaskEditor = async (
         image.width = size.width;
         setCanvasZoomRatio(canvas, instance);
         undoStack.reset();
+        onImageLoaded({ path });
     };
 
     return canvas;
@@ -44,6 +58,7 @@ export const setupMaskEditorForEdit = async (
     noteId: number,
     instance: PanZoom,
     onChange: () => void,
+    onImageLoaded: (event: ImageLoadedEvent) => void,
 ): Promise<fabric.Canvas> => {
     const clozeNoteResponse = await getImageOcclusionNote({ noteId: BigInt(noteId) });
     const kind = clozeNoteResponse.value?.case;
@@ -64,7 +79,7 @@ export const setupMaskEditorForEdit = async (
     // get image width and height
     const image = document.getElementById("image") as HTMLImageElement;
     image.style.visibility = "hidden";
-    image.src = getImageData(clozeNote.imageData!);
+    image.src = getImageData(clozeNote.imageData!, clozeNote.imageFileName!);
     image.onload = function() {
         const size = optimumCssSizeForCanvas({ width: image.width, height: image.height }, containerSize());
         canvas.setWidth(size.width);
@@ -79,6 +94,7 @@ export const setupMaskEditorForEdit = async (
         undoStack.reset();
         window.requestAnimationFrame(() => {
             image.style.visibility = "visible";
+            onImageLoaded({ noteId: BigInt(noteId) });
         });
     };
 
@@ -90,18 +106,48 @@ function initCanvas(onChange: () => void): fabric.Canvas {
     tagsWritable.set([]);
     globalThis.canvas = canvas;
     undoStack.setCanvas(canvas);
-    // enables uniform scaling by default without the need for the Shift key
+    // find object per-pixel basis rather than according to bounding box,
+    // allow click through transparent area
+    canvas.perPixelTargetFind = true;
+    // Disable uniform scaling
     canvas.uniformScaling = false;
     canvas.uniScaleKey = "none";
+    // disable rotation globally
+    delete fabric.Object.prototype.controls.mtr;
+    // add a border to corner to handle blend of control
+    fabric.Object.prototype.transparentCorners = false;
+    fabric.Object.prototype.cornerStyle = "circle";
+    fabric.Object.prototype.cornerStrokeColor = "#000000";
+    fabric.Object.prototype.padding = 8;
     moveShapeToCanvasBoundaries(canvas);
-    canvas.on("object:modified", onChange);
+    makeShapeRemainInCanvas(canvas);
+    canvas.on("object:modified", (evt) => {
+        if (evt.target instanceof fabric.Polygon) {
+            modifiedPolygon(canvas, evt.target);
+            undoStack.onObjectModified();
+        }
+        onChange();
+    });
     canvas.on("object:removed", onChange);
+    setCenterXForZoom(canvas);
     return canvas;
 }
 
-const getImageData = (imageData): string => {
+const getImageData = (imageData, path): string => {
     const b64encoded = protoBase64.enc(imageData);
-    return "data:image/png;base64," + b64encoded;
+    const extension = path.split(".").pop();
+    const mimeTypes = {
+        "jpg": "jpeg",
+        "jpeg": "jpeg",
+        "gif": "gif",
+        "svg": "svg+xml",
+        "webp": "webp",
+        "avif": "avif",
+        "png": "png",
+    };
+
+    const type = mimeTypes[extension] || "png";
+    return `data:image/${type};base64,${b64encoded}`;
 };
 
 export const setCanvasZoomRatio = (
@@ -112,7 +158,7 @@ export const setCanvasZoomRatio = (
     const zoomRatioH = (innerHeight - 100) / canvas.height!;
     const zoomRatio = zoomRatioW < zoomRatioH ? zoomRatioW : zoomRatioH;
     zoomResetValue.set(zoomRatio);
-    instance.zoomAbs(0, 0, zoomRatio);
+    zoomReset(instance);
 };
 
 const addClozeNotesToTextEditor = (header: string, backExtra: string, tags: string[]) => {
@@ -143,10 +189,10 @@ function containerSize(): Size {
     };
 }
 
-export async function resetIOImage(path) {
+export async function resetIOImage(path: string, onImageLoaded: (event: ImageLoadedEvent) => void) {
     const imageData = await getImageForOcclusion({ path });
     const image = document.getElementById("image") as HTMLImageElement;
-    image.src = getImageData(imageData.data!);
+    image.src = getImageData(imageData.data!, path);
     const canvas = globalThis.canvas;
 
     image.onload = function() {
@@ -158,6 +204,7 @@ export async function resetIOImage(path) {
         canvas.setHeight(size.height);
         image.height = size.height;
         image.width = size.width;
+        onImageLoaded({ path });
     };
 }
 globalThis.resetIOImage = resetIOImage;

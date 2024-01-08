@@ -7,7 +7,6 @@ import json as _json
 import os
 import platform
 import random
-import re
 import shutil
 import string
 import subprocess
@@ -69,15 +68,11 @@ def strip_html_media(txt: str) -> str:
 
 
 def html_to_text_line(txt: str) -> str:
-    txt = txt.replace("<br>", " ")
-    txt = txt.replace("<br />", " ")
-    txt = txt.replace("<div>", " ")
-    txt = txt.replace("\n", " ")
-    txt = re.sub(r"\[sound:[^]]+\]", "", txt)
-    txt = re.sub(r"\[\[type:[^]]+\]\]", "", txt)
-    txt = strip_html_media(txt)
-    txt = txt.strip()
-    return txt
+    import anki.lang
+
+    return anki.lang.current_i18n.html_to_text_line(
+        text=txt, preserve_media_filenames=True
+    )
 
 
 # IDs
@@ -321,6 +316,19 @@ def int_version() -> int:
     patch_num = int(patch)
 
     return year_num * 10_000 + month_num * 100 + patch_num
+
+
+def int_version_to_str(ver: int) -> str:
+    if ver <= 99:
+        return f"2.1.{ver}"
+    else:
+        year = ver // 10_000
+        month = (ver // 100) % 100
+        patch = ver % 100
+        out = f"{year:02}.{month:02}"
+        if patch:
+            out += f".{patch}"
+        return out
 
 
 # these two legacy aliases are provided without deprecation warnings, as add-ons that want to support

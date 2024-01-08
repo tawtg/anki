@@ -14,7 +14,6 @@ from typing import Any, Literal, Match, Sequence, cast
 import aqt
 import aqt.browser
 import aqt.operations
-from anki import hooks
 from anki.cards import Card, CardId
 from anki.collection import Config, OpChanges, OpChangesWithCount
 from anki.scheduler.base import ScheduleCardsAsNew
@@ -130,14 +129,20 @@ class V3CardInfo:
             return CardAnswer.EASY
 
 
+class AnswerAction(Enum):
+    BURY_CARD = 0
+    ANSWER_AGAIN = 1
+    ANSWER_GOOD = 2
+    ANSWER_HARD = 3
+    SHOW_REMINDER = 4
+
+
 class Reviewer:
     def __init__(self, mw: AnkiQt) -> None:
         self.mw = mw
         self.web = mw.web
         self.card: Card | None = None
-        self.cardQueue: list[Card] = []
         self.previous_card: Card | None = None
-        self.hadCardQueue = False
         self._answeredIds: list[CardId] = []
         self._recordedAudio: str | None = None
         self.typeCorrect: str = None  # web init happens before this is set
@@ -150,7 +155,10 @@ class Reviewer:
         self._previous_card_info = PreviousReviewerCardInfo(self.mw)
         self._states_mutated = True
         self._reps: int = None
-        hooks.card_did_leech.append(self.onLeech)
+        self._show_question_timer: QTimer | None = None
+        self._show_answer_timer: QTimer | None = None
+        self.auto_advance_enabled = False
+        gui_hooks.av_player_did_end_playing.append(self._on_av_player_did_end_playing)
 
     def show(self) -> None:
         if self.mw.col.sched_ver() == 1 or not self.mw.col.v3_scheduler():
@@ -179,10 +187,10 @@ class Reviewer:
     def cleanup(self) -> None:
         gui_hooks.reviewer_will_end()
         self.card = None
+        self.auto_advance_enabled = False
 
     def refresh_if_needed(self) -> None:
         if self._refresh_needed is RefreshNeeded.QUEUES:
-            self.mw.col.reset()
             self.nextCard()
             self.mw.fade_in_webview()
             self._refresh_needed = None
@@ -229,11 +237,7 @@ class Reviewer:
         self.previous_card = self.card
         self.card = None
         self._v3 = None
-
-        if self.mw.col.sched.version < 3:
-            self._get_next_v1_v2_card()
-        else:
-            self._get_next_v3_card()
+        self._get_next_v3_card()
 
         self._previous_card_info.set_card(self.previous_card)
         self._card_info.set_card(self.card)
@@ -247,21 +251,6 @@ class Reviewer:
 
         self._showQuestion()
 
-    def _get_next_v1_v2_card(self) -> None:
-        if self.cardQueue:
-            # undone/edited cards to show
-            card = self.cardQueue.pop()
-            card.start_timer()
-            self.hadCardQueue = True
-        else:
-            if self.hadCardQueue:
-                # the undone/edited cards may be sitting in the regular queue;
-                # need to reset
-                self.mw.col.reset()
-                self.hadCardQueue = False
-            card = self.mw.col.sched.getCard()
-        self.card = card
-
     def _get_next_v3_card(self) -> None:
         assert isinstance(self.mw.col.sched, V3Scheduler)
         output = self.mw.col.sched.get_queued_cards()
@@ -271,22 +260,17 @@ class Reviewer:
         self.card = Card(self.mw.col, backend_card=self._v3.top_card().card)
         self.card.start_timer()
 
-    def get_scheduling_states(self) -> SchedulingStates | None:
-        if v3 := self._v3:
-            return v3.states
-        return None
+    def get_scheduling_states(self) -> SchedulingStates:
+        return self._v3.states
 
-    def get_scheduling_context(self) -> SchedulingContext | None:
-        if v3 := self._v3:
-            return v3.context
-        return None
+    def get_scheduling_context(self) -> SchedulingContext:
+        return self._v3.context
 
     def set_scheduling_states(self, request: SetSchedulingStatesRequest) -> None:
         if request.key != self._state_mutation_key:
             return
 
-        if v3 := self._v3:
-            v3.states = request.states
+        self._v3.states = request.states
 
     def _run_state_mutation_hook(self) -> None:
         def on_eval(result: Any) -> None:
@@ -294,7 +278,7 @@ class Reviewer:
                 # eval failed, usually a syntax error
                 self._states_mutated = True
 
-        if self._v3 and (js := self._state_mutation_js):
+        if js := self._state_mutation_js:
             self._states_mutated = False
             self.web.evalWithCallback(
                 RUN_STATE_MUTATION.format(key=self._state_mutation_key, js=js),
@@ -310,6 +294,23 @@ class Reviewer:
         elif self.state == "answer":
             replay_audio(self.card, False)
         gui_hooks.audio_will_replay(self.web, self.card, self.state == "question")
+
+    def _on_av_player_did_end_playing(self, *args) -> None:
+        def task() -> None:
+            if av_player.queue_is_empty():
+                if (
+                    self._show_question_timer
+                    and self._show_question_timer.remainingTime() <= 0
+                ):
+                    self._on_show_question_timeout()
+                elif (
+                    self._show_answer_timer
+                    and self._show_answer_timer.remainingTime() <= 0
+                ):
+                    self._on_show_answer_timeout()
+
+        # Allow time for audio queue to update
+        self.mw.taskman.run_on_main(lambda: self.mw.progress.single_shot(100, task))
 
     # Initializing the webview
     ##########################################################################
@@ -335,7 +336,7 @@ class Reviewer:
             css=["css/reviewer.css"],
             js=[
                 "js/mathjax.js",
-                "js/vendor/mathjax/tex-chtml.js",
+                "js/vendor/mathjax/tex-chtml-full.js",
                 "js/reviewer.js",
             ],
             context=self,
@@ -392,6 +393,36 @@ class Reviewer:
         self.mw.web.setFocus()
         # user hook
         gui_hooks.reviewer_did_show_question(c)
+        self._auto_advance_to_answer_if_enabled()
+
+    def _auto_advance_to_answer_if_enabled(self) -> None:
+        self._clear_auto_advance_timers()
+        if self.auto_advance_enabled:
+            conf = self.mw.col.decks.config_dict_for_deck_id(
+                self.card.current_deck_id()
+            )
+            if conf["secondsToShowQuestion"]:
+                self._show_answer_timer = self.mw.progress.timer(
+                    int(conf["secondsToShowQuestion"] * 1000),
+                    self._on_show_answer_timeout,
+                    repeat=False,
+                    parent=self.mw,
+                )
+
+    def _on_show_answer_timeout(self) -> None:
+        if self.card is None:
+            return
+        conf = self.mw.col.decks.config_dict_for_deck_id(self.card.current_deck_id())
+        if conf["waitForAudio"] and av_player.current_player:
+            return
+        if (
+            not self.auto_advance_enabled
+            or not self.mw.app.focusWidget()
+            or self.mw.app.focusWidget().window() != self.mw
+        ):
+            self.auto_advance_enabled = False
+            return
+        self._showAnswer()
 
     def autoplay(self, card: Card) -> bool:
         print("use card.autoplay() instead of reviewer.autoplay(card)")
@@ -433,6 +464,49 @@ class Reviewer:
         self.mw.web.setFocus()
         # user hook
         gui_hooks.reviewer_did_show_answer(c)
+        self._auto_advance_to_question_if_enabled()
+
+    def _auto_advance_to_question_if_enabled(self) -> None:
+        self._clear_auto_advance_timers()
+        if self.auto_advance_enabled:
+            conf = self.mw.col.decks.config_dict_for_deck_id(
+                self.card.current_deck_id()
+            )
+            if conf["secondsToShowAnswer"]:
+                self._show_question_timer = self.mw.progress.timer(
+                    int(conf["secondsToShowAnswer"] * 1000),
+                    self._on_show_question_timeout,
+                    repeat=False,
+                    parent=self.mw,
+                )
+
+    def _on_show_question_timeout(self) -> None:
+        if self.card is None:
+            return
+        conf = self.mw.col.decks.config_dict_for_deck_id(self.card.current_deck_id())
+        if conf["waitForAudio"] and av_player.current_player:
+            return
+        if (
+            not self.auto_advance_enabled
+            or not self.mw.app.focusWidget()
+            or self.mw.app.focusWidget().window() != self.mw
+        ):
+            self.auto_advance_enabled = False
+            return
+        try:
+            answer_action = list(AnswerAction)[conf["answerAction"]]
+        except IndexError:
+            answer_action = AnswerAction.ANSWER_GOOD
+        if answer_action == AnswerAction.BURY_CARD:
+            self.bury_current_card()
+        elif answer_action == AnswerAction.ANSWER_AGAIN:
+            self._answerCard(1)
+        elif answer_action == AnswerAction.ANSWER_HARD:
+            self._answerCard(2)
+        elif answer_action == AnswerAction.SHOW_REMINDER:
+            tooltip(tr.studying_answer_time_elapsed())
+        else:
+            self._answerCard(3)
 
     # Answering a card
     ############################################################
@@ -450,32 +524,28 @@ class Reviewer:
         if not proceed:
             return
 
-        if (v3 := self._v3) and (sched := cast(V3Scheduler, self.mw.col.sched)):
-            answer = sched.build_answer(
-                card=self.card,
-                states=v3.states,
-                rating=v3.rating_from_ease(ease),
-            )
+        sched = cast(V3Scheduler, self.mw.col.sched)
+        answer = sched.build_answer(
+            card=self.card,
+            states=self._v3.states,
+            rating=self._v3.rating_from_ease(ease),
+        )
 
-            def after_answer(changes: OpChanges) -> None:
-                if gui_hooks.reviewer_did_answer_card.count() > 0:
-                    self.card.load()
-                self._after_answering(ease)
-                if sched.state_is_leech(answer.new_state):
-                    self.onLeech()
-
-            self.state = "transition"
-            answer_card(parent=self.mw, answer=answer).success(
-                after_answer
-            ).run_in_background(initiator=self)
-        else:
-            self.mw.col.sched.answerCard(self.card, ease)
+        def after_answer(changes: OpChanges) -> None:
+            if gui_hooks.reviewer_did_answer_card.count() > 0:
+                self.card.load()
             self._after_answering(ease)
+            if sched.state_is_leech(answer.new_state):
+                self.onLeech()
+
+        self.state = "transition"
+        answer_card(parent=self.mw, answer=answer).success(
+            after_answer
+        ).run_in_background(initiator=self)
 
     def _after_answering(self, ease: Literal[1, 2, 3, 4]) -> None:
         gui_hooks.reviewer_did_answer_card(self, self.card, ease)
         self._answeredIds.append(self.card.id)
-        self.mw.autosave()
         if not self.check_timebox():
             self.nextCard()
 
@@ -540,6 +610,7 @@ class Reviewer:
             ("5", self.on_pause_audio),
             ("6", self.on_seek_backward),
             ("7", self.on_seek_forward),
+            ("Shift+A", self.toggle_auto_advance),
             *self.korean_shortcuts(),
         ]
 
@@ -792,11 +863,8 @@ timerStopped = false;
     def _answerButtons(self) -> str:
         default = self._defaultEase()
 
-        if v3 := self._v3:
-            assert isinstance(self.mw.col.sched, V3Scheduler)
-            labels = self.mw.col.sched.describe_next_states(v3.states)
-        else:
-            labels = None
+        assert isinstance(self.mw.col.sched, V3Scheduler)
+        labels = self.mw.col.sched.describe_next_states(self._v3.states)
 
         def but(i: int, label: str) -> str:
             if i == default:
@@ -919,6 +987,12 @@ timerStopped = false;
             [tr.studying_audio_and5s(), "7", self.on_seek_forward],
             [tr.studying_record_own_voice(), "Shift+V", self.onRecordVoice],
             [tr.studying_replay_own_voice(), "V", self.onReplayRecorded],
+            [
+                tr.actions_auto_advance(),
+                "Shift+A",
+                self.toggle_auto_advance,
+                dict(checked=self.auto_advance_enabled),
+            ],
         ]
         return opts
 
@@ -958,10 +1032,10 @@ timerStopped = false;
         confirm_deck_then_display_options(self.card)
 
     def on_previous_card_info(self) -> None:
-        self._previous_card_info.toggle()
+        self._previous_card_info.show()
 
     def on_card_info(self) -> None:
-        self._card_info.toggle()
+        self._card_info.show()
 
     def set_flag_on_current_card(self, desired_flag: int) -> None:
         # need to toggle off?
@@ -1074,6 +1148,28 @@ timerStopped = false;
             tooltip(tr.studying_you_havent_recorded_your_voice_yet())
             return
         av_player.play_file(self._recordedAudio)
+
+    def _clear_auto_advance_timers(self) -> None:
+        if self._show_answer_timer:
+            self._show_answer_timer.deleteLater()
+            self._show_answer_timer = None
+        if self._show_question_timer:
+            self._show_question_timer.deleteLater()
+            self._show_question_timer = None
+
+    def toggle_auto_advance(self) -> None:
+        self.auto_advance_enabled = not self.auto_advance_enabled
+        if self.auto_advance_enabled:
+            tooltip(tr.actions_auto_advance_activated())
+        else:
+            tooltip(tr.actions_auto_advance_deactivated())
+        self.auto_advance_if_enabled()
+
+    def auto_advance_if_enabled(self) -> None:
+        if self.state == "question":
+            self._auto_advance_to_answer_if_enabled()
+        elif self.state == "answer":
+            self._auto_advance_to_question_if_enabled()
 
     # legacy
 

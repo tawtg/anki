@@ -18,6 +18,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import isClosingKeyup from "../sveltelib/closing-keyup";
     import type { EventPredicateResult } from "../sveltelib/event-predicate";
     import { documentClick, documentKeyup } from "../sveltelib/event-store";
+    import { registerModalClosingHandler } from "../sveltelib/modal-closing";
     import portal from "../sveltelib/portal";
     import type { PositioningCallback } from "../sveltelib/position/auto-update";
     import autoUpdate from "../sveltelib/position/auto-update";
@@ -46,9 +47,16 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     /** This may be passed in for more fine-grained control */
     export let show = true;
 
-    const dispatch = createEventDispatcher();
+    type CloseEventMap = {
+        close: Pick<EventPredicateResult, "reason"> & Partial<EventPredicateResult>;
+    };
+
+    const dispatch = createEventDispatcher<CloseEventMap>();
 
     let arrow: HTMLElement;
+
+    const { set: setModalOpen, remove: removeModalClosingHandler } =
+        registerModalClosingHandler(() => dispatch("close", { reason: "esc" }));
 
     $: positionCurried = positionFloating({
         placement,
@@ -120,7 +128,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     ) {
         cleanup?.();
         cleanup = null;
-
+        setModalOpen(isShowing);
         if (!reference || !floating || !isShowing) {
             return;
         }
@@ -160,7 +168,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             );
         }
 
-        cleanup = singleCallback(...subscribers, autoAction.destroy!);
+        cleanup = singleCallback(
+            ...subscribers,
+            autoAction.destroy!,
+            removeModalClosingHandler,
+        );
     }
 
     $: updateFloating(reference, floating, show);

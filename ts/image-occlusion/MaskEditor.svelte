@@ -19,11 +19,14 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     import type { IOMode } from "./lib";
     import {
+        type ImageLoadedEvent,
         setCanvasZoomRatio,
         setupMaskEditor,
         setupMaskEditorForEdit,
     } from "./mask-editor";
     import Toolbar from "./Toolbar.svelte";
+    import { MaskEditorAPI } from "./tools/api";
+    import { setCenterXForZoom } from "./tools/lib";
 
     export let mode: IOMode;
     const iconSize = 80;
@@ -32,10 +35,18 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     const startingTool = mode.kind === "add" ? "draw-rectangle" : "cursor";
     $: canvas = null;
 
+    $: {
+        globalThis.maskEditor = canvas ? new MaskEditorAPI(canvas) : null;
+    }
+
     const dispatch = createEventDispatcher();
 
     function onChange() {
         dispatch("change", { canvas });
+    }
+
+    function onImageLoaded({ path, noteId }: ImageLoadedEvent) {
+        dispatch("image-loaded", { path, noteId });
     }
 
     $: $changeSignal, onChange();
@@ -47,29 +58,37 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             minZoom: 0.1,
             zoomDoubleClickSpeed: 1,
             smoothScroll: false,
+            transformOrigin: { x: 0.5, y: 0.5 },
         });
         instance.pause();
+        globalThis.panzoom = instance;
 
         if (mode.kind == "add") {
-            setupMaskEditor(mode.imagePath, instance, onChange).then((canvas1) => {
-                canvas = canvas1;
-            });
+            setupMaskEditor(mode.imagePath, instance, onChange, onImageLoaded).then(
+                (canvas1) => {
+                    canvas = canvas1;
+                },
+            );
         } else {
-            setupMaskEditorForEdit(mode.noteId, instance, onChange).then((canvas1) => {
-                canvas = canvas1;
-            });
+            setupMaskEditorForEdit(mode.noteId, instance, onChange, onImageLoaded).then(
+                (canvas1) => {
+                    canvas = canvas1;
+                },
+            );
         }
     }
 
     onMount(() => {
         window.addEventListener("resize", () => {
             setCanvasZoomRatio(canvas, instance);
+            setCenterXForZoom(canvas);
         });
     });
 
     onDestroy(() => {
         window.removeEventListener("resize", () => {
             setCanvasZoomRatio(canvas, instance);
+            setCenterXForZoom(canvas);
         });
     });
 </script>
@@ -93,12 +112,19 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         border: 1px solid var(--border);
         overflow: auto;
         padding-bottom: 100px;
+        outline: none !important;
+    }
+
+    :global([dir="rtl"]) .editor-main {
+        left: 2px;
+        right: 36px;
     }
 
     .editor-container {
         width: 100%;
         height: 100%;
         position: relative;
+        direction: ltr;
     }
 
     #image {

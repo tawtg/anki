@@ -32,6 +32,7 @@ from aqt.utils import (
     disable_help_button,
     showText,
     showWarning,
+    tooltip,
     tr,
 )
 
@@ -55,7 +56,12 @@ def get_sync_status(
             mw.pm.set_current_sync_url(out.new_endpoint)
         callback(out)
 
-    mw.taskman.run_in_background(lambda: mw.col.sync_status(auth), on_future_done)
+    mw.taskman.run_in_background(
+        lambda: mw.col.sync_status(auth),
+        on_future_done,
+        # The check quickly releases the collection, and we don't need to block other callers
+        uses_collection=False,
+    )
 
 
 def handle_sync_error(mw: aqt.main.AnkiQt, err: Exception) -> None:
@@ -97,7 +103,6 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
     timer.start(150)
 
     def on_future_done(fut: Future[SyncOutput]) -> None:
-        mw.col.db.begin()
         # scheduler version may have changed
         mw.col._load_scheduler()
         timer.stop()
@@ -113,13 +118,13 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
         if out.server_message:
             showText(out.server_message)
         if out.required == out.NO_CHANGES:
+            tooltip(parent=mw, msg=tr.sync_collection_complete())
             # all done; track media progress
             mw.media_syncer.start_monitoring()
             return on_done()
         else:
             full_sync(mw, out, on_done)
 
-    mw.col.save(trx=False)
     mw.taskman.with_progress(
         lambda: mw.col.sync_collection(auth, mw.pm.media_syncing_enabled()),
         on_future_done,
@@ -135,7 +140,7 @@ def full_sync(
     if out.required == out.FULL_DOWNLOAD:
         confirm_full_download(mw, server_usn, on_done)
     elif out.required == out.FULL_UPLOAD:
-        full_upload(mw, server_usn, on_done)
+        confirm_full_upload(mw, server_usn, on_done)
     else:
         button_labels: list[str] = [
             tr.sync_upload_to_ankiweb(),
@@ -168,6 +173,18 @@ def confirm_full_download(
         return on_done()
     else:
         mw.closeAllWindows(lambda: full_download(mw, server_usn, on_done))
+
+
+def confirm_full_upload(
+    mw: aqt.main.AnkiQt, server_usn: int, on_done: Callable[[], None]
+) -> None:
+    # confirmation step required, as some users have reported an upload
+    # happening despite having their AnkiWeb collection not being empty
+    # (not reproducible - maybe a compiler bug?)
+    if not askUser(tr.sync_confirm_empty_upload()):
+        return on_done()
+    else:
+        mw.closeAllWindows(lambda: full_upload(mw, server_usn, on_done))
 
 
 def on_full_sync_timer(mw: aqt.main.AnkiQt, label: str) -> None:

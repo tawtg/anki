@@ -7,6 +7,7 @@ use crate::card::CardQueue;
 use crate::card::CardType;
 use crate::prelude::*;
 use crate::revlog::RevlogEntry;
+use crate::scheduler::timing::is_unix_epoch_timestamp;
 
 impl Collection {
     pub fn card_stats(&mut self, cid: CardId) -> Result<anki_proto::stats::CardStatsResponse> {
@@ -30,7 +31,7 @@ impl Collection {
         let days_elapsed = self
             .storage
             .time_of_last_review(card.id)?
-            .map(|ts| ts.elapsed_days_since(timing.next_day_at))
+            .map(|ts| timing.next_day_at.elapsed_days_since(ts))
             .unwrap_or_default() as u32;
         let fsrs_retrievability = card
             .memory_state
@@ -70,27 +71,28 @@ impl Collection {
         } else {
             card.due
         };
-        Ok(match card.queue {
-            CardQueue::New => (None, Some(due)),
-            CardQueue::Learn => (
-                Some(TimestampSecs::now().0),
-                card.original_position.map(|u| u as i32),
-            ),
-            CardQueue::Review | CardQueue::DayLearn => (
+        Ok(match card.ctype {
+            CardType::New => {
+                if matches!(card.queue, CardQueue::Review | CardQueue::DayLearn) {
+                    // new preview card not answered yet
+                    (None, card.original_position.map(|u| u as i32))
+                } else {
+                    (None, Some(due))
+                }
+            }
+            CardType::Review | CardType::Learn | CardType::Relearn => (
                 {
-                    if card.ctype == CardType::New {
-                        // new preview card not answered yet
-                        None
-                    } else {
+                    if !is_unix_epoch_timestamp(due) {
                         let days_remaining = due - (self.timing_today()?.days_elapsed as i32);
                         let mut due = TimestampSecs::now();
                         due.0 += (days_remaining as i64) * 86_400;
                         Some(due.0)
+                    } else {
+                        Some(due as i64)
                     }
                 },
-                card.original_position.map(|u| u as i32),
+                None,
             ),
-            _ => (None, None),
         })
     }
 }

@@ -24,22 +24,35 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     });
 </script>
 
-<span
+<button
     bind:this={spanRef}
     title={tooltip}
     class="badge {className}"
     on:click
     on:mouseenter
     on:mouseleave
+    tabindex="-1"
 >
     <IconConstrain {iconSize} {widthMultiplier} {flipX}>
         <slot />
     </IconConstrain>
-</span>
+</button>
 
 <style>
     .badge {
         color: var(--badge-color, inherit);
+        border: none;
+        background: transparent;
+        padding: 0;
+        /* remove default macOS styling */
+        box-shadow: none;
+    }
+
+    .badge:hover,
+    .badge:active {
+        border: none;
+        background: transparent;
+        box-shadow: none;
     }
 
     .dropdown-toggle::after {

@@ -46,7 +46,9 @@ impl Collection {
     pub(crate) fn get_first_io_notetype(&mut self) -> Result<Option<Arc<Notetype>>> {
         for nt in self.get_all_notetypes()? {
             if nt.config.original_stock_kind() == OriginalStockKind::ImageOcclusion {
-                return Some(io_notetype_if_valid(nt)).transpose();
+                if let Ok(nt) = io_notetype_if_valid(nt) {
+                    return Ok(Some(nt));
+                }
             }
         }
 
@@ -99,7 +101,7 @@ pub(crate) fn image_occlusion_notetype(tr: &I18n) -> Notetype {
 </div>
 <script>
 try {{
-    anki.setupImageCloze();
+    anki.imageOcclusion.setup();
 }} catch (exc) {{
     document.getElementById("err").innerHTML = `{err_loading}<br><br>${{exc}}`;
 }}

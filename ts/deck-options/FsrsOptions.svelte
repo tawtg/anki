@@ -16,19 +16,24 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     } from "@tslib/backend";
     import * as tr from "@tslib/ftl";
     import { runWithBackendProgress } from "@tslib/progress";
+    import SwitchRow from "components/SwitchRow.svelte";
 
     import SettingTitle from "../components/SettingTitle.svelte";
+    import GlobalLabel from "./GlobalLabel.svelte";
     import type { DeckOptionsState } from "./lib";
     import SpinBoxFloatRow from "./SpinBoxFloatRow.svelte";
     import SpinBoxRow from "./SpinBoxRow.svelte";
+    import Warning from "./Warning.svelte";
     import WeightsInputRow from "./WeightsInputRow.svelte";
 
     export let state: DeckOptionsState;
+    export let openHelpModal: (String) => void;
 
     const presetName = state.currentPresetName;
 
     const config = state.currentConfig;
     const defaults = state.defaults;
+    const fsrsReschedule = state.fsrsReschedule;
 
     let computeWeightsProgress: ComputeWeightsProgress | undefined;
     let computingWeights = false;
@@ -39,7 +44,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         optimalRetention = 0;
     }
     $: computing = computingWeights || checkingWeights || computingRetention;
-    $: customSearch = `preset:"${$presetName}"`;
+    $: defaultWeightSearch = `preset:"${state.getCurrentName()}" -is:suspended`;
+    $: desiredRetentionWarning = getRetentionWarning($config.desiredRetention);
+    $: retentionWarningClass = getRetentionWarningClass($config.desiredRetention);
 
     let computeRetentionProgress:
         | ComputeWeightsProgress
@@ -55,9 +62,37 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     $: if (optimalRetentionRequest.daysToSimulate > 3650) {
         optimalRetentionRequest.daysToSimulate = 3650;
     }
+
+    function getRetentionWarning(retention: number): string {
+        const decay = -0.5;
+        const factor = 0.9 ** (1 / decay) - 1;
+        const stability = 100;
+        const days = Math.round(
+            (stability / factor) * (Math.pow(retention, 1 / decay) - 1),
+        );
+        if (days === 100) {
+            return "";
+        }
+        return tr.deckConfigA100DayInterval({ days });
+    }
+
+    function getRetentionWarningClass(retention: number): string {
+        if (retention < 0.7 || retention > 0.97) {
+            return "alert-danger";
+        } else if (retention < 0.8 || retention > 0.95) {
+            return "alert-warning";
+        } else {
+            return "alert-info";
+        }
+    }
+
     async function computeWeights(): Promise<void> {
         if (computingWeights) {
             await setWantsAbort({});
+            return;
+        }
+        if (state.presetAssignmentsChanged()) {
+            alert(tr.deckConfigPleaseSaveYourChangesFirst());
             return;
         }
         computingWeights = true;
@@ -65,7 +100,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             await runWithBackendProgress(
                 async () => {
                     const resp = await computeFsrsWeights({
-                        search: customSearch,
+                        search: $config.weightSearch
+                            ? $config.weightSearch
+                            : defaultWeightSearch,
                     });
                     if (computeWeightsProgress) {
                         computeWeightsProgress.current = computeWeightsProgress.total;
@@ -94,11 +131,17 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             await setWantsAbort({});
             return;
         }
+        if (state.presetAssignmentsChanged()) {
+            alert(tr.deckConfigPleaseSaveYourChangesFirst());
+            return;
+        }
         checkingWeights = true;
         try {
             await runWithBackendProgress(
                 async () => {
-                    const search = customSearch ?? `preset:"${state.getCurrentName()}"`;
+                    const search = $config.weightSearch
+                        ? $config.weightSearch
+                        : defaultWeightSearch;
                     const resp = await evaluateWeights({
                         weights: $config.fsrsWeights,
                         search,
@@ -109,11 +152,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                     setTimeout(
                         () =>
                             alert(
-                                `Log loss: ${resp.logLoss.toFixed(
-                                    3,
-                                )}, RMSE(bins): ${resp.rmseBins.toFixed(
-                                    3,
-                                )}. ${tr.deckConfigSmallerIsBetter()}`,
+                                `Log loss: ${resp.logLoss.toFixed(4)}, RMSE(bins): ${(
+                                    resp.rmseBins * 100
+                                ).toFixed(2)}%. ${tr.deckConfigSmallerIsBetter()}`,
                             ),
                         200,
                     );
@@ -134,19 +175,20 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             await setWantsAbort({});
             return;
         }
+        if (state.presetAssignmentsChanged()) {
+            alert(tr.deckConfigPleaseSaveYourChangesFirst());
+            return;
+        }
         computingRetention = true;
         try {
             await runWithBackendProgress(
                 async () => {
                     optimalRetentionRequest.maxInterval = $config.maximumReviewInterval;
                     optimalRetentionRequest.weights = $config.fsrsWeights;
-                    optimalRetentionRequest.search = `preset:"${state.getCurrentName()}"`;
+                    optimalRetentionRequest.search = `preset:"${state.getCurrentName()}" -is:suspended`;
                     const resp = await computeOptimalRetention(optimalRetentionRequest);
                     optimalRetention = resp.optimalRetention;
-                    if (computeRetentionProgress) {
-                        computeRetentionProgress.current =
-                            computeRetentionProgress.total;
-                    }
+                    computeRetentionProgress = undefined;
                 },
                 (progress) => {
                     if (progress.value.case === "computeRetention") {
@@ -168,37 +210,28 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         if (!val || !val.total) {
             return "";
         }
-        let pct = ((val.current / val.total) * 100).toFixed(1);
-        pct = `${pct}%`;
+        const pct = ((val.current / val.total) * 100).toFixed(1);
         if (val instanceof ComputeRetentionProgress) {
-            return pct;
+            return `${pct}%`;
         } else {
-            return `${pct} of ${val.fsrsItems} reviews`;
+            return tr.deckConfigPercentOfReviews({ pct, reviews: val.fsrsItems });
         }
     }
 
     function renderRetentionProgress(
         val: ComputeRetentionProgress | undefined,
     ): String {
-        if (!val || !val.total) {
+        if (!val) {
             return "";
         }
-        const pct = ((val.current / val.total) * 100).toFixed(0);
-        return tr.deckConfigComplete({ num: pct });
+        return tr.deckConfigIterations({ count: val.current });
     }
 
-    function stringForSetOptimalRetention(retention: number): String {
+    function estimatedRetention(retention: number): String {
         if (!retention) {
             return "";
         }
-        return tr.deckConfigSetOptimalRetention({ num: retention.toFixed(2) });
-    }
-
-    function setDesiredRetentionToOptimal() {
-        if (!optimalRetention) {
-            return;
-        }
-        $config.desiredRetention = optimalRetention;
+        return tr.deckConfigEstimatedRetention({ num: retention.toFixed(2) });
     }
 </script>
 
@@ -206,10 +239,23 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     bind:value={$config.desiredRetention}
     defaultValue={defaults.desiredRetention}
     min={0.7}
-    max={0.97}
+    max={0.99}
 >
-    <SettingTitle>
+    <SettingTitle on:click={() => openHelpModal("desiredRetention")}>
         {tr.deckConfigDesiredRetention()}
+    </SettingTitle>
+</SpinBoxFloatRow>
+
+<Warning warning={desiredRetentionWarning} className={retentionWarningClass} />
+
+<SpinBoxFloatRow
+    bind:value={$config.sm2Retention}
+    defaultValue={defaults.sm2Retention}
+    min={0.5}
+    max={1.0}
+>
+    <SettingTitle on:click={() => openHelpModal("sm2Retention")}>
+        {tr.deckConfigSm2Retention()}
     </SettingTitle>
 </SpinBoxFloatRow>
 
@@ -219,14 +265,32 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         defaultValue={[]}
         defaults={defaults.fsrsWeights}
     >
-        <SettingTitle>{tr.deckConfigWeights()}</SettingTitle>
+        <SettingTitle on:click={() => openHelpModal("modelWeights")}>
+            {tr.deckConfigWeights()}
+        </SettingTitle>
     </WeightsInputRow>
+</div>
+
+<div class="m-2">
+    <SwitchRow bind:value={$fsrsReschedule} defaultValue={false}>
+        <SettingTitle on:click={() => openHelpModal("rescheduleCardsOnChange")}>
+            <GlobalLabel title={tr.deckConfigRescheduleCardsOnChange()} />
+        </SettingTitle>
+    </SwitchRow>
+
+    {#if $fsrsReschedule}
+        <Warning warning={tr.deckConfigRescheduleCardsWarning()} />
+    {/if}
 </div>
 
 <div class="m-2">
     <details>
         <summary>{tr.deckConfigComputeOptimalWeights()}</summary>
-        <input bind:value={customSearch} class="w-100 mb-1" />
+        <input
+            bind:value={$config.weightSearch}
+            placeholder={defaultWeightSearch}
+            class="w-100 mb-1"
+        />
         <button
             class="btn {computingWeights ? 'btn-warning' : 'btn-primary'}"
             disabled={!computingWeights && computing}
@@ -246,12 +310,14 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             {#if checkingWeights}
                 {tr.actionsCancel()}
             {:else}
-                {tr.deckConfigAnalyzeButton()}
+                {tr.deckConfigEvaluateButton()}
             {/if}
         </button>
         {#if computingWeights || checkingWeights}<div>
                 {computeWeightsProgressString}
             </div>{/if}
+
+        <div>{tr.deckConfigOptimizeAllTip()}</div>
     </details>
 </div>
 
@@ -263,7 +329,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             bind:value={optimalRetentionRequest.deckSize}
             defaultValue={10000}
             min={100}
-            max={999999}
+            max={99999}
         >
             <SettingTitle>Deck size</SettingTitle>
         </SpinBoxRow>
@@ -286,15 +352,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             <SettingTitle>Minutes study/day</SettingTitle>
         </SpinBoxRow>
 
-        <SpinBoxFloatRow
-            bind:value={optimalRetentionRequest.lossAversion}
-            defaultValue={2.5}
-            min={1.0}
-            max={3.0}
-        >
-            <SettingTitle>Loss aversion</SettingTitle>
-        </SpinBoxFloatRow>
-
         <button
             class="btn {computingRetention ? 'btn-warning' : 'btn-primary'}"
             disabled={!computingRetention && computing}
@@ -308,14 +365,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         </button>
 
         {#if optimalRetention}
-            <button
-                class="btn {'btn-primary'}"
-                disabled={!optimalRetention ||
-                    optimalRetention === $config.desiredRetention}
-                on:click={() => setDesiredRetentionToOptimal()}
-            >
-                {stringForSetOptimalRetention(optimalRetention)}
-            </button>
+            {estimatedRetention(optimalRetention)}
         {/if}
         <div>{computeRetentionProgressString}</div>
     </details>

@@ -66,6 +66,7 @@ class Previewer(QDialog):
         self._create_gui()
         self._setup_web_view()
         self.render_card()
+        restoreGeom(self, "preview")
         self.show()
 
     def _create_gui(self) -> None:
@@ -105,7 +106,6 @@ class Previewer(QDialog):
 
         self.vbox.addWidget(self.bbox)
         self.setLayout(self.vbox)
-        restoreGeom(self, "preview")
 
     def _on_finished(self, ok: int) -> None:
         saveGeom(self, "preview")
@@ -131,7 +131,7 @@ class Previewer(QDialog):
             css=["css/reviewer.css"],
             js=[
                 "js/mathjax.js",
-                "js/vendor/mathjax/tex-chtml.js",
+                "js/vendor/mathjax/tex-chtml-full.js",
                 "js/reviewer.js",
             ],
             context=self,

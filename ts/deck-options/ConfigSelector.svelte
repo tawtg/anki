@@ -11,7 +11,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import ButtonToolbar from "../components/ButtonToolbar.svelte";
     import { modalsKey } from "../components/context-keys";
     import Select from "../components/Select.svelte";
-    import SelectOption from "../components/SelectOption.svelte";
     import StickyContainer from "../components/StickyContainer.svelte";
     import type { ConfigListEntry, DeckOptionsState } from "./lib";
     import SaveButton from "./SaveButton.svelte";
@@ -87,18 +86,24 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <TextInputModal
     title={modalTitle}
     prompt={tr.deckConfigNamePrompt()}
-    value={modalStartingValue}
+    initialValue={modalStartingValue}
     onOk={modalSuccess}
     bind:modalKey
 />
 
 <StickyContainer --gutter-block="0.5rem" --sticky-borders="0 0 1px" breakpoint="sm">
     <ButtonToolbar class="justify-content-between flex-grow-1" wrap={false}>
-        <Select class="flex-grow-1" bind:value {label} on:change={blur}>
-            {#each $configList as entry}
-                <SelectOption value={entry.idx}>{configLabel(entry)}</SelectOption>
-            {/each}
-        </Select>
+        <Select
+            class="flex-grow-1"
+            bind:value
+            {label}
+            list={$configList}
+            parser={(entry) => ({
+                content: configLabel(entry),
+                value: entry.idx,
+            })}
+            on:change={blur}
+        />
 
         <SaveButton
             {state}

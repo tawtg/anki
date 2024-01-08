@@ -33,7 +33,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     let range = IntervalRange.Percentile95;
 
     $: if (sourceData) {
-        intervalData = gatherIntervalData(sourceData);
+        intervalData = gatherIntervalData(sourceData.intervals!);
     }
 
     $: if (intervalData) {
@@ -42,6 +42,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             range,
             dispatch,
             $prefs.browserLinksSupported,
+            false,
         );
     }
 

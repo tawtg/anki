@@ -19,6 +19,12 @@ except UnicodeEncodeError as exc:
 # if sync server enabled, bypass the rest of the startup
 if "--syncserver" in sys.argv:
     from anki.syncserver import run_sync_server
+    from anki.utils import is_mac
+
+    from .package import _fix_protobuf_path
+
+    if is_mac and getattr(sys, "frozen", False):
+        _fix_protobuf_path()
 
     # does not return
     run_sync_server()
@@ -586,22 +592,28 @@ def _run(argv: Optional[list[str]] = None, exec: bool = True) -> Optional[AnkiAp
         # apply user-provided scale factor
         os.environ["QT_SCALE_FACTOR"] = str(pm.uiScale())
 
-    # opt in to full hidpi support?
+    # Opt-in to full HiDPI support?
     if not os.environ.get("ANKI_NOHIGHDPI") and qtmajor == 5:
         QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)  # type: ignore
         QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)  # type: ignore
         os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
         os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
 
-    # Opt into software rendering. Useful for buggy systems.
+    # Opt-in to software rendering?
     if os.environ.get("ANKI_SOFTWAREOPENGL"):
         QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
-    # fix an issue on Windows, where Ctrl+Alt shortcuts are triggered by AltGr,
+    # Fix an issue on Windows, where Ctrl+Alt shortcuts are triggered by AltGr,
     # preventing users from typing things like "@" through AltGr+Q on a German
     # keyboard.
     if is_win and "QT_QPA_PLATFORM" not in os.environ:
         os.environ["QT_QPA_PLATFORM"] = "windows:altgr"
+
+    # Disable sandbox on Qt5 PyPi/packaged builds, as it causes blank screens on modern
+    # glibc versions. We check for specific patch versions, because distros may have
+    # fixed the issue in their own Qt builds.
+    if is_lin and qtfullversion in ([5, 15, 2], [5, 14, 1]):
+        os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
 
     # create the app
     QCoreApplication.setApplicationName("Anki")
