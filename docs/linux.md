@@ -59,7 +59,7 @@ Other platforms download PyQt binary wheels from PyPI. There are no PyQt wheels 
 for ARM Linux, so you will need to rely on your system-provided libraries instead. Your distro
 will need to have Python 3.9 or later.
 
-After installing the system libraries (eg 'sudo apt install python3-pyqt5.qtwebengine python3-venv'),
+After installing the system libraries (eg 'sudo apt install python3-pyqt6.qt{quick,webengine} python3-venv'),
 find the place they are installed (eg '/usr/lib/python3/dist-packages'). On modern Ubuntu, you'll
 need 'sudo apt remove python3-protobuf'. Then before running any commands like './run', tell Anki where
 the packages can be found:
@@ -83,6 +83,52 @@ PYTHON_BINARY, NODE_BINARY, YARN_BINARY and/or PROTOC_BINARY to use locally-inst
 
 If rust-toolchain.toml is removed, newer Rust versions can be used. Older versions
 may or may not compile the code.
+
+To build Anki fully offline, set the following environment variables:
+
+- OFFLINE_BUILD: If set, the build does not run tools that may access
+  the network.
+
+- NODE_BINARY, YARN_BINARY and PROTOC_BINARY must also be set.
+
+With OFFLINE_BUILD defined, manual intervention is required for the
+offline build to succeed. The following conditions must be met:
+
+1. All required dependencies (node, Python, rust, yarn, etc.) must be
+   present in the build environment.
+
+2. The offline repositories for the translation files must be
+   copied/linked to ftl/qt-repo and ftl/core-repo.
+
+3. The Python pseudo venv must be set up:
+
+   ```
+   mkdir out/pyenv/bin
+   ln -s /path/to/python out/pyenv/bin/python
+   ln -s /path/to/protoc-gen-mypy out/pyenv/bin/protoc-gen-mypy
+   ```
+
+   Optionally, set up your environment to generate Sphinx documentation:
+
+   ```
+   ln -s /path/to/sphinx-apidoc out/pyenv/bin/sphinx-apidoc
+   ln -s /path/to/sphinx-build out/pyenv/bin/sphinx-build
+   ```
+
+   Note that the PYTHON_BINARY environment variable need not be set,
+   since it is only used when OFFLINE_BUILD is unset to automatically
+   create a network-dependent Python venv.
+
+4. Create the offline cache for yarn and use its own environment
+   variable YARN_CACHE_FOLDER to it:
+
+   ```
+   YARN_CACHE_FOLDER=/path/to/the/yarn/cache
+   /path/to/yarn install --ignore-scripts
+   ```
+
+You are now ready to build wheels and Sphinx documentation fully
+offline.
 
 ## More
 

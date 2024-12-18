@@ -5,18 +5,21 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 import sys
+from collections.abc import Callable, Sequence
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anki
 import anki.lang
 from anki._legacy import deprecated
 from anki.lang import is_rtl
-from anki.utils import is_lin, is_mac, is_win
+from anki.utils import hmr_mode, is_lin, is_mac, is_win
 from aqt import colors, gui_hooks
 from aqt.qt import *
+from aqt.qt import sip
 from aqt.theme import theme_manager
 from aqt.utils import askUser, is_gesture_or_zoom_event, openLink, showInfo, tr
 
@@ -86,17 +89,23 @@ class AnkiWebPage(QWebEnginePage):
         script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
         script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
         script.setRunsOnSubFrames(False)
-        self.profile().scripts().insert(script)
+
+        profile = self.profile()
+        assert profile is not None
+        scripts = profile.scripts()
+        assert scripts is not None
+        scripts.insert(script)
 
     def javaScriptConsoleMessage(
         self,
         level: QWebEnginePage.JavaScriptConsoleMessageLevel,
-        msg: str,
+        msg: str | None,
         line: int,
-        srcID: str,
+        srcID: str | None,
     ) -> None:
         # not translated because console usually not visible,
         # and may only accept ascii text
+        assert srcID is not None
         if srcID.startswith("data"):
             srcID = ""
         else:
@@ -129,10 +138,13 @@ class AnkiWebPage(QWebEnginePage):
     def acceptNavigationRequest(
         self, url: QUrl, navType: Any, isMainFrame: bool
     ) -> bool:
+        from aqt.mediasrv import is_sveltekit_page
+
         if (
             not self.open_links_externally
             or "_anki/pages" in url.path()
             or url.path() == "/_anki/legacyPageData"
+            or is_sveltekit_page(url.path()[1:])
         ):
             return super().acceptNavigationRequest(url, navType, isMainFrame)
 
@@ -156,10 +168,16 @@ class AnkiWebPage(QWebEnginePage):
     def _onCmd(self, str: str) -> Any:
         return self._onBridgeCmd(str)
 
-    def javaScriptAlert(self, frame: Any, text: str) -> None:
+    def javaScriptAlert(self, frame: Any, text: str | None) -> None:
+        if text is None:
+            return
+
         showInfo(text)
 
-    def javaScriptConfirm(self, frame: Any, text: str) -> bool:
+    def javaScriptConfirm(self, frame: Any, text: str | None) -> bool:
+        if text is None:
+            return False
+
         return askUser(text)
 
 
@@ -322,7 +340,9 @@ class AnkiWebView(QWebEngineView):
         # with target="_blank") and return view
         return AnkiWebView()
 
-    def eventFilter(self, obj: QObject, evt: QEvent) -> bool:
+    def eventFilter(self, obj: QObject | None, evt: QEvent | None) -> bool:
+        if evt is None:
+            return False
         if self._disable_zoom and is_gesture_or_zoom_event(evt):
             return True
 
@@ -371,14 +391,20 @@ class AnkiWebView(QWebEngineView):
     def onSelectAll(self) -> None:
         self.triggerPageAction(QWebEnginePage.WebAction.SelectAll)
 
-    def contextMenuEvent(self, evt: QContextMenuEvent) -> None:
+    def contextMenuEvent(self, evt: QContextMenuEvent | None) -> None:
         m = QMenu(self)
-        a = m.addAction(tr.actions_copy())
-        qconnect(a.triggered, self.onCopy)
+        self._maybe_add_copy_action(m)
         gui_hooks.webview_will_show_context_menu(self, m)
-        m.popup(QCursor.pos())
+        if m.actions():
+            m.popup(QCursor.pos())
 
-    def dropEvent(self, evt: QDropEvent) -> None:
+    def _maybe_add_copy_action(self, menu: QMenu) -> None:
+        if self.hasSelection():
+            a = menu.addAction(tr.actions_copy())
+            assert a is not None
+            qconnect(a.triggered, self.onCopy)
+
+    def dropEvent(self, evt: QDropEvent | None) -> None:
         if self.allow_drops:
             super().dropEvent(evt)
 
@@ -444,7 +470,9 @@ class AnkiWebView(QWebEngineView):
         return 1
 
     def setPlaybackRequiresGesture(self, value: bool) -> None:
-        self.settings().setAttribute(
+        settings = self.settings()
+        assert settings is not None
+        settings.setAttribute(
             QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, value
         )
 
@@ -521,10 +549,10 @@ html {{ {font} }}
     def stdHtml(
         self,
         body: str,
-        css: Optional[list[str]] = None,
-        js: Optional[list[str]] = None,
+        css: list[str] | None = None,
+        js: list[str] | None = None,
         head: str = "",
-        context: Optional[Any] = None,
+        context: Any | None = None,
         default_css: bool = True,
     ) -> None:
         css = (["css/webview.css"] if default_css else []) + (
@@ -581,6 +609,8 @@ html {{ {font} }}
 {web_content.body}</body>
 </html>"""
         # print(html)
+        import aqt.browser.previewer
+        import aqt.clayout
         import aqt.editor
         import aqt.reviewer
         from aqt.mediasrv import PageContext
@@ -589,6 +619,10 @@ html {{ {font} }}
             page_context = PageContext.EDITOR
         elif isinstance(context, aqt.reviewer.Reviewer):
             page_context = PageContext.REVIEWER
+        elif isinstance(context, aqt.browser.previewer.Previewer):
+            page_context = PageContext.PREVIEWER
+        elif isinstance(context, aqt.clayout.CardLayout):
+            page_context = PageContext.CARD_LAYOUT
         else:
             page_context = PageContext.UNKNOWN
         self.setHtml(html, page_context)
@@ -615,10 +649,13 @@ html {{ {font} }}
     def eval(self, js: str) -> None:
         self.evalWithCallback(js, None)
 
-    def evalWithCallback(self, js: str, cb: Callable) -> None:
+    def evalWithCallback(self, js: str, cb: Callable | None) -> None:
         self._queueAction("eval", js, cb)
 
-    def _evalWithCallback(self, js: str, cb: Callable[[Any], Any]) -> None:
+    def _evalWithCallback(self, js: str, cb: Callable[[Any], Any] | None) -> None:
+        page = self.page()
+        assert page is not None
+
         if cb:
 
             def handler(val: Any) -> None:
@@ -627,9 +664,9 @@ html {{ {font} }}
                     return
                 cb(val)
 
-            self.page().runJavaScript(js, handler)
+            page.runJavaScript(js, handler)
         else:
-            self.page().runJavaScript(js)
+            page.runJavaScript(js)
 
     def _queueAction(self, name: str, *args: Any) -> None:
         self._pendingActions.append((name, args))
@@ -668,7 +705,9 @@ html {{ {font} }}
             return
 
         if not self._filterSet:
-            self.focusProxy().installEventFilter(self)
+            focus_proxy = self.focusProxy()
+            assert focus_proxy is not None
+            focus_proxy.installEventFilter(self)
             self._filterSet = True
 
         if cmd == "domDone":
@@ -696,7 +735,7 @@ html {{ {font} }}
     def adjustHeightToFit(self) -> None:
         self.evalWithCallback("document.documentElement.offsetHeight", self._onHeight)
 
-    def _onHeight(self, qvar: Optional[int]) -> None:
+    def _onHeight(self, qvar: int | None) -> None:
         from aqt import mw
 
         if qvar is None:
@@ -758,6 +797,23 @@ html {{ {font} }}
         self.load_url(QUrl(f"{mw.serverURL()}_anki/pages/{name}.html{extra}"))
         self.add_dynamic_styling_and_props_then_show()
 
+    def load_sveltekit_page(self, path: str) -> None:
+        from aqt import mw
+
+        self.set_open_links_externally(True)
+        if theme_manager.night_mode:
+            extra = "#night"
+        else:
+            extra = ""
+
+        if hmr_mode:
+            server = "http://127.0.0.1:5173/"
+        else:
+            server = mw.serverURL()
+
+        self.load_url(QUrl(f"{server}{path}{extra}"))
+        self.add_dynamic_styling_and_props_then_show()
+
     def force_load_hack(self) -> None:
         """Force process to initialize.
         Must be done on Windows prior to changing current working directory."""
@@ -782,6 +838,14 @@ html {{ {font} }}
     def on_theme_did_change(self) -> None:
         # avoid flashes if page reloaded
         self._page.setBackgroundColor(theme_manager.qcolor(colors.CANVAS))
+        if hasattr(QWebEngineSettings.WebAttribute, "ForceDarkMode"):
+            force_dark_mode = getattr(QWebEngineSettings.WebAttribute, "ForceDarkMode")
+            page_settings = self._page.settings()
+            if page_settings is not None:
+                page_settings.setAttribute(
+                    force_dark_mode,
+                    theme_manager.get_night_mode(),
+                )
         # update night-mode class, and legacy nightMode/night-mode body classes
         self.eval(
             f"""
@@ -816,5 +880,5 @@ html {{ {font} }}
         )
 
     @deprecated(info="use theme_manager.qcolor() instead")
-    def get_window_bg_color(self, night_mode: Optional[bool] = None) -> QColor:
+    def get_window_bg_color(self, night_mode: bool | None = None) -> QColor:
         return theme_manager.qcolor(colors.CANVAS)

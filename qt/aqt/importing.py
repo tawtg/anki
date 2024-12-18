@@ -1,11 +1,15 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+from __future__ import annotations
+
 import os
 import re
+import sys
 import traceback
 import zipfile
+from collections.abc import Callable
 from concurrent.futures import Future
-from typing import Any, Optional
+from typing import Any
 
 import anki.importing as importing
 import aqt.deckchooser
@@ -54,9 +58,9 @@ class ChangeMap(QDialog):
                 self.frm.fields.setCurrentRow(n)
             else:
                 self.frm.fields.setCurrentRow(n + 1)
-        self.field: Optional[str] = None
+        self.field: str | None = None
 
-    def getField(self) -> str:
+    def getField(self) -> str | None:
         self.exec()
         return self.field
 
@@ -87,8 +91,10 @@ class ImportDialog(QDialog):
         self.importer = importer
         self.frm = aqt.forms.importing.Ui_ImportDialog()
         self.frm.setupUi(self)
+        help_button = self.frm.buttonBox.button(QDialogButtonBox.StandardButton.Help)
+        assert help_button is not None
         qconnect(
-            self.frm.buttonBox.button(QDialogButtonBox.StandardButton.Help).clicked,
+            help_button.clicked,
             self.helpRequested,
         )
         disable_help_button(self)
@@ -99,6 +105,7 @@ class ImportDialog(QDialog):
         gui_hooks.current_note_type_did_change.append(self.modelChanged)
         qconnect(self.frm.autoDetect.clicked, self.onDelimiter)
         self.updateDelimiterButtonText()
+        assert self.mw.pm.profile is not None
         self.frm.allowHTML.setChecked(self.mw.pm.profile.get("allowHTML", True))
         qconnect(self.frm.importMode.currentIndexChanged, self.importModeChanged)
         self.frm.importMode.setCurrentIndex(self.mw.pm.profile.get("importMode", 1))
@@ -116,7 +123,7 @@ class ImportDialog(QDialog):
         )
         self.deck = aqt.deckchooser.DeckChooser(self.mw, self.frm.deckArea, label=False)
 
-    def modelChanged(self, unused: Any = None) -> None:
+    def modelChanged(self, unused: Any | None = None) -> None:
         self.importer.model = self.mw.col.models.current()
         self.importer.initMapping()
         self.showMapping()
@@ -183,6 +190,7 @@ class ImportDialog(QDialog):
             showWarning(tr.importing_the_first_field_of_the_note())
             return
         self.importer.importMode = self.frm.importMode.currentIndex()
+        assert self.mw.pm.profile is not None
         self.mw.pm.profile["importMode"] = self.importer.importMode
         self.importer.allowHTML = self.frm.allowHTML.isChecked()
         self.mw.pm.profile["allowHTML"] = self.importer.allowHTML
@@ -230,13 +238,13 @@ class ImportDialog(QDialog):
         self.frm.mappingArea.setWidget(self.frame)
         self.mapbox = QVBoxLayout(self.frame)
         self.mapbox.setContentsMargins(0, 0, 0, 0)
-        self.mapwidget: Optional[QWidget] = None
+        self.mapwidget: QWidget | None = None
 
     def hideMapping(self) -> None:
         self.frm.mappingGroup.hide()
 
     def showMapping(
-        self, keepMapping: bool = False, hook: Optional[Callable] = None
+        self, keepMapping: bool = False, hook: Callable | None = None
     ) -> None:
         if hook:
             hook()

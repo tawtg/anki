@@ -14,7 +14,9 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use revlog::RevlogEntryPartial;
 
+use super::fsrs::params::ignore_revlogs_before_ms_from_config;
 use super::queue::BuryMode;
+use super::states::load_balancer::LoadBalancerContext;
 use super::states::steps::LearningSteps;
 use super::states::CardState;
 use super::states::FilteredState;
@@ -25,11 +27,13 @@ use super::timespan::answer_button_time_collapsible;
 use super::timing::SchedTimingToday;
 use crate::card::CardQueue;
 use crate::card::CardType;
+use crate::config::BoolKey;
 use crate::deckconfig::DeckConfig;
 use crate::deckconfig::LeechAction;
 use crate::decks::Deck;
 use crate::prelude::*;
-use crate::scheduler::fsrs::memory_state::single_card_revlog_to_item;
+use crate::scheduler::fsrs::memory_state::fsrs_item_for_memory_state;
+use crate::scheduler::states::PreviewState;
 use crate::search::SearchNode;
 
 #[derive(Copy, Clone)]
@@ -69,13 +73,17 @@ struct CardStateUpdater {
     fsrs_next_states: Option<NextStates>,
     /// Set if FSRS is enabled.
     desired_retention: Option<f32>,
+    fsrs_short_term_with_steps: bool,
 }
 
 impl CardStateUpdater {
     /// Returns information required when transitioning from one card state to
     /// another with `next_states()`. This separate structure decouples the
     /// state handling code from the rest of the Anki codebase.
-    pub(crate) fn state_context(&self) -> StateContext<'_> {
+    pub(crate) fn state_context<'a>(
+        &'a self,
+        load_balancer: Option<LoadBalancerContext<'a>>,
+    ) -> StateContext<'a> {
         StateContext {
             fuzz_factor: get_fuzz_factor(self.fuzz_seed),
             steps: self.learn_steps(),
@@ -87,6 +95,8 @@ impl CardStateUpdater {
             interval_multiplier: self.config.inner.interval_multiplier,
             maximum_review_interval: self.config.inner.maximum_review_interval,
             leech_threshold: self.config.inner.leech_threshold,
+            load_balancer: load_balancer
+                .map(|load_balancer| load_balancer.set_fuzz_seed(self.fuzz_seed)),
             relearn_steps: self.relearn_steps(),
             lapse_multiplier: self.config.inner.lapse_multiplier,
             minimum_lapse_interval: self.config.inner.minimum_lapse_interval,
@@ -101,6 +111,7 @@ impl CardStateUpdater {
                 Default::default()
             },
             fsrs_next_states: self.fsrs_next_states.clone(),
+            fsrs_short_term_with_steps_enabled: self.fsrs_short_term_with_steps,
         }
     }
 
@@ -148,7 +159,10 @@ impl CardStateUpdater {
                 match filtered {
                     FilteredState::Preview(next) => self.apply_preview_state(current, next),
                     FilteredState::Rescheduling(next) => {
-                        self.apply_normal_study_state(current, next.original_state)
+                        let revlog = self.apply_normal_study_state(current, next.original_state);
+                        self.card.original_due = self.card.due;
+
+                        revlog
                     }
                 }
             }
@@ -163,7 +177,6 @@ impl CardStateUpdater {
         next: NormalState,
     ) -> RevlogEntryPartial {
         self.card.reps += 1;
-        self.card.original_due = 0;
         self.card.desired_retention = self.desired_retention;
 
         let revlog = match next {
@@ -211,9 +224,36 @@ impl Collection {
     /// Return the next states that will be applied for each answer button.
     pub fn get_scheduling_states(&mut self, cid: CardId) -> Result<SchedulingStates> {
         let card = self.storage.get_card(cid)?.or_not_found(cid)?;
+        let deck = self.get_deck(card.deck_id)?.or_not_found(card.deck_id)?;
+
+        let note_id = deck
+            .config_id()
+            .map(|deck_config_id| self.get_deck_config(deck_config_id, false))
+            .transpose()?
+            .flatten()
+            .map(|deck_config| deck_config.inner.bury_reviews)
+            .unwrap_or(false)
+            .then_some(card.note_id);
+
         let ctx = self.card_state_updater(card)?;
         let current = ctx.current_card_state();
-        let state_ctx = ctx.state_context();
+
+        let load_balancer = self
+            .get_config_bool(BoolKey::LoadBalancerEnabled)
+            .then(|| {
+                let deckconfig_id = deck.config_id();
+
+                self.state.card_queues.as_ref().and_then(|card_queues| {
+                    Some(
+                        card_queues
+                            .load_balancer
+                            .review_context(note_id, deckconfig_id?),
+                    )
+                })
+            })
+            .flatten();
+
+        let state_ctx = ctx.state_context(load_balancer);
         Ok(current.next_states(&state_ctx))
     }
 
@@ -301,12 +341,34 @@ impl Collection {
             card.custom_data = data;
             card.validate_custom_data()?;
         }
+
         self.update_card_inner(&mut card, original, usn)?;
         if answer.new_state.leeched() {
             self.add_leech_tag(card.note_id)?;
         }
 
-        self.update_queues_after_answering_card(&card, timing)
+        if card.queue == CardQueue::Review {
+            let deck = self.get_deck(card.deck_id)?;
+            if let Some(card_queues) = self.state.card_queues.as_mut() {
+                if let Some(deckconfig_id) = deck.and_then(|deck| deck.config_id()) {
+                    card_queues.load_balancer.add_card(
+                        card.id,
+                        card.note_id,
+                        deckconfig_id,
+                        card.interval,
+                    )
+                }
+            }
+        }
+
+        self.update_queues_after_answering_card(
+            &card,
+            timing,
+            matches!(
+                answer.new_state,
+                CardState::Filtered(FilteredState::Preview(PreviewState { finished: true, .. }))
+            ),
+        )
     }
 
     fn maybe_bury_siblings(&mut self, card: &Card, config: &DeckConfig) -> Result<()> {
@@ -369,19 +431,20 @@ impl Collection {
         let config = self.home_deck_config(deck.config_id(), card.original_deck_id)?;
         let fsrs_enabled = self.get_config_bool(BoolKey::Fsrs);
         let fsrs_next_states = if fsrs_enabled {
-            let fsrs = FSRS::new(Some(&config.inner.fsrs_weights))?;
+            let fsrs = FSRS::new(Some(config.fsrs_params()))?;
             if card.memory_state.is_none() && card.ctype != CardType::New {
-                // Card has been moved or imported into an FSRS deck after weights were set,
+                // Card has been moved or imported into an FSRS deck after params were set,
                 // and will need its initial memory state to be calculated based on review
                 // history.
                 let revlog = self.revlog_for_srs(SearchNode::CardIds(card.id.to_string()))?;
-                let item = single_card_revlog_to_item(
+                let item = fsrs_item_for_memory_state(
                     &fsrs,
                     revlog,
                     timing.next_day_at,
-                    config.inner.sm2_retention,
+                    config.inner.historical_retention,
+                    ignore_revlogs_before_ms_from_config(&config)?,
                 )?;
-                card.set_memory_state(&fsrs, item, config.inner.sm2_retention)?;
+                card.set_memory_state(&fsrs, item, config.inner.historical_retention)?;
             }
             let days_elapsed = self
                 .storage
@@ -397,8 +460,10 @@ impl Collection {
             None
         };
         let desired_retention = fsrs_enabled.then_some(config.inner.desired_retention);
+        let fsrs_short_term_with_steps =
+            self.get_config_bool(BoolKey::FsrsShortTermWithStepsEnabled);
         Ok(CardStateUpdater {
-            fuzz_seed: get_fuzz_seed(&card),
+            fuzz_seed: get_fuzz_seed(&card, false),
             card,
             deck,
             config,
@@ -406,6 +471,7 @@ impl Collection {
             now: TimestampSecs::now(),
             fsrs_next_states,
             desired_retention,
+            fsrs_short_term_with_steps,
         })
     }
 
@@ -519,14 +585,23 @@ pub mod test_helpers {
 }
 
 impl Card {
-    pub(crate) fn get_fuzz_factor(&self) -> Option<f32> {
-        get_fuzz_factor(get_fuzz_seed(self))
+    /// If for_reschedule is true, we use card.reps - 1 to match the previous
+    /// review.
+    pub(crate) fn get_fuzz_factor(&self, for_reschedule: bool) -> Option<f32> {
+        get_fuzz_factor(get_fuzz_seed(self, for_reschedule))
     }
 }
 
 /// Return a consistent seed for a given card at a given number of reps.
-fn get_fuzz_seed(card: &Card) -> Option<u64> {
-    get_fuzz_seed_for_id_and_reps(card.id, card.reps)
+/// If for_reschedule is true, we use card.reps - 1 to match the previous
+/// review.
+fn get_fuzz_seed(card: &Card, for_reschedule: bool) -> Option<u64> {
+    let reps = if for_reschedule {
+        card.reps.saturating_sub(1)
+    } else {
+        card.reps
+    };
+    get_fuzz_seed_for_id_and_reps(card.id, reps)
 }
 
 /// If in test environment, disable fuzzing.
@@ -569,10 +644,9 @@ mod test {
 
         // new->learning
         let post_answer = col.answer_again();
-        assert_eq!(
-            post_answer.new_state,
-            current_state(&mut col, post_answer.card_id)
-        );
+        let mut current = current_state(&mut col, post_answer.card_id);
+        col.set_elapsed_secs_equal(&post_answer.new_state, &mut current);
+        assert_eq!(post_answer.new_state, current);
         let card = col.storage.get_card(post_answer.card_id)?.unwrap();
         assert_eq!(card.queue, CardQueue::Learn);
         assert_eq!(card.remaining_steps, 2);
@@ -581,10 +655,9 @@ mod test {
         col.storage.db.execute_batch("update cards set due=0")?;
         col.clear_study_queues();
         let post_answer = col.answer_good();
-        assert_eq!(
-            post_answer.new_state,
-            current_state(&mut col, post_answer.card_id)
-        );
+        let mut current = current_state(&mut col, post_answer.card_id);
+        col.set_elapsed_secs_equal(&post_answer.new_state, &mut current);
+        assert_eq!(post_answer.new_state, current);
         let card = col.storage.get_card(post_answer.card_id)?.unwrap();
         assert_eq!(card.queue, CardQueue::Learn);
         assert_eq!(card.remaining_steps, 1);
@@ -597,10 +670,9 @@ mod test {
         if let CardState::Normal(NormalState::Review(state)) = &mut post_answer.new_state {
             state.elapsed_days = 1;
         };
-        assert_eq!(
-            post_answer.new_state,
-            current_state(&mut col, post_answer.card_id)
-        );
+        let mut current = current_state(&mut col, post_answer.card_id);
+        col.set_elapsed_secs_equal(&post_answer.new_state, &mut current);
+        assert_eq!(post_answer.new_state, current);
         let card = col.storage.get_card(post_answer.card_id)?.unwrap();
         assert_eq!(card.queue, CardQueue::Review);
         assert_eq!(card.interval, 1);
@@ -613,10 +685,9 @@ mod test {
         if let CardState::Normal(NormalState::Review(state)) = &mut post_answer.new_state {
             state.elapsed_days = 4;
         };
-        assert_eq!(
-            post_answer.new_state,
-            current_state(&mut col, post_answer.card_id)
-        );
+        let mut current = current_state(&mut col, post_answer.card_id);
+        col.set_elapsed_secs_equal(&post_answer.new_state, &mut current);
+        assert_eq!(post_answer.new_state, current);
         let card = col.storage.get_card(post_answer.card_id)?.unwrap();
         assert_eq!(card.queue, CardQueue::Review);
         assert_eq!(card.interval, 4);
@@ -629,10 +700,9 @@ mod test {
         if let CardState::Normal(NormalState::Relearning(state)) = &mut post_answer.new_state {
             state.review.elapsed_days = 1;
         };
-        assert_eq!(
-            post_answer.new_state,
-            current_state(&mut col, post_answer.card_id)
-        );
+        let mut current = current_state(&mut col, post_answer.card_id);
+        col.set_elapsed_secs_equal(&post_answer.new_state, &mut current);
+        assert_eq!(post_answer.new_state, current);
         let card = col.storage.get_card(post_answer.card_id)?.unwrap();
         assert_eq!(card.queue, CardQueue::Learn);
         assert_eq!(card.ctype, CardType::Relearn);
@@ -647,10 +717,9 @@ mod test {
         if let CardState::Normal(NormalState::Relearning(state)) = &mut post_answer.new_state {
             state.review.elapsed_days = 1;
         };
-        assert_eq!(
-            post_answer.new_state,
-            current_state(&mut col, post_answer.card_id)
-        );
+        let mut current = current_state(&mut col, post_answer.card_id);
+        col.set_elapsed_secs_equal(&post_answer.new_state, &mut current);
+        assert_eq!(post_answer.new_state, current);
         let card = col.storage.get_card(post_answer.card_id)?.unwrap();
         assert_eq!(card.queue, CardQueue::Learn);
         assert_eq!(card.lapses, 1);
@@ -662,10 +731,9 @@ mod test {
         if let CardState::Normal(NormalState::Review(state)) = &mut post_answer.new_state {
             state.elapsed_days = 1;
         };
-        assert_eq!(
-            post_answer.new_state,
-            current_state(&mut col, post_answer.card_id)
-        );
+        let mut current = current_state(&mut col, post_answer.card_id);
+        col.set_elapsed_secs_equal(&post_answer.new_state, &mut current);
+        assert_eq!(post_answer.new_state, current);
         let card = col.storage.get_card(post_answer.card_id)?.unwrap();
         assert_eq!(card.queue, CardQueue::Review);
         assert_eq!(card.interval, 1);

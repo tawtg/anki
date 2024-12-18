@@ -5,11 +5,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write;
+use std::sync::LazyLock;
 
 use anki_proto::image_occlusion::get_image_occlusion_note_response::ImageOcclusion;
 use anki_proto::image_occlusion::get_image_occlusion_note_response::ImageOcclusionShape;
 use htmlescape::encode_attribute;
-use lazy_static::lazy_static;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_while;
@@ -24,16 +24,16 @@ use crate::latex::contains_latex;
 use crate::template::RenderContext;
 use crate::text::strip_html_preserving_entities;
 
-lazy_static! {
-    static ref MATHJAX: Regex = Regex::new(
+static MATHJAX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?xsi)
             (\\[(\[])       # 1 = mathjax opening tag
             (.*?)           # 2 = inner content
             (\\[])])        # 3 = mathjax closing tag
-           "
+           ",
     )
-    .unwrap();
-}
+    .unwrap()
+});
 
 mod mathjax_caps {
     pub const OPENING_TAG: usize = 1;
@@ -146,10 +146,7 @@ impl ExtractedCloze<'_> {
 
     /// If cloze starts with image-occlusion:, return the text following that.
     fn image_occlusion(&self) -> Option<&str> {
-        let Some(first_node) = self.nodes.first() else {
-            return None;
-        };
-        let TextOrCloze::Text(text) = first_node else {
+        let TextOrCloze::Text(text) = self.nodes.first()? else {
             return None;
         };
         text.strip_prefix("image-occlusion:")
@@ -161,11 +158,15 @@ fn parse_text_with_clozes(text: &str) -> Vec<TextOrCloze<'_>> {
     let mut output = vec![];
     for token in tokenize(text) {
         match token {
-            Token::OpenCloze(ordinal) => open_clozes.push(ExtractedCloze {
-                ordinal,
-                nodes: Vec::with_capacity(1), // common case
-                hint: None,
-            }),
+            Token::OpenCloze(ordinal) => {
+                if open_clozes.len() < 3 {
+                    open_clozes.push(ExtractedCloze {
+                        ordinal,
+                        nodes: Vec::with_capacity(1), // common case
+                        hint: None,
+                    })
+                }
+            }
             Token::Text(mut text) => {
                 if let Some(cloze) = open_clozes.last_mut() {
                     // extract hint if found
@@ -313,6 +314,12 @@ fn render_image_occlusion(text: &str, question_side: bool, active: bool, ordinal
             ordinal,
             &get_image_cloze_data(text)
         )
+    } else if !question_side && active {
+        format!(
+            r#"<div class="cloze-highlight" data-ordinal="{}" {}></div>"#,
+            ordinal,
+            &get_image_cloze_data(text)
+        )
     } else {
         "".into()
     }
@@ -331,8 +338,11 @@ pub fn parse_image_occlusions(text: &str) -> Vec<ImageOcclusion> {
     }
 
     occlusions
-        .values()
-        .map(|v| ImageOcclusion { shapes: v.to_vec() })
+        .iter()
+        .map(|(k, v)| ImageOcclusion {
+            ordinal: *k as u32,
+            shapes: v.to_vec(),
+        })
         .collect()
 }
 
@@ -414,7 +424,7 @@ pub fn cloze_numbers_in_string(html: &str) -> HashSet<u16> {
 fn add_cloze_numbers_in_text_with_clozes(nodes: &[TextOrCloze], set: &mut HashSet<u16>) {
     for node in nodes {
         if let TextOrCloze::Cloze(cloze) = node {
-            if !(cloze.image_occlusion().is_some() && cloze.ordinal == 0) {
+            if cloze.ordinal != 0 {
                 set.insert(cloze.ordinal);
                 add_cloze_numbers_in_text_with_clozes(&cloze.nodes, set);
             }
@@ -467,6 +477,10 @@ mod test {
         assert_eq!(
             cloze_numbers_in_string("{{c2::te}}{{c1::s}}t{{"),
             vec![1, 2].into_iter().collect::<HashSet<u16>>()
+        );
+        assert_eq!(
+            cloze_numbers_in_string("{{c0::te}}s{{c2::t}}s"),
+            vec![2].into_iter().collect::<HashSet<u16>>()
         );
 
         assert_eq!(

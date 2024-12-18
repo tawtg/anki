@@ -33,9 +33,11 @@ static FUZZ_RANGES: [FuzzRange; 3] = [
 
 impl<'a> StateContext<'a> {
     /// Apply fuzz, respecting the passed bounds.
-    /// Caller must ensure reasonable bounds.
     pub(crate) fn with_review_fuzz(&self, interval: f32, minimum: u32, maximum: u32) -> u32 {
-        with_review_fuzz(self.fuzz_factor, interval, minimum, maximum)
+        self.load_balancer
+            .as_ref()
+            .and_then(|load_balancer| load_balancer.find_interval(interval, minimum, maximum))
+            .unwrap_or_else(|| with_review_fuzz(self.fuzz_factor, interval, minimum, maximum))
     }
 }
 
@@ -49,7 +51,7 @@ impl Collection {
             .or_not_found(card.deck_id)?;
         let config = self.home_deck_config(deck.config_id(), card.original_deck_id)?;
         let fuzzed = with_review_fuzz(
-            card.get_fuzz_factor(),
+            card.get_fuzz_factor(true),
             interval as f32,
             1,
             config.inner.maximum_review_interval,
@@ -75,8 +77,9 @@ pub(crate) fn with_review_fuzz(
 /// Return the bounds of the fuzz range, respecting `minimum` and `maximum`.
 /// Ensure the upper bound is larger than the lower bound, if `maximum` allows
 /// it and it is larger than 1.
-fn constrained_fuzz_bounds(interval: f32, minimum: u32, maximum: u32) -> (u32, u32) {
+pub(crate) fn constrained_fuzz_bounds(interval: f32, minimum: u32, maximum: u32) -> (u32, u32) {
     let minimum = minimum.min(maximum);
+    let interval = interval.clamp(minimum as f32, maximum as f32);
     let (mut lower, mut upper) = fuzz_bounds(interval);
 
     // minimum <= maximum and lower <= upper are assumed
@@ -164,8 +167,8 @@ mod test {
         assert_lower_middle_upper!(20.1, 3, 1000, 17, 20, 23);
 
         // respect limits and preserve uniform distribution of valid intervals
-        assert_lower_middle_upper!(100.0, 101, 1000, 101, 104, 107);
-        assert_lower_middle_upper!(100.0, 1, 99, 93, 96, 99);
+        assert_lower_middle_upper!(100.0, 101, 1000, 101, 105, 108);
+        assert_lower_middle_upper!(100.0, 1, 99, 92, 96, 99);
         assert_lower_middle_upper!(100.0, 97, 103, 97, 100, 103);
     }
 

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import aqt.editor
 import aqt.forms
@@ -52,13 +52,19 @@ class AddCards(QMainWindow):
         add_close_shortcut(self)
         self._load_new_note()
         self.setupButtons()
-        self.col.add_image_occlusion_notetype()
         self.history: list[NoteId] = []
-        self._last_added_note: Optional[Note] = None
+        self._last_added_note: Note | None = None
         gui_hooks.operation_did_execute.append(self.on_operation_did_execute)
         restoreGeom(self, "add")
         gui_hooks.add_cards_did_init(self)
+        self.setMenuBar(None)
         self.show()
+
+    def set_deck(self, deck_id: DeckId) -> None:
+        self.deck_chooser.selected_deck_id = deck_id
+
+    def set_note_type(self, note_type_id: NotetypeId) -> None:
+        self.notetype_chooser.selected_notetype_id = note_type_id
 
     def set_note(self, note: Note, deck_id: DeckId | None = None) -> None:
         """Set tags, field contents and notetype according to `note`. Deck is set
@@ -69,8 +75,8 @@ class AddCards(QMainWindow):
             self.deck_chooser.selected_deck_id = deck_id
 
         new_note = self._new_note()
-        new_note.fields = note.fields
-        new_note.tags = note.tags
+        new_note.fields = note.fields[:]
+        new_note.tags = note.tags[:]
 
         self.setAndFocusNote(new_note)
 
@@ -86,6 +92,7 @@ class AddCards(QMainWindow):
         defaults = self.col.defaults_for_adding(
             current_review_card=self.mw.reviewer.card
         )
+
         self.notetype_chooser = NotetypeChooser(
             mw=self.mw,
             widget=self.form.modelArea,
@@ -145,10 +152,13 @@ class AddCards(QMainWindow):
     def on_deck_changed(self, deck_id: int) -> None:
         gui_hooks.add_cards_did_change_deck(deck_id)
 
-    def on_notetype_change(self, notetype_id: NotetypeId) -> None:
+    def on_notetype_change(
+        self, notetype_id: NotetypeId, update_deck: bool = True
+    ) -> None:
         # need to adjust current deck?
-        if deck_id := self.col.default_deck_for_notetype(notetype_id):
-            self.deck_chooser.selected_deck_id = deck_id
+        if update_deck:
+            if deck_id := self.col.default_deck_for_notetype(notetype_id):
+                self.deck_chooser.selected_deck_id = deck_id
 
         # only used for detecting changed sticky fields on close
         self._last_added_note = None
@@ -178,7 +188,7 @@ class AddCards(QMainWindow):
                     break
                 # copy non-empty old fields
                 if (
-                    not old_field_value in copied_field_names
+                    old_field_value not in copied_field_names
                     and old_note.fields[old_idx]
                 ):
                     new_note.fields[new_idx] = old_note.fields[old_idx]
@@ -195,7 +205,7 @@ class AddCards(QMainWindow):
             self, old_note.note_type(), new_note.note_type()
         )
 
-    def _load_new_note(self, sticky_fields_from: Optional[Note] = None) -> None:
+    def _load_new_note(self, sticky_fields_from: Note | None = None) -> None:
         note = self._new_note()
         if old_note := sticky_fields_from:
             flds = note.note_type()["flds"]
@@ -209,7 +219,7 @@ class AddCards(QMainWindow):
         self.setAndFocusNote(note)
 
     def on_operation_did_execute(
-        self, changes: OpChanges, handler: Optional[object]
+        self, changes: OpChanges, handler: object | None
     ) -> None:
         if (changes.notetype or changes.deck) and handler is not self.editor:
             self.on_notetype_change(
@@ -217,7 +227,8 @@ class AddCards(QMainWindow):
                     self.col.defaults_for_adding(
                         current_review_card=self.mw.reviewer.card
                     ).notetype_id
-                )
+                ),
+                update_deck=False,
             )
 
     def _new_note(self) -> Note:

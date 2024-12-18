@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import aqt
 import aqt.forms
 import aqt.operations
@@ -32,7 +30,7 @@ class FieldDialog(QDialog):
         self,
         mw: AnkiQt,
         nt: NotetypeDict,
-        parent: Optional[QWidget] = None,
+        parent: QWidget | None = None,
         open_at: int = 0,
     ) -> None:
         QDialog.__init__(self, parent or mw)
@@ -43,26 +41,31 @@ class FieldDialog(QDialog):
         self.model = nt
         self.mm._remove_from_cache(self.model["id"])
         self.change_tracker = ChangeTracker(self.mw)
+        self.webview = None
+
+        self.form = aqt.forms.fields.Ui_Dialog()
+        self.form.setupUi(self)
 
         self.setWindowTitle(
             without_unicode_isolation(tr.fields_fields_for(val=self.model["name"]))
         )
 
-        self.form = aqt.forms.fields.Ui_Dialog()
-        self.form.setupUi(self)
-        self.webview = None
-
         disable_help_button(self)
-        self.form.buttonBox.button(QDialogButtonBox.StandardButton.Help).setAutoDefault(
-            False
-        )
-        self.form.buttonBox.button(
+        help_button = self.form.buttonBox.button(QDialogButtonBox.StandardButton.Help)
+        assert help_button is not None
+        help_button.setAutoDefault(False)
+
+        cancel_button = self.form.buttonBox.button(
             QDialogButtonBox.StandardButton.Cancel
-        ).setAutoDefault(False)
-        self.form.buttonBox.button(QDialogButtonBox.StandardButton.Save).setAutoDefault(
-            False
         )
-        self.currentIdx: Optional[int] = None
+        assert cancel_button is not None
+        cancel_button.setAutoDefault(False)
+
+        save_button = self.form.buttonBox.button(QDialogButtonBox.StandardButton.Save)
+        assert save_button is not None
+        save_button.setAutoDefault(False)
+
+        self.currentIdx: int | None = None
         self.fillFields()
         self.setupSignals()
         self.form.fieldList.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -110,7 +113,11 @@ class FieldDialog(QDialog):
             movePos = dropPos
         elif indicatorPos == QAbstractItemView.DropIndicatorPosition.BelowItem:
             movePos = dropPos + 1
+        else:
+            # for pylint
+            return
         # the item in idx is removed thus subtract 1.
+        assert idx is not None
         if idx < dropPos:
             movePos -= 1
         self.moveField(movePos + 1)  # convert to 1 based.
@@ -122,8 +129,8 @@ class FieldDialog(QDialog):
         self.loadField(idx)
 
     def _uniqueName(
-        self, prompt: str, ignoreOrd: Optional[int] = None, old: str = ""
-    ) -> Optional[str]:
+        self, prompt: str, ignoreOrd: int | None = None, old: str = ""
+    ) -> str | None:
         txt = getOnlyText(prompt, default=old).replace('"', "").strip()
         if not txt:
             return None
@@ -143,6 +150,9 @@ class FieldDialog(QDialog):
         return txt
 
     def onRename(self) -> None:
+        if self.currentIdx is None:
+            return
+
         idx = self.currentIdx
         f = self.model["flds"][idx]
         name = self._uniqueName(tr.actions_new_name(), self.currentIdx, f["name"])
@@ -194,6 +204,7 @@ class FieldDialog(QDialog):
 
     def onPosition(self, delta: int = -1) -> None:
         idx = self.currentIdx
+        assert idx is not None
         l = len(self.model["flds"])
         txt = getOnlyText(tr.fields_new_position_1(val=l), default=str(idx + 1))
         if not txt:

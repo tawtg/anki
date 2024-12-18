@@ -2,8 +2,9 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from enum import Enum, auto
-from typing import Iterable, cast
+from typing import cast
 
 import aqt
 import aqt.browser
@@ -43,6 +44,7 @@ from aqt.operations.tag import (
     set_tag_collapsed,
 )
 from aqt.qt import *
+from aqt.qt import sip
 from aqt.theme import ColoredIcon, theme_manager
 from aqt.utils import (
     KeyboardModifiersPressed,
@@ -147,7 +149,7 @@ class SidebarTreeView(QTreeView):
     def op_executed(
         self, changes: OpChanges, handler: object | None, focused: bool
     ) -> None:
-        if changes.browser_sidebar and not handler is self:
+        if changes.browser_sidebar and handler is not self:
             self._refresh_needed = True
         if focused:
             self.refresh_if_needed()
@@ -157,7 +159,7 @@ class SidebarTreeView(QTreeView):
             self.refresh()
             self._refresh_needed = False
 
-    def refresh(self, new_current: SidebarItem = None) -> None:
+    def refresh(self, new_current: SidebarItem | None = None) -> None:
         "Refresh list. No-op if sidebar is not visible."
         if not self.isVisible():
             return
@@ -188,16 +190,19 @@ class SidebarTreeView(QTreeView):
             self.setUpdatesEnabled(True)
 
             # needs to be set after changing model
-            qconnect(self.selectionModel().selectionChanged, self._on_selection_changed)
+            qconnect(
+                self._selection_model().selectionChanged, self._on_selection_changed
+            )
 
         QueryOp(
             parent=self.browser, op=lambda _: self._root_tree(), success=on_done
         ).run_in_background()
 
     def restore_current(self, current: SidebarItem) -> None:
-        if current := self.find_item(current.has_same_id):
-            index = self.model().index_for_item(current)
-            self.selectionModel().setCurrentIndex(
+        if current_item := self.find_item(current.has_same_id):
+            index = self.model().index_for_item(current_item)
+
+            self._selection_model().setCurrentIndex(
                 index, QItemSelectionModel.SelectionFlag.SelectCurrent
             )
             self.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
@@ -253,7 +258,7 @@ class SidebarTreeView(QTreeView):
                     if item.show_expanded(searching):
                         self.setExpanded(idx, True)
                     if item.is_highlighted() and scroll_to_first_match:
-                        self.selectionModel().setCurrentIndex(
+                        self._selection_model().setCurrentIndex(
                             idx,
                             QItemSelectionModel.SelectionFlag.SelectCurrent,
                         )
@@ -266,7 +271,7 @@ class SidebarTreeView(QTreeView):
 
     def update_search(
         self,
-        *terms: Union[str, SearchNode],
+        *terms: str | SearchNode,
         joiner: SearchJoiner = "AND",
     ) -> None:
         """Modify the current search string based on modifier keys, then refresh."""
@@ -299,17 +304,21 @@ class SidebarTreeView(QTreeView):
     ###########
 
     def drawRow(
-        self, painter: QPainter, options: QStyleOptionViewItem, idx: QModelIndex
+        self, painter: QPainter | None, options: QStyleOptionViewItem, idx: QModelIndex
     ) -> None:
         if self.current_search and (item := self.model().item_for_index(idx)):
             if item.is_highlighted():
+                assert painter is not None
+
                 brush = QBrush(theme_manager.qcolor(colors.HIGHLIGHT_BG))
                 painter.save()
                 painter.fillRect(options.rect, brush)
                 painter.restore()
         return super().drawRow(painter, options, idx)
 
-    def dropEvent(self, event: QDropEvent) -> None:
+    def dropEvent(self, event: QDropEvent | None) -> None:
+        assert event is not None
+
         model = self.model()
         if qtmajor == 5:
             pos = event.pos()  # type: ignore
@@ -319,7 +328,9 @@ class SidebarTreeView(QTreeView):
         if self.handle_drag_drop(self._selected_items(), target_item):
             event.acceptProposedAction()
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+    def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
+        assert event is not None
+
         super().mouseReleaseEvent(event)
         if (
             self.tool == SidebarTool.SEARCH
@@ -332,7 +343,9 @@ class SidebarTreeView(QTreeView):
             if (index := self.currentIndex()) == self.indexAt(pos):
                 self._on_search(index)
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        assert event is not None
+
         index = self.currentIndex()
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self.isPersistentEditorOpen(index):
@@ -462,6 +475,9 @@ class SidebarTreeView(QTreeView):
             s.item_type == item.item_type for s in self._selected_items()
         )
 
+    def _on_add(self, item: SidebarItem):
+        self.browser.add_card(DeckId(item.id))
+
     def _on_delete(self, item: SidebarItem) -> None:
         if item.item_type == SidebarItemType.SAVED_SEARCH:
             self.remove_saved_searches(item)
@@ -486,11 +502,9 @@ class SidebarTreeView(QTreeView):
     ###########################
 
     def _root_tree(self) -> SidebarItem:
-        root: SidebarItem | None = None
+        root = SidebarItem("", "", item_type=SidebarItemType.ROOT)
 
         for stage in SidebarStage:
-            if stage == SidebarStage.ROOT:
-                root = SidebarItem("", "", item_type=SidebarItemType.ROOT)
             handled = gui_hooks.browser_will_build_tree(
                 False, root, stage, self.browser
             )
@@ -524,10 +538,12 @@ class SidebarTreeView(QTreeView):
         *,
         root: SidebarItem,
         name: str,
-        icon: Union[str, ColoredIcon],
+        icon: str | ColoredIcon,
         collapse_key: Config.Bool.V,
         type: SidebarItemType | None = None,
     ) -> SidebarItem:
+        assert type is not None
+
         def update(expanded: bool) -> None:
             CollectionOp(
                 self.browser,
@@ -884,13 +900,14 @@ class SidebarTreeView(QTreeView):
     def onContextMenu(self, point: QPoint) -> None:
         index: QModelIndex = self.indexAt(point)
         item = self.model().item_for_index(index)
-        if item and self.selectionModel().isSelected(index):
+        if item and self._selection_model().isSelected(index):
             self.show_context_menu(item, index)
 
     def show_context_menu(self, item: SidebarItem, index: QModelIndex) -> None:
         menu = QMenu()
         self._maybe_add_type_specific_actions(menu, item)
         menu.addSeparator()
+        self._maybe_add_add_action(menu, item)
         self._maybe_add_delete_action(menu, item, index)
         self._maybe_add_rename_actions(menu, item, index)
         self._maybe_add_find_and_replace_action(menu, item, index)
@@ -929,6 +946,10 @@ class SidebarTreeView(QTreeView):
                     tr.browsing_remove_from_selected_notes(),
                     self.remove_tags_from_selected_notes,
                 )
+
+    def _maybe_add_add_action(self, menu: QMenu, item: SidebarItem) -> None:
+        if item.item_type.can_be_added_to():
+            menu.addAction(tr.browsing_add_notes(), lambda: self._on_add(item))
 
     def _maybe_add_delete_action(
         self, menu: QMenu, item: SidebarItem, index: QModelIndex
@@ -971,6 +992,8 @@ class SidebarTreeView(QTreeView):
             menu.addAction(tr.actions_search(), lambda: self.update_search(*nodes))
             return
         sub_menu = menu.addMenu(tr.actions_search())
+        assert sub_menu is not None
+
         sub_menu.addAction(
             tr.actions_all_selected(), lambda: self.update_search(*nodes)
         )
@@ -1083,7 +1106,9 @@ class SidebarTreeView(QTreeView):
         ).run_in_background()
 
     def delete_decks(self, _item: SidebarItem) -> None:
-        remove_decks(parent=self, deck_ids=self._selected_decks()).run_in_background()
+        remove_decks(
+            parent=self, deck_name=_item.name, deck_ids=self._selected_decks()
+        ).run_in_background()
 
     # Tags
     ###########################
@@ -1211,11 +1236,17 @@ class SidebarTreeView(QTreeView):
         )
 
     def manage_template(self, item: SidebarItem) -> None:
+        assert item._parent_item is not None
+
         note = Note(self.col, self.col.models.get(NotetypeId(item._parent_item.id)))
         CardLayout(self.mw, note, ord=item.id, parent=self, fill_empty=True)
 
     def manage_fields(self, item: SidebarItem) -> None:
+        assert item._parent_item is not None
+
         notetype = self.mw.col.models.get(NotetypeId(item._parent_item.id))
+        assert notetype is not None
+
         FieldDialog(self.mw, notetype, parent=self, open_at=item.id)
 
     # Helpers
@@ -1244,3 +1275,8 @@ class SidebarTreeView(QTreeView):
             for item in self._selected_items()
             if item.item_type == SidebarItemType.TAG
         ]
+
+    def _selection_model(self) -> QItemSelectionModel:
+        selection_model = self.selectionModel()
+        assert selection_model is not None
+        return selection_model

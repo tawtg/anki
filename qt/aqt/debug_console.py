@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -70,8 +72,10 @@ class DebugConsole(QDialog):
         qconnect(self._script.currentIndexChanged, self._on_script_change)
 
     def _setup_text_edits(self):
-        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        font.setPointSize(self._text.font().pointSize() + 1)
+        font = QFont("Consolas")
+        if not font.exactMatch():
+            font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(self._text.font().pointSize())
         self._text.setFont(font)
         self._log.setFont(font)
 
@@ -194,6 +198,7 @@ class DebugConsole(QDialog):
 
     def _on_context_menu(self, text_edit: QPlainTextEdit) -> None:
         menu = text_edit.createStandardContextMenu()
+        assert menu is not None
         menu.addSeparator()
         for action in self._actions():
             entry = menu.addAction(action.name)
@@ -225,7 +230,7 @@ class DebugConsole(QDialog):
             sys.stderr = self._oldStderr
             sys.stdout = self._oldStdout
 
-    def _card_repr(self, card: anki.cards.Card) -> None:
+    def _card_repr(self, card: anki.cards.Card | None) -> None:
         import copy
         import pprint
 
@@ -292,7 +297,7 @@ class DebugConsole(QDialog):
         try:
             # pylint: disable=exec-used
             exec(text, vars)
-        except:
+        except Exception:
             self._output += traceback.format_exc()
         self._captureOutput(False)
         buf = ""
@@ -314,6 +319,7 @@ class DebugConsole(QDialog):
             )
             self._log.appendPlainText(to_append)
         slider = self._log.verticalScrollBar()
+        assert slider is not None
         slider.setValue(slider.maximum())
         self._log.ensureCursorVisible()
 

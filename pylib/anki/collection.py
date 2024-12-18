@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Generator, Iterable, Literal, Sequence, Union, cast
+from collections.abc import Generator, Iterable, Sequence
+from typing import Any, Literal, Union, cast
 
 from anki import (
     ankiweb_pb2,
@@ -133,9 +134,9 @@ class Collection(DeprecatedNamesMixin):
     sched: V3Scheduler | DummyScheduler
 
     @staticmethod
-    def initialize_backend_logging(path: str | None = None) -> None:
-        """Enable terminal and optional file-based logging. Must be called only once."""
-        RustBackend.initialize_logging(path)
+    def initialize_backend_logging() -> None:
+        """Enable terminal logging. Must be called only once."""
+        RustBackend.initialize_logging(None)
 
     def __init__(
         self,
@@ -419,6 +420,11 @@ class Collection(DeprecatedNamesMixin):
     def import_json_string(self, json: str) -> ImportLogWithChanges:
         return self._backend.import_json_string(json)
 
+    def export_dataset_for_research(
+        self, target_path: str, min_entries: int = 0
+    ) -> None:
+        self._backend.export_dataset(min_entries=min_entries, target_path=target_path)
+
     # Image Occlusion
     ##########################################################################
 
@@ -471,7 +477,7 @@ class Collection(DeprecatedNamesMixin):
     # Object helpers
     ##########################################################################
 
-    def get_card(self, id: CardId) -> Card:
+    def get_card(self, id: CardId | None) -> Card:
         return Card(self, id)
 
     def update_cards(
@@ -603,9 +609,11 @@ class Collection(DeprecatedNamesMixin):
     def card_count(self) -> Any:
         return self.db.scalar("select count() from cards")
 
-    def remove_cards_and_orphaned_notes(self, card_ids: Sequence[CardId]) -> None:
+    def remove_cards_and_orphaned_notes(
+        self, card_ids: Sequence[CardId]
+    ) -> OpChangesWithCount:
         "You probably want .remove_notes_by_card() instead."
-        self._backend.remove_cards(card_ids=card_ids)
+        return self._backend.remove_cards(card_ids=card_ids)
 
     def set_deck(self, card_ids: Sequence[CardId], deck_id: int) -> OpChangesWithCount:
         return self._backend.set_deck(card_ids=card_ids, deck_id=deck_id)
@@ -858,12 +866,15 @@ class Collection(DeprecatedNamesMixin):
                 return column
         return None
 
-    def browser_row_for_id(
-        self, id_: int
-    ) -> tuple[Generator[tuple[str, bool], None, None], BrowserRow.Color.V, str, int]:
+    def browser_row_for_id(self, id_: int) -> tuple[
+        Generator[tuple[str, bool, BrowserRow.Cell.TextElideMode.V], None, None],
+        BrowserRow.Color.V,
+        str,
+        int,
+    ]:
         row = self._backend.browser_row_for_id(id_)
         return (
-            ((cell.text, cell.is_rtl) for cell in row.cells),
+            ((cell.text, cell.is_rtl, cell.elide_mode) for cell in row.cells),
             row.color,
             row.font_name,
             row.font_size,
@@ -896,7 +907,7 @@ class Collection(DeprecatedNamesMixin):
     # Config
     ##########################################################################
 
-    def get_config(self, key: str, default: Any = None) -> Any:
+    def get_config(self, key: str, default: Any | None = None) -> Any:
         try:
             return self.conf.get_immutable(key)
         except KeyError:
@@ -938,7 +949,7 @@ class Collection(DeprecatedNamesMixin):
         return self._backend.set_config_string(key=key, value=value, undoable=undoable)
 
     def get_aux_notetype_config(
-        self, id: NotetypeId, key: str, default: Any = None
+        self, id: NotetypeId, key: str, default: Any | None = None
     ) -> Any:
         key = self._backend.get_aux_notetype_config_key(id=id, key=key)
         return self.get_config(key, default=default)
@@ -950,7 +961,7 @@ class Collection(DeprecatedNamesMixin):
         return self.set_config(key, value, undoable=undoable)
 
     def get_aux_template_config(
-        self, id: NotetypeId, card_ordinal: int, key: str, default: Any = None
+        self, id: NotetypeId, card_ordinal: int, key: str, default: Any | None = None
     ) -> Any:
         key = self._backend.get_aux_template_config_key(
             notetype_id=id, card_ordinal=card_ordinal, key=key
@@ -971,6 +982,26 @@ class Collection(DeprecatedNamesMixin):
         )
         return self.set_config(key, value, undoable=undoable)
 
+    def _get_enable_load_balancer(self) -> bool:
+        return self.get_config_bool(Config.Bool.LOAD_BALANCER_ENABLED)
+
+    def _set_enable_load_balancer(self, value: bool) -> None:
+        self.set_config_bool(Config.Bool.LOAD_BALANCER_ENABLED, value)
+
+    load_balancer_enabled = property(
+        fget=_get_enable_load_balancer, fset=_set_enable_load_balancer
+    )
+
+    def _get_enable_fsrs_short_term_with_steps(self) -> bool:
+        return self.get_config_bool(Config.Bool.FSRS_SHORT_TERM_WITH_STEPS_ENABLED)
+
+    def _set_enable_fsrs_short_term_with_steps(self, value: bool) -> None:
+        self.set_config_bool(Config.Bool.FSRS_SHORT_TERM_WITH_STEPS_ENABLED, value)
+
+    fsrs_short_term_with_steps_enabled = property(
+        fget=_get_enable_fsrs_short_term_with_steps,
+        fset=_set_enable_fsrs_short_term_with_steps,
+    )
     # Stats
     ##########################################################################
 
@@ -987,6 +1018,11 @@ class Collection(DeprecatedNamesMixin):
         https://ankiweb.net/shared/info/2179254157
         """
         return self._backend.card_stats(card_id)
+
+    def get_review_logs(
+        self, card_id: CardId
+    ) -> Sequence[stats_pb2.CardStatsResponse.StatsRevlogEntry]:
+        return self._backend.get_review_logs(card_id)
 
     def studied_today(self) -> str:
         return self._backend.studied_today()
@@ -1092,7 +1128,7 @@ class Collection(DeprecatedNamesMixin):
         self._backend.abort_sync()
 
     def full_upload_or_download(
-        self, *, auth: SyncAuth, server_usn: int | None, upload: bool
+        self, *, auth: SyncAuth | None, server_usn: int | None, upload: bool
     ) -> None:
         self._backend.full_upload_or_download(
             sync_pb2.FullUploadOrDownloadRequest(
@@ -1120,6 +1156,12 @@ class Collection(DeprecatedNamesMixin):
         "This will throw if the sync failed with an error."
         return self._backend.media_sync_status()
 
+    def ankihub_login(self, id: str, password: str) -> str:
+        return self._backend.ankihub_login(id=id, password=password)
+
+    def ankihub_logout(self, token: str) -> None:
+        self._backend.ankihub_logout(token=token)
+
     def get_preferences(self) -> Preferences:
         return self._backend.get_preferences()
 
@@ -1130,8 +1172,12 @@ class Collection(DeprecatedNamesMixin):
         "Not intended for public consumption at this time."
         return self._backend.render_markdown(markdown=text, sanitize=sanitize)
 
-    def compare_answer(self, expected: str, provided: str) -> str:
-        return self._backend.compare_answer(expected=expected, provided=provided)
+    def compare_answer(
+        self, expected: str, provided: str, combining: bool = True
+    ) -> str:
+        return self._backend.compare_answer(
+            expected=expected, provided=provided, combining=combining
+        )
 
     def extract_cloze_for_typing(self, text: str, ordinal: int) -> str:
         return self._backend.extract_cloze_for_typing(text=text, ordinal=ordinal)

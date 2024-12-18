@@ -38,6 +38,7 @@ pub fn build_bundle_binary() {
                 .unwrap(),
         )
         .env("MACOSX_DEPLOYMENT_TARGET", macos_deployment_target())
+        .env("SDKROOT", "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
         .env("CARGO_BUILD_TARGET", env!("TARGET"));
     if env!("TARGET") == "x86_64-apple-darwin" {
         let xcode_path = Command::run_with_output(["xcode-select", "-p"]).unwrap();
@@ -45,7 +46,7 @@ pub fn build_bundle_binary() {
             .join("Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic");
         if ld_classic.exists() {
             // work around XCode 15's default linker not supporting macOS 10.15-12.
-            command.env("RUSTFLAGS", &format!("-Clink-arg=-fuse-ld={ld_classic}"));
+            command.env("RUSTFLAGS", format!("-Clink-arg=-fuse-ld={ld_classic}"));
         }
     }
     run_command(&mut command);

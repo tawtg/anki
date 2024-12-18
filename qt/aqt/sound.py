@@ -9,12 +9,14 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 import wave
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import Future
 from operator import itemgetter
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 from markdown import markdown
 
@@ -243,7 +245,8 @@ av_player = AVPlayer()
 def _packagedCmd(cmd: list[str]) -> tuple[Any, dict[str, str]]:
     cmd = cmd[:]
     env = os.environ.copy()
-    if "LD_LIBRARY_PATH" in env:
+    # keep LD_LIBRARY_PATH when in snap environment
+    if "LD_LIBRARY_PATH" in env and "SNAP" not in env:
         del env["LD_LIBRARY_PATH"]
 
     if is_win:
@@ -306,7 +309,7 @@ class SimpleProcessPlayer(Player):  # pylint: disable=abstract-method
     def _play(self, tag: AVTag) -> None:
         assert isinstance(tag, SoundOrVideoTag)
         self._process = subprocess.Popen(
-            self.args + [tag.filename],
+            self.args + ["--", tag.filename],
             env=self.env,
             cwd=self._media_folder,
             stdout=subprocess.DEVNULL,
@@ -428,7 +431,7 @@ class MpvManager(MPV, SoundOrVideoPlayer):
         filename = hooks.media_file_filter(tag.filename)
         path = os.path.join(self.media_folder, filename)
 
-        self.command("loadfile", path, "replace", "pause=no")
+        self.command("loadfile", path, "replace")
         gui_hooks.av_player_did_begin_playing(self, tag)
 
     def stop(self) -> None:
@@ -478,7 +481,7 @@ class SimpleMplayerSlaveModePlayer(SimpleMplayerPlayer):
         filename = hooks.media_file_filter(tag.filename)
 
         self._process = subprocess.Popen(
-            self.args + [filename],
+            self.args + ["--", filename],
             env=self.env,
             cwd=self.media_folder,
             stdin=subprocess.PIPE,

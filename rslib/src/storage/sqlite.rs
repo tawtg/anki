@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::hash::Hasher;
 use std::path::Path;
 use std::sync::Arc;
@@ -70,10 +71,11 @@ fn open_or_create_collection_db(path: &Path) -> Result<Connection> {
     add_regexp_tags_function(&db)?;
     add_without_combining_function(&db)?;
     add_fnvhash_function(&db)?;
+    add_extract_original_position_function(&db)?;
     add_extract_custom_data_function(&db)?;
     add_extract_fsrs_variable(&db)?;
     add_extract_fsrs_retrievability(&db)?;
-    add_extract_fsrs_relative_overdueness(&db)?;
+    add_extract_fsrs_relative_retrievability(&db)?;
 
     db.create_collation("unicase", unicase_compare)?;
 
@@ -205,6 +207,29 @@ fn add_regexp_tags_function(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// eg. extract_original_position(c.data) -> number | null
+/// Parse original card position from c.data (this is only populated after card
+/// has been reviewed)
+fn add_extract_original_position_function(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "extract_original_position",
+        1,
+        FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            assert_eq!(ctx.len(), 1, "called with unexpected number of arguments");
+
+            let Ok(card_data) = ctx.get_raw(0).as_str() else {
+                return Ok(None);
+            };
+
+            match &CardData::from_str(card_data).original_position {
+                Some(position) => Ok(Some(*position as i64)),
+                None => Ok(None),
+            }
+        },
+    )
+}
+
 /// eg. extract_custom_data(card.data, 'r') -> string | null
 fn add_extract_custom_data_function(db: &Connection) -> rusqlite::Result<()> {
     db.create_scalar_function(
@@ -289,7 +314,7 @@ fn add_extract_fsrs_retrievability(db: &Connection) -> rusqlite::Result<()> {
                 let Ok(next_day_at) = ctx.get_raw(4).as_i64() else {
                     return Ok(None);
                 };
-                (next_day_at as u32).saturating_sub(due.max(0) as u32) / 86_400
+                (next_day_at).saturating_sub(due) as u32 / 86_400
             } else {
                 let Ok(ivl) = ctx.get_raw(2).as_i64() else {
                     return Ok(None);
@@ -297,8 +322,8 @@ fn add_extract_fsrs_retrievability(db: &Connection) -> rusqlite::Result<()> {
                 let Ok(days_elapsed) = ctx.get_raw(3).as_i64() else {
                     return Ok(None);
                 };
-                let review_day = (due.max(0) as u32).saturating_sub(ivl as u32);
-                (days_elapsed.max(0) as u32).saturating_sub(review_day)
+                let review_day = due.saturating_sub(ivl);
+                days_elapsed.saturating_sub(review_day) as u32
             };
             Ok(card_data.memory_state().map(|state| {
                 FSRS::new(None)
@@ -309,12 +334,13 @@ fn add_extract_fsrs_retrievability(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// eg. extract_fsrs_relative_overdueness(card.data, card.due,
+/// eg. extract_fsrs_relative_retrievability(card.data, card.due,
 /// timing.days_elapsed, card.ivl, timing.next_day_at) -> float | null. The
-/// higher the number, the more overdue.
-fn add_extract_fsrs_relative_overdueness(db: &Connection) -> rusqlite::Result<()> {
+/// higher the number, the higher the card's retrievability relative to the
+/// configured desired retention.
+fn add_extract_fsrs_relative_retrievability(db: &Connection) -> rusqlite::Result<()> {
     db.create_scalar_function(
-        "extract_fsrs_relative_overdueness",
+        "extract_fsrs_relative_retrievability",
         5,
         FunctionFlags::SQLITE_DETERMINISTIC,
         move |ctx| {
@@ -335,7 +361,7 @@ fn add_extract_fsrs_relative_overdueness(db: &Connection) -> rusqlite::Result<()
                 let Ok(next_day_at) = ctx.get_raw(4).as_i64() else {
                     return Ok(None);
                 };
-                (next_day_at as u32).saturating_sub(due.max(0) as u32) / 86_400
+                next_day_at.saturating_sub(due) as u32 / 86_400
             } else {
                 let Ok(days_elapsed) = ctx.get_raw(2).as_i64() else {
                     return Ok(None);
@@ -362,7 +388,7 @@ fn add_extract_fsrs_relative_overdueness(db: &Connection) -> rusqlite::Result<()
                 .max(0.0001);
 
             Ok(Some(
-                (1. / current_retrievability - 1.) / (1. / desired_retrievability - 1.),
+                -(1. / current_retrievability - 1.) / (1. / desired_retrievability - 1.),
             ))
         },
     )
@@ -564,5 +590,24 @@ impl SqliteStorage {
     #[cfg(test)]
     pub(crate) fn db_scalar<T: rusqlite::types::FromSql>(&self, sql: &str) -> Result<T> {
         self.db.query_row(sql, [], |r| r.get(0)).map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SqlSortOrder {
+    Ascending,
+    Descending,
+}
+
+impl Display for SqlSortOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                SqlSortOrder::Ascending => "asc",
+                SqlSortOrder::Descending => "desc",
+            }
+        )
     }
 }

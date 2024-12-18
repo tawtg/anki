@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use unicase::UniCase;
+
 use super::NameOrId;
 use crate::card::CardQueue;
 use crate::card::CardType;
@@ -26,6 +28,7 @@ use crate::notetype::CardTemplate;
 use crate::notetype::NoteField;
 use crate::prelude::*;
 use crate::progress::ThrottlingProgressHandler;
+use crate::scheduler::timing::SchedTimingToday;
 use crate::text::strip_html_preserving_media_filenames;
 
 impl ForeignData {
@@ -73,7 +76,7 @@ struct Context<'a> {
     deck_ids: DeckIdsByNameOrId,
     usn: Usn,
     normalize_notes: bool,
-    today: u32,
+    timing: SchedTimingToday,
     dupe_resolution: DupeResolution,
     card_gen_ctxs: HashMap<(NotetypeId, DeckId), CardGenContext<Arc<Notetype>>>,
     existing_checksums: ExistingChecksums,
@@ -82,7 +85,7 @@ struct Context<'a> {
 
 struct DeckIdsByNameOrId {
     ids: HashSet<DeckId>,
-    names: HashMap<String, DeckId>,
+    names: HashMap<UniCase<String>, DeckId>,
     default: Option<DeckId>,
 }
 
@@ -145,10 +148,10 @@ impl Duplicate {
 
 impl DeckIdsByNameOrId {
     fn new(col: &mut Collection, default: &NameOrId) -> Result<Self> {
-        let names: HashMap<String, DeckId> = col
+        let names: HashMap<UniCase<String>, DeckId> = col
             .get_all_normal_deck_names(false)?
             .into_iter()
-            .map(|(id, name)| (name, id))
+            .map(|(id, name)| (UniCase::new(name), id))
             .collect();
         let ids = names.values().copied().collect();
         let mut new = Self {
@@ -165,13 +168,13 @@ impl DeckIdsByNameOrId {
         match name_or_id {
             _ if *name_or_id == NameOrId::default() => self.default,
             NameOrId::Id(id) => self.ids.get(&DeckId(*id)).copied(),
-            NameOrId::Name(name) => self.names.get(name).copied(),
+            NameOrId::Name(name) => self.names.get(&UniCase::new(name.to_string())).copied(),
         }
     }
 
     fn insert(&mut self, deck_id: DeckId, name: String) {
         self.ids.insert(deck_id);
-        self.names.insert(name, deck_id);
+        self.names.insert(UniCase::new(name), deck_id);
     }
 }
 
@@ -179,7 +182,7 @@ impl<'a> Context<'a> {
     fn new(data: &ForeignData, col: &'a mut Collection) -> Result<Self> {
         let usn = col.usn()?;
         let normalize_notes = col.get_config_bool(BoolKey::NormalizeNoteText);
-        let today = col.timing_today()?.days_elapsed;
+        let timing = col.timing_today()?;
         let mut notetypes = HashMap::new();
         notetypes.insert(
             NameOrId::default(),
@@ -193,7 +196,7 @@ impl<'a> Context<'a> {
             col,
             usn,
             normalize_notes,
-            today,
+            timing,
             dupe_resolution: data.dupe_resolution,
             notetypes,
             deck_ids,
@@ -355,7 +358,7 @@ impl<'a> Context<'a> {
         let mut note = Note::new(&ctx.notetype);
         let mut cards = ctx
             .note
-            .into_native(&mut note, ctx.deck_id, self.today, ctx.global_tags);
+            .into_native(&mut note, ctx.deck_id, &self.timing, ctx.global_tags);
         self.prepare_note(&mut note, &ctx.notetype)?;
         self.col.add_note_only_undoable(&mut note)?;
         self.add_cards(&mut cards, &note, ctx.deck_id, ctx.notetype)?;
@@ -392,7 +395,7 @@ impl<'a> Context<'a> {
             let mut cards = ctx.note.clone().into_native(
                 &mut note,
                 ctx.deck_id,
-                self.today,
+                &self.timing,
                 ctx.global_tags.iter().chain(ctx.updated_tags.iter()),
             );
 
@@ -543,7 +546,7 @@ impl ForeignNote {
         self,
         note: &mut Note,
         deck_id: DeckId,
-        today: u32,
+        timing: &SchedTimingToday,
         extra_tags: impl IntoIterator<Item = &'tags String>,
     ) -> Vec<Card> {
         // TODO: Handle new and learning cards
@@ -565,7 +568,7 @@ impl ForeignNote {
         self.cards
             .into_iter()
             .enumerate()
-            .map(|(idx, c)| c.into_native(NoteId(0), idx as u16, deck_id, today))
+            .map(|(idx, c)| c.into_native(NoteId(0), idx as u16, deck_id, timing))
             .collect()
     }
 
@@ -609,12 +612,18 @@ impl ForeignNote {
 }
 
 impl ForeignCard {
-    fn into_native(self, note_id: NoteId, template_idx: u16, deck_id: DeckId, today: u32) -> Card {
+    fn into_native(
+        self,
+        note_id: NoteId,
+        template_idx: u16,
+        deck_id: DeckId,
+        timing: &SchedTimingToday,
+    ) -> Card {
         Card {
             note_id,
             template_idx,
             deck_id,
-            due: self.native_due(today),
+            due: self.native_due(timing),
             interval: self.interval,
             ease_factor: (self.ease_factor * 1000.).round() as u16,
             reps: self.reps,
@@ -625,10 +634,10 @@ impl ForeignCard {
         }
     }
 
-    fn native_due(self, today: u32) -> i32 {
-        let remaining_secs = self.interval as i64 - TimestampSecs::now().0;
-        let remaining_days = remaining_secs / (60 * 60 * 24);
-        0.max(remaining_days as i32 + today as i32)
+    fn native_due(self, timing: &SchedTimingToday) -> i32 {
+        let day_start = timing.next_day_at.0 - 86_400;
+        let due_delta = (self.due - day_start) / 86_400;
+        due_delta as i32 + timing.days_elapsed as i32
     }
 }
 

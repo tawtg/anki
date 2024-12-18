@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import enum
 import re
-from typing import Any, Callable, Optional, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import aqt
 from anki.sync import SyncStatus
@@ -36,7 +37,9 @@ class BottomToolbar:
 class ToolbarWebView(AnkiWebView):
     hide_condition: Callable[..., bool]
 
-    def __init__(self, mw: aqt.AnkiQt, kind: AnkiWebViewKind | None = None) -> None:
+    def __init__(
+        self, mw: aqt.AnkiQt, kind: AnkiWebViewKind = AnkiWebViewKind.DEFAULT
+    ) -> None:
         AnkiWebView.__init__(self, mw, kind=kind)
         self.mw = mw
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
@@ -86,9 +89,10 @@ class TopWebView(ToolbarWebView):
 
         self.show()
 
-    def _onHeight(self, qvar: Optional[int]) -> None:
+    def _onHeight(self, qvar: int | None) -> None:
         super()._onHeight(qvar)
-        self.web_height = int(qvar)
+        if qvar:
+            self.web_height = int(qvar)
 
     def hide_if_allowed(self) -> None:
         if self.mw.state != "review":
@@ -151,9 +155,10 @@ class TopWebView(ToolbarWebView):
             self.set_body_height(self.mw.web.height())
 
             # offset reviewer background by toolbar height
-            self.mw.web.eval(
-                f"""document.body.style.setProperty("background-position-y", "-{self.web_height}px"); """
-            )
+            if self.web_height:
+                self.mw.web.eval(
+                    f"""document.body.style.setProperty("background-position-y", "-{self.web_height}px"); """
+                )
 
         self.mw.web.evalWithCallback(
             """window.getComputedStyle(document.body).background; """,
@@ -169,7 +174,7 @@ class TopWebView(ToolbarWebView):
         self.eval("""document.body.style.setProperty("min-height", "0px"); """)
         self.evalWithCallback("document.documentElement.offsetHeight", self._onHeight)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
+    def resizeEvent(self, event: QResizeEvent | None) -> None:
         super().resizeEvent(event)
 
         self.mw.web.evalWithCallback(

@@ -8,10 +8,13 @@ import gc
 import os
 import re
 import signal
+import sys
+import traceback
 import weakref
 from argparse import Namespace
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future
-from typing import Any, Literal, Sequence, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 
 import anki
 import anki.cards
@@ -198,7 +201,7 @@ class AnkiQt(QMainWindow):
             self.setupUI()
             self.setupAddons(args)
             self.finish_ui_setup()
-        except:
+        except Exception:
             showInfo(tr.qt_misc_error_during_startup(val=traceback.format_exc()))
             sys.exit(1)
         # must call this after ui set up
@@ -349,7 +352,7 @@ class AnkiQt(QMainWindow):
         f.profiles.addItems(profs)
         try:
             idx = profs.index(self.pm.name)
-        except:
+        except Exception:
             idx = 0
         f.profiles.setCurrentRow(idx)
 
@@ -420,32 +423,59 @@ class AnkiQt(QMainWindow):
         self.pm.remove(self.pm.name)
         self.refreshProfilesList()
 
-    def onOpenBackup(self) -> None:
-        if not askUser(
-            tr.qt_misc_replace_your_collection_with_an_earlier(),
-            msgfunc=QMessageBox.warning,
-            defaultno=True,
-        ):
-            return
+    def _handle_load_backup_success(self) -> None:
+        """
+        Actions that occur when profile backup has been loaded successfully
+        """
+        if self.state == "profileManager":
+            self.profileDiag.closeWithoutQuitting()
 
-        def doOpen(path: str) -> None:
-            self._openBackup(path)
+        self.loadProfile()
+
+    def _handle_load_backup_failure(self, error: Exception) -> None:
+        """
+        Actions that occur when a profile has loaded unsuccessfully
+        """
+        showWarning(str(error))
+        if self.state != "profileManager":
+            self.loadProfile()
+
+    def onOpenBackup(self) -> None:
+
+        def do_open(path: str) -> None:
+            if not askUser(
+                tr.qt_misc_replace_your_collection_with_an_earlier2(
+                    os.path.basename(path)
+                ),
+                msgfunc=QMessageBox.warning,
+                defaultno=True,
+            ):
+                return
+
+            showInfo(tr.qt_misc_automatic_syncing_and_backups_have_been())
+
+            # Collection is still loaded if called from main window, so we unload. This is already
+            # unloaded if called from the ProfileManager window.
+            if self.col:
+                self.unloadProfile(lambda: self._start_restore_backup(path))
+                return
+
+            self._start_restore_backup(path)
 
         getFile(
-            self.profileDiag,
+            self.profileDiag if self.state == "profileManager" else self,
             tr.qt_misc_revert_to_backup(),
-            cb=doOpen,  # type: ignore
+            cb=do_open,  # type: ignore
             filter="*.colpkg",
             dir=self.pm.backupFolder(),
         )
 
-    def _openBackup(self, path: str) -> None:
+    def _start_restore_backup(self, path: str):
         self.restoring_backup = True
-        showInfo(tr.qt_misc_automatic_syncing_and_backups_have_been())
 
         import_collection_package_op(
-            self, path, success=self.onOpenProfile
-        ).run_in_background()
+            self, path, success=self._handle_load_backup_success
+        ).failure(self._handle_load_backup_failure).run_in_background()
 
     def _on_downgrade(self) -> None:
         self.progress.start()
@@ -493,7 +523,6 @@ class AnkiQt(QMainWindow):
             else:
                 self.handleImport(self.pendingImport)
             self.pendingImport = None
-        gui_hooks.profile_did_open()
 
         def _onsuccess(synced: bool) -> None:
             if synced:
@@ -526,7 +555,7 @@ class AnkiQt(QMainWindow):
             )
 
         refresh_reviewer_on_day_rollover_change()
-
+        gui_hooks.profile_did_open()
         self.maybe_auto_sync_on_open_close(_onsuccess)
 
     def unloadProfile(self, onsuccess: Callable) -> None:
@@ -572,6 +601,7 @@ class AnkiQt(QMainWindow):
         self.backend.await_backup_completion()
         self.deleteLater()
         app = self.app
+        app._unset_windows_shutdown_block_reason()
 
         def exit():
             # try to ensure Qt objects are deleted in a logical order,
@@ -679,7 +709,7 @@ class AnkiQt(QMainWindow):
             self.maybeOptimize()
             if not dev_mode:
                 corrupt = self.col.db.scalar("pragma quick_check") != "ok"
-        except:
+        except Exception:
             corrupt = True
 
         try:
@@ -691,7 +721,7 @@ class AnkiQt(QMainWindow):
                         force=False,
                         wait_for_completion=False,
                     )
-                except:
+                except Exception:
                     print("backup on close failed")
             self.col.close(downgrade=False)
         except Exception as e:
@@ -858,8 +888,8 @@ class AnkiQt(QMainWindow):
     def requireReset(
         self,
         modal: bool = False,
-        reason: Any = None,
-        context: Any = None,
+        reason: Any | None = None,
+        context: Any | None = None,
     ) -> None:
         traceback.print_stack(file=sys.stdout)
         print("requireReset() is obsolete; please use CollectionOp()")
@@ -1069,16 +1099,13 @@ title="{}" {}>{}</button>""".format(
         else:
             after_sync(False)
 
-    def maybe_auto_sync_media(self) -> None:
-        if self.can_auto_sync():
-            return
-        # media_syncer takes care of media syncing preference check
-        self.media_syncer.start()
-
     def can_auto_sync(self) -> bool:
+        "True if syncing on startup/shutdown enabled."
+        return self._can_sync_unattended() and self.pm.auto_syncing_enabled()
+
+    def _can_sync_unattended(self) -> bool:
         return (
-            self.pm.auto_syncing_enabled()
-            and bool(self.pm.sync_auth())
+            bool(self.pm.sync_auth())
             and not self.safeMode
             and not self.restoring_backup
         )
@@ -1348,6 +1375,7 @@ title="{}" {}>{}</button>""".format(
         qconnect(m.actionImport.triggered, self.onImport)
         qconnect(m.actionExport.triggered, self.onExport)
         qconnect(m.action_create_backup.triggered, self.on_create_backup_now)
+        qconnect(m.action_open_backup.triggered, self.onOpenBackup)
         qconnect(m.actionExit.triggered, self.close)
 
         # Help
@@ -1430,7 +1458,8 @@ title="{}" {}>{}</button>""".format(
     def setup_auto_update(self, _log: list[DownloadLogEntry]) -> None:
         from aqt.update import check_for_update
 
-        check_for_update()
+        if aqt.mw.pm.check_for_updates():
+            check_for_update()
 
     # Timers
     ##########################################################################
@@ -1439,7 +1468,9 @@ title="{}" {}>{}</button>""".format(
         # refresh decks every 10 minutes
         self.progress.timer(10 * 60 * 1000, self.onRefreshTimer, True, parent=self)
         # check media sync every 5 minutes
-        self.progress.timer(5 * 60 * 1000, self.on_autosync_timer, True, parent=self)
+        self.progress.timer(
+            5 * 60 * 1000, self.on_periodic_sync_timer, True, parent=self
+        )
         # periodic garbage collection
         self.progress.timer(
             15 * 60 * 1000, self.garbage_collect_now, True, False, parent=self
@@ -1461,13 +1492,16 @@ title="{}" {}>{}</button>""".format(
         elif self.state == "overview":
             self.overview.refresh()
 
-    def on_autosync_timer(self) -> None:
+    def on_periodic_sync_timer(self) -> None:
         elap = self.media_syncer.seconds_since_last_sync()
-        minutes = self.pm.auto_sync_media_minutes()
+        minutes = self.pm.periodic_sync_media_minutes()
         if not minutes:
             return
         if elap > minutes * 60:
-            self.maybe_auto_sync_media()
+            if not self._can_sync_unattended():
+                return
+            # media_syncer takes care of media syncing preference check
+            self.media_syncer.start(True)
 
     # Backups
     ##########################################################################

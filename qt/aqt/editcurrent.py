@@ -1,6 +1,8 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
-from typing import Optional
+from __future__ import annotations
+
+from collections.abc import Callable
 
 import aqt.editor
 from anki.collection import OpChanges
@@ -19,16 +21,19 @@ class EditCurrent(QMainWindow):
         self.setWindowTitle(tr.editing_edit_current())
         self.setMinimumHeight(400)
         self.setMinimumWidth(250)
+        self.setMenuBar(None)
         self.editor = aqt.editor.Editor(
             self.mw,
             self.form.fieldsArea,
             self,
             editor_mode=aqt.editor.EditorMode.EDIT_CURRENT,
         )
+        assert self.mw.reviewer.card is not None
         self.editor.card = self.mw.reviewer.card
         self.editor.set_note(self.mw.reviewer.card.note(), focusTo=0)
         restoreGeom(self, "editcurrent")
         close_button = self.form.buttonBox.button(QDialogButtonBox.StandardButton.Close)
+        assert close_button is not None
         close_button.setShortcut(QKeySequence("Ctrl+Return"))
         # qt5.14+ doesn't handle numpad enter on Windows
         self.compat_add_shorcut = QShortcut(QKeySequence("Ctrl+Enter"), self)
@@ -37,12 +42,13 @@ class EditCurrent(QMainWindow):
         self.show()
 
     def on_operation_did_execute(
-        self, changes: OpChanges, handler: Optional[object]
+        self, changes: OpChanges, handler: object | None
     ) -> None:
         if changes.note_text and handler is not self.editor:
             # reload note
             note = self.editor.note
             try:
+                assert note is not None
                 note.load()
             except NotFoundError:
                 # note's been deleted
@@ -62,7 +68,7 @@ class EditCurrent(QMainWindow):
         if card := self.mw.reviewer.card:
             self.editor.set_note(card.note())
 
-    def closeEvent(self, evt: QCloseEvent) -> None:
+    def closeEvent(self, evt: QCloseEvent | None) -> None:
         self.editor.call_after_note_saved(self.cleanup)
 
     def _saveAndClose(self) -> None:

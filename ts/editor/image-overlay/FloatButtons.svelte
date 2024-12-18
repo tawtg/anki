@@ -3,13 +3,18 @@ Copyright: Ankitects Pty Ltd and contributors
 License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 -->
 <script lang="ts">
-    import * as tr from "@tslib/ftl";
+    import * as tr from "@generated/ftl";
     import { removeStyleProperties } from "@tslib/styling";
     import { createEventDispatcher } from "svelte";
 
-    import ButtonGroup from "../../components/ButtonGroup.svelte";
-    import IconButton from "../../components/IconButton.svelte";
-    import { floatLeftIcon, floatNoneIcon, floatRightIcon } from "./icons";
+    import ButtonGroup from "$lib/components/ButtonGroup.svelte";
+    import Icon from "$lib/components/Icon.svelte";
+    import IconButton from "$lib/components/IconButton.svelte";
+    import {
+        floatLeftIcon,
+        floatNoneIcon,
+        floatRightIcon,
+    } from "$lib/components/icons";
 
     export let image: HTMLImageElement;
 
@@ -28,7 +33,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }}
         --border-left-radius="5px"
     >
-        {@html floatLeftIcon}
+        <Icon icon={floatLeftIcon} />
     </IconButton>
 
     <IconButton
@@ -42,7 +47,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             setTimeout(() => dispatch("update"));
         }}
     >
-        {@html floatNoneIcon}
+        <Icon icon={floatNoneIcon} />
     </IconButton>
 
     <IconButton
@@ -54,6 +59,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }}
         --border-right-radius="5px"
     >
-        {@html floatRightIcon}
+        <Icon icon={floatRightIcon} />
     </IconButton>
 </ButtonGroup>

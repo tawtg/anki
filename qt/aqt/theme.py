@@ -7,8 +7,8 @@ import enum
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
 
 import anki.lang
 import aqt
@@ -231,7 +231,9 @@ class ThemeManager:
         self._current_widget_style = new_widget_style
         app = aqt.mw.app
         if not self._default_style:
-            self._default_style = app.style().objectName()
+            style = app.style()
+            assert style is not None
+            self._default_style = style.objectName()
         self._apply_palette(app)
         self._apply_style(app)
         gui_hooks.theme_did_change()
@@ -386,7 +388,7 @@ def get_linux_dark_mode() -> bool:
 
         return dbus_response[-1] == PREFER_DARK
 
-    dark_mode_detection_strategies: List[Tuple[str, Callable[[str], bool]]] = [
+    dark_mode_detection_strategies: list[tuple[str, Callable[[str], bool]]] = [
         (
             "dbus-send --session --print-reply=literal --reply-timeout=1000 "
             "--dest=org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop "

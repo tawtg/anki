@@ -3,22 +3,23 @@
 
 from __future__ import annotations
 
+import os
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from itertools import chain
-from typing import Type
 
 import aqt.main
 from anki.collection import Collection, Progress
 from anki.errors import Interrupted
 from anki.foreign_data import mnemosyne
 from anki.lang import without_unicode_isolation
+from anki.utils import tmpdir
 from aqt.import_export.import_dialog import (
     AnkiPackageArgs,
     CsvArgs,
     ImportDialog,
     JsonFileArgs,
-    JsonStringArgs,
 )
 from aqt.operations import QueryOp
 from aqt.progress import ProgressUpdate
@@ -37,8 +38,7 @@ class Importer(ABC):
 
     @classmethod
     @abstractmethod
-    def do_import(cls, mw: aqt.main.AnkiQt, path: str) -> None:
-        ...
+    def do_import(cls, mw: aqt.main.AnkiQt, path: str) -> None: ...
 
 
 class ColpkgImporter(Importer):
@@ -96,10 +96,16 @@ class MnemosyneImporter(Importer):
 
     @staticmethod
     def do_import(mw: aqt.main.AnkiQt, path: str) -> None:
+        def on_success(json: str) -> None:
+            json_path = os.path.join(tmpdir(), os.path.basename(path))
+            with open(json_path, "wb") as file:
+                file.write(json.encode("utf8"))
+            ImportDialog(mw, JsonFileArgs(path=json_path))
+
         QueryOp(
             parent=mw,
             op=lambda col: mnemosyne.serialize(path, col.decks.current()["id"]),
-            success=lambda json: ImportDialog(mw, JsonStringArgs(path=path, json=json)),
+            success=on_success,
         ).with_progress().run_in_background()
 
 
@@ -119,7 +125,7 @@ class JsonImporter(Importer):
         ImportDialog(mw, JsonFileArgs(path=path))
 
 
-IMPORTERS: list[Type[Importer]] = [
+IMPORTERS: list[type[Importer]] = [
     ColpkgImporter,
     ApkgImporter,
     MnemosyneImporter,

@@ -5,8 +5,9 @@ import { getSelection, isSelectionCollapsed } from "@tslib/cross-browser";
 import { elementIsBlock, hasBlockAttribute, nodeIsElement, nodeIsText } from "@tslib/dom";
 import { on } from "@tslib/events";
 
-import { moveChildOutOfElement } from "../domlib/move-nodes";
-import { placeCaretAfter, placeCaretBefore } from "../domlib/place-caret";
+import { moveChildOutOfElement } from "$lib/domlib/move-nodes";
+import { placeCaretAfter, placeCaretBefore } from "$lib/domlib/place-caret";
+
 import type { FrameHandle } from "./frame-handle";
 import { checkHandles, frameElementTagName, FrameEnd, FrameStart, isFrameHandle } from "./frame-handle";
 
@@ -59,7 +60,7 @@ function restoreFrameHandles(mutations: MutationRecord[]): void {
                 continue;
             }
 
-            if (frameElement.isConnected && !frameElement.block) {
+            if (frameElement.isConnected) {
                 frameElement.refreshHandles();
                 continue;
             }
@@ -114,13 +115,7 @@ export class FrameElement extends HTMLElement {
 
             case "block":
                 this.block = newValue !== "false";
-
-                if (!this.block) {
-                    this.refreshHandles();
-                } else {
-                    this.removeHandles();
-                }
-
+                this.refreshHandles();
                 break;
         }
     }
@@ -150,14 +145,6 @@ export class FrameElement extends HTMLElement {
         if (!this.handleEnd.isConnected) {
             this.append(this.handleEnd);
         }
-    }
-
-    removeHandles(): void {
-        this.handleStart?.remove();
-        this.handleStart = undefined;
-
-        this.handleEnd?.remove();
-        this.handleEnd = undefined;
     }
 
     removeStart?: () => void;

@@ -44,14 +44,15 @@ def check_for_update() -> None:
             mw.pm.meta["lastMsg"] = resp.last_message_id
         # has Anki been updated?
         if ver := resp.new_version:
-            prompt_to_update(mw, ver)
+            if mw.pm.meta.get("suppressUpdate", None) != ver:
+                prompt_to_update(mw, ver)
 
     def on_fail(exc: Exception) -> None:
         print(f"update check failed: {exc}")
 
     QueryOp(parent=mw, op=do_check, success=on_done).failure(
         on_fail
-    ).run_in_background()
+    ).without_collection().run_in_background()
 
 
 def prompt_to_update(mw: aqt.AnkiQt, ver: str) -> None:

@@ -1,6 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use std::env;
+
 use anyhow::Result;
 use ninja_gen::action::BuildAction;
 use ninja_gen::archives::download_and_extract;
@@ -93,13 +95,13 @@ const MAC_AMD_AUDIO: OnlineArchive = OnlineArchive {
 };
 
 const MAC_ARM_QT6: OnlineArchive = OnlineArchive {
-    url: "https://github.com/ankitects/anki-bundle-extras/releases/download/anki-2023-10-15/pyqt6.5-mac-arm64.tar.zst",
-    sha256: "1e7f22b146ceeeaf436f9e2137a133d58ff0a4d3c5a0922cde24ca91de59335a",
+    url: "https://github.com/ankitects/anki-bundle-extras/releases/download/anki-2024-02-29/pyqt6.6-mac-arm64.tar.zst",
+    sha256: "9b2ade4ae9b80506689062845e83e8c60f7fa9843545bf7bb2d11d3e2f105878",
 };
 
 const MAC_AMD_QT6: OnlineArchive = OnlineArchive {
-    url: "https://github.com/ankitects/anki-bundle-extras/releases/download/anki-2023-10-15/pyqt6.5-mac-amd64.tar.zst",
-    sha256: "545253985975dba47ac0479adb83247ce53ed7a8f9d51836bef62e224a9dcaf3",
+    url: "https://github.com/ankitects/anki-bundle-extras/releases/download/anki-2024-02-29/pyqt6.6-mac-amd64.tar.zst",
+    sha256: "dbd0871e4da22820d1fa9ab29220d631467d1178038dcab4b15169ad7f499b1b",
 };
 
 const MAC_AMD_QT5: OnlineArchive = OnlineArchive {
@@ -250,10 +252,13 @@ fn install_anki_wheels(build: &mut Build) -> Result<()> {
 }
 
 fn build_pyoxidizer(build: &mut Build) -> Result<()> {
+    let offline_build = env::var("OFFLINE_BUILD").is_ok();
+
     build.add_action(
         "bundle:pyoxidizer:repo",
         SyncSubmodule {
             path: "qt/bundle/PyOxidizer",
+            offline_build,
         },
     )?;
     build.add_action(

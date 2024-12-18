@@ -1,4 +1,5 @@
 __pycache__
+.mypy_cache
 .DS_Store
 anki.prof
 target
@@ -15,3 +16,4 @@ node_modules
 .ninja_deps
 /extra
 yarn-error.log
+ts/.svelte-kit

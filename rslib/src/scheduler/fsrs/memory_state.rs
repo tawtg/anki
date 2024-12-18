@@ -9,12 +9,13 @@ use fsrs::MemoryState;
 use fsrs::FSRS;
 use itertools::Itertools;
 
+use super::params::ignore_revlogs_before_ms_from_config;
 use crate::card::CardType;
 use crate::prelude::*;
 use crate::revlog::RevlogEntry;
 use crate::revlog::RevlogReviewKind;
-use crate::scheduler::fsrs::weights::single_card_revlog_to_items;
-use crate::scheduler::fsrs::weights::Weights;
+use crate::scheduler::fsrs::params::reviews_for_fsrs;
+use crate::scheduler::fsrs::params::Params;
 use crate::scheduler::states::fuzz::with_review_fuzz;
 use crate::search::Negated;
 use crate::search::SearchNode;
@@ -28,26 +29,37 @@ pub struct ComputeMemoryProgress {
 
 #[derive(Debug)]
 pub(crate) struct UpdateMemoryStateRequest {
-    pub weights: Weights,
+    pub params: Params,
     pub desired_retention: f32,
-    pub sm2_retention: f32,
+    pub historical_retention: f32,
     pub max_interval: u32,
     pub reschedule: bool,
 }
 
+pub(crate) struct UpdateMemoryStateEntry {
+    pub req: Option<UpdateMemoryStateRequest>,
+    pub search: SearchNode,
+    pub ignore_before: TimestampMillis,
+}
+
 impl Collection {
-    /// For each provided set of weights, locate cards with the provided search,
+    /// For each provided set of params, locate cards with the provided search,
     /// and update their memory state.
     /// Should be called inside a transaction.
-    /// If Weights are None, it means the user disabled FSRS, and the existing
+    /// If Params are None, it means the user disabled FSRS, and the existing
     /// memory state should be removed.
     pub(crate) fn update_memory_state(
         &mut self,
-        entries: Vec<(Option<UpdateMemoryStateRequest>, SearchNode)>,
+        entries: Vec<UpdateMemoryStateEntry>,
     ) -> Result<()> {
         let timing = self.timing_today()?;
         let usn = self.usn()?;
-        for (req, search) in entries {
+        for UpdateMemoryStateEntry {
+            req,
+            search,
+            ignore_before,
+        } in entries
+        {
             let search =
                 SearchBuilder::all([search.into(), SearchNode::State(StateKind::New).negated()]);
             let revlog = self.revlog_for_srs(search)?;
@@ -57,13 +69,14 @@ impl Collection {
             } else {
                 None
             };
-            let fsrs = FSRS::new(req.as_ref().map(|w| &w.weights[..]).or(Some([].as_slice())))?;
-            let sm2_retention = req.as_ref().map(|w| w.sm2_retention);
-            let items = fsrs_items_for_memory_state(
+            let fsrs = FSRS::new(req.as_ref().map(|w| &w.params[..]).or(Some([].as_slice())))?;
+            let historical_retention = req.as_ref().map(|w| w.historical_retention);
+            let items = fsrs_items_for_memory_states(
                 &fsrs,
                 revlog,
                 timing.next_day_at,
-                sm2_retention.unwrap_or(0.9),
+                historical_retention.unwrap_or(0.9),
+                ignore_before,
             )?;
             let desired_retention = req.as_ref().map(|w| w.desired_retention);
             let mut progress = self.new_progress_handler::<ComputeMemoryProgress>();
@@ -73,7 +86,7 @@ impl Collection {
                 let mut card = self.storage.get_card(card_id)?.or_not_found(card_id)?;
                 let original = card.clone();
                 if let Some(req) = &req {
-                    card.set_memory_state(&fsrs, item, sm2_retention.unwrap())?;
+                    card.set_memory_state(&fsrs, item, historical_retention.unwrap())?;
                     card.desired_retention = desired_retention;
                     // if rescheduling
                     if let Some(reviews) = &last_revlog_info {
@@ -92,10 +105,9 @@ impl Collection {
                                             Some(state.stability),
                                             card.desired_retention.unwrap(),
                                             0,
-                                        )
-                                            as f32;
+                                        );
                                         card.interval = with_review_fuzz(
-                                            card.get_fuzz_factor(),
+                                            card.get_fuzz_factor(true),
                                             interval,
                                             1,
                                             req.max_interval,
@@ -107,9 +119,10 @@ impl Collection {
                                         };
                                         *due = (timing.days_elapsed as i32) - days_elapsed
                                             + card.interval as i32;
-                                        // Add a manual revlog entry if the last entry wasn't manual
-                                        if !last_info.last_revlog_is_manual {
-                                            self.log_manually_scheduled_review(
+                                        // Add a rescheduled revlog entry if the last entry wasn't
+                                        // rescheduled
+                                        if !last_info.last_revlog_is_rescheduled {
+                                            self.log_rescheduled_review(
                                                 &card,
                                                 original_interval,
                                                 usn,
@@ -140,16 +153,17 @@ impl Collection {
             .get_deck_config(conf_id)?
             .or_not_found(conf_id)?;
         let desired_retention = config.inner.desired_retention;
-        let sm2_retention = config.inner.sm2_retention;
-        let fsrs = FSRS::new(Some(&config.inner.fsrs_weights))?;
+        let historical_retention = config.inner.historical_retention;
+        let fsrs = FSRS::new(Some(config.fsrs_params()))?;
         let revlog = self.revlog_for_srs(SearchNode::CardIds(card.id.to_string()))?;
-        let item = single_card_revlog_to_item(
+        let item = fsrs_item_for_memory_state(
             &fsrs,
             revlog,
             self.timing_today()?.next_day_at,
-            sm2_retention,
+            historical_retention,
+            ignore_revlogs_before_ms_from_config(&config)?,
         )?;
-        card.set_memory_state(&fsrs, item, sm2_retention)?;
+        card.set_memory_state(&fsrs, item, historical_retention)?;
         Ok(ComputeMemoryStateResponse {
             state: card.memory_state.map(Into::into),
             desired_retention,
@@ -161,8 +175,8 @@ impl Card {
     pub(crate) fn set_memory_state(
         &mut self,
         fsrs: &FSRS,
-        item: Option<FsrsItemWithStartingState>,
-        sm2_retention: f32,
+        item: Option<FsrsItemForMemoryState>,
+        historical_retention: f32,
     ) -> Result<()> {
         let memory_state = if let Some(i) = item {
             Some(fsrs.memory_state(i.item, i.starting_state)?)
@@ -173,7 +187,7 @@ impl Card {
             Some(fsrs.memory_state_from_sm2(
                 self.ease_factor(),
                 self.interval as f32,
-                sm2_retention,
+                historical_retention,
             )?)
         };
         self.memory_state = memory_state.map(Into::into);
@@ -182,29 +196,35 @@ impl Card {
 }
 
 #[derive(Debug)]
-pub(crate) struct FsrsItemWithStartingState {
+pub(crate) struct FsrsItemForMemoryState {
     pub item: FSRSItem,
     /// When revlogs have been truncated, this stores the initial state at first
     /// review
     pub starting_state: Option<MemoryState>,
 }
 
-/// When updating memory state, FSRS only requires the last FSRSItem that
-/// contains the full history.
-pub(crate) fn fsrs_items_for_memory_state(
+/// Like [fsrs_item_for_memory_state], but for updating multiple cards at once.
+pub(crate) fn fsrs_items_for_memory_states(
     fsrs: &FSRS,
     revlogs: Vec<RevlogEntry>,
     next_day_at: TimestampSecs,
-    sm2_retention: f32,
-) -> Result<Vec<(CardId, Option<FsrsItemWithStartingState>)>> {
+    historical_retention: f32,
+    ignore_revlogs_before: TimestampMillis,
+) -> Result<Vec<(CardId, Option<FsrsItemForMemoryState>)>> {
     revlogs
         .into_iter()
-        .group_by(|r| r.cid)
+        .chunk_by(|r| r.cid)
         .into_iter()
         .map(|(card_id, group)| {
             Ok((
                 card_id,
-                single_card_revlog_to_item(fsrs, group.collect(), next_day_at, sm2_retention)?,
+                fsrs_item_for_memory_state(
+                    fsrs,
+                    group.collect(),
+                    next_day_at,
+                    historical_retention,
+                    ignore_revlogs_before,
+                )?,
             ))
         })
         .collect()
@@ -217,7 +237,7 @@ struct LastRevlogInfo {
     last_reviewed_at: Option<TimestampSecs>,
     /// If true, the last action on this card was a reschedule, so we
     /// can avoid writing an extra revlog entry on another reschedule.
-    last_revlog_is_manual: bool,
+    last_revlog_is_rescheduled: bool,
 }
 
 /// Return a map of cards to info about last review/reschedule.
@@ -225,22 +245,22 @@ fn get_last_revlog_info(revlogs: &[RevlogEntry]) -> HashMap<CardId, LastRevlogIn
     let mut out = HashMap::new();
     revlogs
         .iter()
-        .group_by(|r| r.cid)
+        .chunk_by(|r| r.cid)
         .into_iter()
         .for_each(|(card_id, group)| {
             let mut last_reviewed_at = None;
-            let mut last_revlog_is_manual = false;
+            let mut last_revlog_is_rescheduled = false;
             for e in group.into_iter() {
                 if e.button_chosen >= 1 {
                     last_reviewed_at = Some(e.id.as_secs());
                 }
-                last_revlog_is_manual = e.review_kind == RevlogReviewKind::Manual;
+                last_revlog_is_rescheduled = e.review_kind == RevlogReviewKind::Rescheduled;
             }
             out.insert(
                 card_id,
                 LastRevlogInfo {
                     last_reviewed_at,
-                    last_revlog_is_manual,
+                    last_revlog_is_rescheduled,
                 },
             );
         });
@@ -252,55 +272,52 @@ fn get_last_revlog_info(revlogs: &[RevlogEntry]) -> HashMap<CardId, LastRevlogIn
 /// a truncated revlog), we return the starting state inferred from the first
 /// revlog entry, so that the first review is not treated as if started from
 /// scratch.
-pub(crate) fn single_card_revlog_to_item(
+pub(crate) fn fsrs_item_for_memory_state(
     fsrs: &FSRS,
     entries: Vec<RevlogEntry>,
     next_day_at: TimestampSecs,
-    sm2_retention: f32,
-) -> Result<Option<FsrsItemWithStartingState>> {
+    historical_retention: f32,
+    ignore_revlogs_before: TimestampMillis,
+) -> Result<Option<FsrsItemForMemoryState>> {
     struct FirstReview {
         interval: f32,
         ease_factor: f32,
     }
-    let first_review = entries
-        .iter()
-        .find(|e| e.button_chosen > 0)
-        .map(|e| FirstReview {
-            interval: e.interval.max(1) as f32,
-            ease_factor: if e.ease_factor == 0 {
-                2500
-            } else {
-                e.ease_factor
-            } as f32
-                / 1000.0,
-        });
-    if let Some((mut items, revlogs_complete)) =
-        single_card_revlog_to_items(entries, next_day_at, false)
-    {
-        let mut item = items.pop().unwrap();
-        if revlogs_complete {
-            Ok(Some(FsrsItemWithStartingState {
+    if let Some(mut output) = reviews_for_fsrs(entries, next_day_at, false, ignore_revlogs_before) {
+        let mut item = output.fsrs_items.pop().unwrap();
+        if output.revlogs_complete {
+            Ok(Some(FsrsItemForMemoryState {
                 item,
                 starting_state: None,
             }))
-        } else if let Some(first_review) = first_review {
+        } else if let Some(first_user_grade) = output.filtered_revlogs.first() {
             // the revlog has been truncated, but not fully
-            let starting_state = fsrs.memory_state_from_sm2(
+            let first_review = FirstReview {
+                interval: first_user_grade.interval.max(1) as f32,
+                ease_factor: if first_user_grade.ease_factor == 0 {
+                    2500
+                } else {
+                    first_user_grade.ease_factor
+                } as f32
+                    / 1000.0,
+            };
+            let mut starting_state = fsrs.memory_state_from_sm2(
                 first_review.ease_factor,
                 first_review.interval,
-                sm2_retention,
+                historical_retention,
             )?;
-            item.reviews.remove(0);
-            if item.reviews.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(FsrsItemWithStartingState {
-                    item,
-                    starting_state: Some(starting_state),
-                }))
+            // if the ease factor is less than 1.1, the revlog entry is generated by FSRS
+            if first_review.ease_factor <= 1.1 {
+                starting_state.difficulty = (first_review.ease_factor - 0.1) * 9.0 + 1.0;
             }
+            // remove the first review because it has been converted to the starting state
+            item.reviews.remove(0);
+            Ok(Some(FsrsItemForMemoryState {
+                item,
+                starting_state: Some(starting_state),
+            }))
         } else {
-            // only manual rescheduling; treat like empty
+            // only manual and rescheduled revlogs; treat like empty
             Ok(None)
         }
     } else {
@@ -315,8 +332,8 @@ mod tests {
     use super::*;
     use crate::card::FsrsMemoryState;
     use crate::revlog::RevlogReviewKind;
-    use crate::scheduler::fsrs::weights::tests::convert;
-    use crate::scheduler::fsrs::weights::tests::revlog;
+    use crate::scheduler::fsrs::params::tests::convert;
+    use crate::scheduler::fsrs::params::tests::revlog;
 
     /// Floating point precision can vary between platforms, and each FSRS
     /// update tends to result in small changes to these numbers, so we
@@ -333,25 +350,26 @@ mod tests {
         // cards without any learning steps due to truncated history still have memory
         // state calculated
         let fsrs = FSRS::new(Some(&[])).unwrap();
-        let item = single_card_revlog_to_item(
+        let item = fsrs_item_for_memory_state(
             &fsrs,
             vec![
                 RevlogEntry {
                     ease_factor: 2500,
                     interval: 100,
-                    ..revlog(RevlogReviewKind::Review, 100)
+                    ..revlog(RevlogReviewKind::Review, 99)
                 },
-                revlog(RevlogReviewKind::Review, 1),
+                revlog(RevlogReviewKind::Review, 0),
             ],
             TimestampSecs::now(),
             0.9,
+            0.into(),
         )?
         .unwrap();
         assert_int_eq(
             item.starting_state.map(Into::into),
             Some(FsrsMemoryState {
                 stability: 99.999954,
-                difficulty: 5.8158145,
+                difficulty: 5.6932373,
             }),
         );
         let mut card = Card {
@@ -362,13 +380,13 @@ mod tests {
         assert_int_eq(
             card.memory_state,
             Some(FsrsMemoryState {
-                stability: 248.65057,
-                difficulty: 5.782729,
+                stability: 248.64305,
+                difficulty: 5.7909784,
             }),
         );
-        // but if there's only a single revlog entry, we'll fall back on current card
-        // state
-        let item = single_card_revlog_to_item(
+        // cards with a single review-type entry also get memory states from revlog
+        // rather than card states
+        let item = fsrs_item_for_memory_state(
             &fsrs,
             vec![RevlogEntry {
                 ease_factor: 2500,
@@ -377,17 +395,16 @@ mod tests {
             }],
             TimestampSecs::now(),
             0.9,
-        )?;
-        assert!(item.is_none());
-        card.interval = 123;
-        card.ease_factor = 2000;
-        card.ctype = CardType::Review;
-        card.set_memory_state(&fsrs, item, 0.9)?;
+            0.into(),
+        )?
+        .unwrap();
+        assert!(item.item.reviews.is_empty());
+        card.set_memory_state(&fsrs, Some(item), 0.9)?;
         assert_int_eq(
             card.memory_state,
             Some(FsrsMemoryState {
-                stability: 122.99994,
-                difficulty: 7.4459267,
+                stability: 99.999954,
+                difficulty: 5.840841,
             }),
         );
         Ok(())
@@ -411,7 +428,7 @@ mod tests {
             Some(
                 MemoryState {
                     stability: 99.999954,
-                    difficulty: 9.963163,
+                    difficulty: 9.979899,
                 }
                 .into(),
             ),

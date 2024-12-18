@@ -2,10 +2,11 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 # pylint: disable=invalid-name
+from __future__ import annotations
 
 import os
 import unicodedata
-from typing import Optional
+from typing import Any
 
 from anki.cards import CardId
 from anki.collection import Collection
@@ -31,7 +32,7 @@ class MediaMapInvalid(Exception):
 
 class Anki2Importer(Importer):
     needMapper = False
-    deckPrefix: Optional[str] = None
+    deckPrefix: str | None = None
     allowUpdate = True
     src: Collection
     dst: Collection
@@ -177,7 +178,7 @@ class Anki2Importer(Importer):
                 self._logNoteRow(self.dst.tr.importing_updated(), row)
         if add:
             for row in add:
-                self._logNoteRow(self.dst.tr.adding_added(), row)
+                self._logNoteRow(self.dst.tr.importing_added(), row)
         if dupesIdentical:
             for row in dupesIdentical:
                 self._logNoteRow(self.dst.tr.importing_identical(), row)
@@ -409,7 +410,7 @@ insert or ignore into revlog values (?,?,?,?,?,?,?,?,?)""",
             if fname.startswith("_") and not self.dst.media.have(fname):
                 self._writeDstMedia(fname, self._srcMediaData(fname))
 
-    def _mediaData(self, fname: str, dir: Optional[str] = None) -> bytes:
+    def _mediaData(self, fname: str, dir: str | None = None) -> bytes:
         if not dir:
             dir = self.src.media.dir()
         path = os.path.join(dir, fname)

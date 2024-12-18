@@ -28,8 +28,9 @@ template_legacy.py file, using the legacy addHook() system.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence, Union
+from typing import Any, Union
 
 import anki
 import anki.cards
@@ -41,10 +42,6 @@ from anki.errors import TemplateError
 from anki.models import NotetypeDict
 from anki.sound import AVTag, SoundOrVideoTag, TTSTag
 from anki.utils import to_json_bytes
-
-CARD_BLANK_HELP = (
-    "https://anki.tenderapp.com/kb/card-appearance/the-front-of-this-card-is-blank"
-)
 
 
 @dataclass
@@ -146,7 +143,7 @@ class TemplateRenderContext:
         card: anki.cards.Card,
         note: anki.notes.Note,
         browser: bool = False,
-        notetype: NotetypeDict = None,
+        notetype: NotetypeDict | None = None,
         template: dict | None = None,
         fill_empty: bool = False,
     ) -> None:

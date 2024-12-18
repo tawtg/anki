@@ -42,12 +42,14 @@ impl AnkiError {
             AnkiError::InvalidId => Kind::InvalidInput,
             AnkiError::InvalidMethodIndex
             | AnkiError::InvalidServiceIndex
-            | AnkiError::FsrsWeightsInvalid
+            | AnkiError::FsrsParamsInvalid
             | AnkiError::FsrsUnableToDetermineDesiredRetention
             | AnkiError::FsrsInsufficientData => Kind::InvalidInput,
             #[cfg(windows)]
             AnkiError::WindowsError { .. } => Kind::OsError,
             AnkiError::SchedulerUpgradeRequired => Kind::SchedulerUpgradeRequired,
+            AnkiError::FsrsInsufficientReviews { .. } => Kind::InvalidInput,
+            AnkiError::InvalidCertificateFormat => Kind::InvalidCertificateFormat,
         };
 
         anki_proto::backend::BackendError {
@@ -64,6 +66,7 @@ impl From<SyncErrorKind> for Kind {
     fn from(err: SyncErrorKind) -> Self {
         match err {
             SyncErrorKind::AuthFailed => Kind::SyncAuthError,
+            SyncErrorKind::ServerMessage => Kind::SyncServerMessage,
             _ => Kind::SyncOtherError,
         }
     }

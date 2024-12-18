@@ -5,7 +5,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <script context="module" lang="ts">
     import type { Writable } from "svelte/store";
 
-    import Collapsible from "../components/Collapsible.svelte";
+    import Collapsible from "$lib/components/Collapsible.svelte";
+
     import type { EditingInputAPI } from "./EditingArea.svelte";
     import type { EditorToolbarAPI } from "./editor-toolbar";
     import type { EditorFieldAPI } from "./EditorField.svelte";
@@ -23,8 +24,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     import { registerPackage } from "@tslib/runtime-require";
 
-    import contextProperty from "../sveltelib/context-property";
-    import lifecycleHooks from "../sveltelib/lifecycle-hooks";
+    import contextProperty from "$lib/sveltelib/context-property";
+    import lifecycleHooks from "$lib/sveltelib/lifecycle-hooks";
 
     const key = Symbol("noteEditor");
     const [context, setContextProperty] = contextProperty<NoteEditorAPI>(key);
@@ -40,16 +41,22 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 </script>
 
 <script lang="ts">
+    import * as tr from "@generated/ftl";
     import { bridgeCommand } from "@tslib/bridgecommand";
-    import * as tr from "@tslib/ftl";
-    import { type ImageLoadedEvent, resetIOImage } from "image-occlusion/mask-editor";
     import { onMount, tick } from "svelte";
     import { get, writable } from "svelte/store";
 
-    import Absolute from "../components/Absolute.svelte";
-    import Badge from "../components/Badge.svelte";
-    import { TagEditor } from "../tag-editor";
-    import { commitTagEdits } from "../tag-editor/TagInput.svelte";
+    import Absolute from "$lib/components/Absolute.svelte";
+    import Badge from "$lib/components/Badge.svelte";
+    import Icon from "$lib/components/Icon.svelte";
+    import { alertIcon } from "$lib/components/icons";
+    import { TagEditor } from "$lib/tag-editor";
+    import { commitTagEdits } from "$lib/tag-editor/TagInput.svelte";
+
+    import {
+        type ImageLoadedEvent,
+        resetIOImage,
+    } from "../routes/image-occlusion/mask-editor";
     import { ChangeTimer } from "./change-timer";
     import { clearableArray } from "./destroyable";
     import DuplicateLink from "./DuplicateLink.svelte";
@@ -57,7 +64,6 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import type { FieldData } from "./EditorField.svelte";
     import EditorField from "./EditorField.svelte";
     import Fields from "./Fields.svelte";
-    import { alertIcon } from "./icons";
     import ImageOverlay from "./image-overlay";
     import { shrinkImagesByDefault } from "./image-overlay/ImageOverlay.svelte";
     import MathjaxOverlay from "./mathjax-overlay";
@@ -233,6 +239,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         if (sessionOptions[id]?.modTimeOfNotetype !== modTime) {
             delete sessionOptions[id];
         }
+        if (isImageOcclusion) {
+            getImageOcclusionFields({
+                notetypeId: BigInt(notetypeMeta.id),
+            }).then((r) => (ioFields = r.fields!));
+        }
     }
 
     function getNoteId(): number | null {
@@ -380,21 +391,22 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         });
     }
 
-    import { ImageOcclusionFieldIndexes } from "@tslib/anki/image_occlusion_pb";
-    import { getImageOcclusionFields } from "@tslib/backend";
+    import { ImageOcclusionFieldIndexes } from "@generated/anki/image_occlusion_pb";
+    import { getImageOcclusionFields } from "@generated/backend";
     import { wrapInternal } from "@tslib/wrap";
-    import Shortcut from "components/Shortcut.svelte";
-    import ImageOcclusionPage from "image-occlusion/ImageOcclusionPage.svelte";
-    import ImageOcclusionPicker from "image-occlusion/ImageOcclusionPicker.svelte";
-    import type { IOMode } from "image-occlusion/lib";
-    import { exportShapesToClozeDeletions } from "image-occlusion/shapes/to-cloze";
+
+    import Shortcut from "$lib/components/Shortcut.svelte";
+
+    import { mathjaxConfig } from "../editable/mathjax-element";
+    import ImageOcclusionPage from "../routes/image-occlusion/ImageOcclusionPage.svelte";
+    import ImageOcclusionPicker from "../routes/image-occlusion/ImageOcclusionPicker.svelte";
+    import type { IOMode } from "../routes/image-occlusion/lib";
+    import { exportShapesToClozeDeletions } from "../routes/image-occlusion/shapes/to-cloze";
     import {
         hideAllGuessOne,
         ioImageLoadedStore,
         ioMaskEditorVisible,
-    } from "image-occlusion/store";
-
-    import { mathjaxConfig } from "../editable/mathjax-element";
+    } from "../routes/image-occlusion/store";
     import CollapseLabel from "./CollapseLabel.svelte";
     import * as oldEditorAdapter from "./old-editor-adapter";
 
@@ -415,10 +427,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     async function setupMaskEditor(options: { html: string; mode: IOMode }) {
         imageOcclusionMode = undefined;
-        const getIoFields = getImageOcclusionFields({
-            notetypeId: BigInt(notetypeMeta.id),
-        }).then((r) => (ioFields = r.fields!));
-        await Promise.all([tick(), getIoFields]);
+        await tick();
         imageOcclusionMode = options.mode;
         if (options.mode.kind === "add") {
             fieldStores[ioFields.image].set(options.html);
@@ -450,8 +459,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
     globalThis.setImageField = setImageField;
 
-    function updateOcclusionsField(): void {
-        if (isImageOcclusion) {
+    function saveOcclusions(): void {
+        if (isImageOcclusion && globalThis.canvas) {
             const occlusionsData = exportShapesToClozeDeletions($hideAllGuessOne);
             fieldStores[ioFields.occlusions].set(occlusionsData.clozes);
         }
@@ -563,7 +572,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             triggerChanges,
             setIsImageOcclusion,
             setupMaskEditor,
-            updateOcclusionsField,
+            saveOcclusions,
             ...oldEditorAdapter,
         });
 
@@ -617,18 +626,18 @@ the AddCards dialog) should be implemented in the user of this component.
         <Absolute bottom right --margin="10px">
             <Notification>
                 <Badge --badge-color="tomato" --icon-align="top">
-                    {@html alertIcon}
+                    <Icon icon={alertIcon} />
                 </Badge>
                 <span>{@html hint}</span>
             </Notification>
         </Absolute>
     {/if}
 
-    {#if imageOcclusionMode}
-        <div style="display: {$ioMaskEditorVisible ? 'block' : 'none'}">
+    {#if imageOcclusionMode && ($ioMaskEditorVisible || imageOcclusionMode?.kind === "add")}
+        <div style="display: {$ioMaskEditorVisible ? 'block' : 'none'};">
             <ImageOcclusionPage
                 mode={imageOcclusionMode}
-                on:change={updateOcclusionsField}
+                on:save={saveOcclusions}
                 on:image-loaded={onImageLoaded}
             />
         </div>

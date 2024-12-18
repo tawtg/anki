@@ -6,8 +6,9 @@ from __future__ import annotations
 import sys
 import time
 import traceback
+from collections.abc import Iterable, Sequence
 from threading import current_thread, main_thread
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any
 from weakref import ref
 
 from markdown import markdown
@@ -125,9 +126,11 @@ class RustBackend(RustBackendGenerated):
         self, module_index: int, message_index: int, **kwargs: str | int | float
     ) -> str:
         args = {
-            k: i18n_pb2.TranslateArgValue(str=v)
-            if isinstance(v, str)
-            else i18n_pb2.TranslateArgValue(number=v)
+            k: (
+                i18n_pb2.TranslateArgValue(str=v)
+                if isinstance(v, str)
+                else i18n_pb2.TranslateArgValue(number=v)
+            )
             for k, v in kwargs.items()
         }
 
@@ -146,8 +149,11 @@ class RustBackend(RustBackendGenerated):
         )
         return self.format_timespan(seconds=seconds, context=context)
 
-    def compute_weights_from_items(self, items: Iterable[FsrsItem]) -> Sequence[float]:
-        return self.compute_fsrs_weights_from_items(items).weights
+    def compute_params_from_items(self, items: Iterable[FsrsItem]) -> Sequence[float]:
+        return self.compute_fsrs_params_from_items(items).params
+
+    def benchmark(self, train_set: Iterable[FsrsItem]) -> Sequence[float]:
+        return self.fsrs_benchmark(train_set=train_set)
 
     def _run_command(self, service: int, method: int, input: bytes) -> bytes:
         start = time.time()

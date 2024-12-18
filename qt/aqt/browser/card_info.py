@@ -3,8 +3,7 @@
 
 from __future__ import annotations
 
-import json
-from typing import Callable
+from collections.abc import Callable
 
 import aqt
 from anki.cards import Card, CardId
@@ -53,9 +52,11 @@ class CardInfoDialog(QDialog):
         addCloseShortcut(self)
         setWindowIcon(self)
 
-        self.web = AnkiWebView(kind=AnkiWebViewKind.BROWSER_CARD_INFO)
+        self.web: AnkiWebView | None = AnkiWebView(
+            kind=AnkiWebViewKind.BROWSER_CARD_INFO
+        )
         self.web.setVisible(False)
-        self.web.load_ts_page("card-info")
+        self.web.load_sveltekit_page(f"card-info/{card_id}")
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.web)
@@ -64,21 +65,20 @@ class CardInfoDialog(QDialog):
         layout.addWidget(buttons)
         qconnect(buttons.rejected, self.reject)
         self.setLayout(layout)
-        self.web.eval("anki.cardInfoPromise = anki.setupCardInfo(document.body);")
-        self.update_card(card_id)
 
     def update_card(self, card_id: CardId | None) -> None:
         try:
             self.mw.col.get_card(card_id)
         except NotFoundError:
             card_id = None
-        self.web.eval(
-            f"anki.cardInfoPromise.then((c) => c.updateStats({json.dumps(card_id)}));"
-        )
+
+        assert self.web is not None
+        self.web.eval(f"anki.updateCard('{card_id}');")
 
     def reject(self) -> None:
         if self._on_close:
             self._on_close()
+        assert self.web is not None
         self.web.cleanup()
         self.web = None
         saveGeom(self, self.GEOMETRY_KEY)

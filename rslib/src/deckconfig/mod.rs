@@ -11,6 +11,7 @@ pub use anki_proto::deck_config::deck_config::config::LeechAction;
 pub use anki_proto::deck_config::deck_config::config::NewCardGatherPriority;
 pub use anki_proto::deck_config::deck_config::config::NewCardInsertOrder;
 pub use anki_proto::deck_config::deck_config::config::NewCardSortOrder;
+pub use anki_proto::deck_config::deck_config::config::QuestionAction;
 pub use anki_proto::deck_config::deck_config::config::ReviewCardOrder;
 pub use anki_proto::deck_config::deck_config::config::ReviewMix;
 pub use anki_proto::deck_config::deck_config::Config as DeckConfigInner;
@@ -66,17 +67,21 @@ const DEFAULT_DECK_CONFIG_INNER: DeckConfigInner = DeckConfigInner {
     stop_timer_on_answer: false,
     seconds_to_show_question: 0.0,
     seconds_to_show_answer: 0.0,
+    question_action: QuestionAction::ShowAnswer as i32,
     answer_action: AnswerAction::BuryCard as i32,
     wait_for_audio: true,
     skip_question_when_replaying_answer: false,
     bury_new: false,
     bury_reviews: false,
     bury_interday_learning: false,
-    fsrs_weights: vec![],
+    fsrs_params_4: vec![],
+    fsrs_params_5: vec![],
     desired_retention: 0.9,
     other: Vec::new(),
-    sm2_retention: 0.9,
-    weight_search: String::new(),
+    historical_retention: 0.9,
+    param_search: String::new(),
+    ignore_revlogs_before_date: String::new(),
+    easy_days_percentages: Vec::new(),
 };
 
 impl Default for DeckConfig {
@@ -89,6 +94,7 @@ impl Default for DeckConfig {
             inner: DeckConfigInner {
                 learn_steps: vec![1.0, 10.0],
                 relearn_steps: vec![10.0],
+                easy_days_percentages: vec![1.0; 7],
                 ..DEFAULT_DECK_CONFIG_INNER
             },
         }
@@ -99,6 +105,15 @@ impl DeckConfig {
     pub(crate) fn set_modified(&mut self, usn: Usn) {
         self.mtime_secs = TimestampSecs::now();
         self.usn = usn;
+    }
+
+    /// Retrieve the FSRS 5.0 params, falling back on 4.x ones.
+    pub fn fsrs_params(&self) -> &Vec<f32> {
+        if self.inner.fsrs_params_5.len() == 19 {
+            &self.inner.fsrs_params_5
+        } else {
+            &self.inner.fsrs_params_4
+        }
     }
 }
 
@@ -281,7 +296,12 @@ pub(crate) fn ensure_deck_config_values_valid(config: &mut DeckConfigInner) {
         0.7,
         0.99,
     );
-    ensure_f32_valid(&mut config.sm2_retention, default.sm2_retention, 0.7, 0.97)
+    ensure_f32_valid(
+        &mut config.historical_retention,
+        default.historical_retention,
+        0.7,
+        0.97,
+    )
 }
 
 fn ensure_f32_valid(val: &mut f32, default: f32, min: f32, max: f32) {

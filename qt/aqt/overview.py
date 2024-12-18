@@ -2,8 +2,9 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import aqt
 import aqt.operations
@@ -204,7 +205,7 @@ class Overview:
         )
 
     def _show_finished_screen(self) -> None:
-        self.web.load_ts_page("congrats")
+        self.web.load_sveltekit_page("congrats")
 
     def _desc(self, deck: dict[str, Any]) -> str:
         if deck["dyn"]:
@@ -223,13 +224,14 @@ class Overview:
             dyn = ""
         return f'<div class="descfont descmid description {dyn}">{desc}</div>'
 
-    def _table(self) -> str | None:
+    def _table(self) -> str:
         counts = list(self.mw.col.sched.counts())
         current_did = self.mw.col.decks.get_current_id()
         deck_node = self.mw.col.sched.deck_due_tree(current_did)
 
         but = self.mw.button
         if self.mw.col.v3_scheduler():
+            assert deck_node is not None
             buried_new = deck_node.new_count - counts[0]
             buried_learning = deck_node.learn_count - counts[1]
             buried_review = deck_node.review_count - counts[2]

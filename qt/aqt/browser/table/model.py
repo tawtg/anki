@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import aqt
 import aqt.browser
@@ -53,6 +54,7 @@ class DataModel(QAbstractTableModel):
         self._stale_cutoff = 0.0
         self._on_row_state_will_change = row_state_will_change_callback
         self._on_row_state_changed = row_state_changed_callback
+        assert aqt.mw is not None
         self._want_tooltips = aqt.mw.pm.show_browser_table_tooltips()
 
     # Row Object Interface
@@ -242,7 +244,7 @@ class DataModel(QAbstractTableModel):
         self._state = self._state.toggle_state()
         try:
             self._search_inner(context)
-        except:
+        except Exception:
             # rollback to prevent inconsistent state
             self._state = self._state.toggle_state()
             raise

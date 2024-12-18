@@ -7,7 +7,7 @@
 
 export { default as $, default as jQuery } from "jquery/dist/jquery";
 
-import { imageOcclusionAPI } from "../image-occlusion/review";
+import { imageOcclusionAPI } from "../routes/image-occlusion/review";
 import { mutateNextCardStates } from "./answering";
 import { addBrowserClasses } from "./browser_selector";
 
@@ -222,8 +222,8 @@ export function _drawMark(mark: boolean): void {
 }
 
 export function _typeAnsPress(): void {
-    const code = (window.event as KeyboardEvent).code;
-    if (["Enter", "NumpadEnter"].includes(code)) {
+    const key = (window.event as KeyboardEvent).key;
+    if (key === "Enter") {
         bridgeCommand("ans");
     }
 }

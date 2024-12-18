@@ -6,15 +6,19 @@ from __future__ import annotations
 import html
 import io
 import json
+import logging
 import os
 import re
+import sys
+import traceback
 import zipfile
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Any, Callable, Iterable, Sequence, Union
+from typing import IO, Any, Union
 from urllib.parse import parse_qs, urlparse
 from zipfile import ZipFile
 
@@ -33,6 +37,7 @@ from anki.httpclient import HttpClient
 from anki.lang import without_unicode_isolation
 from anki.utils import int_version_to_str
 from aqt import gui_hooks
+from aqt.log import ADDON_LOGGER_PREFIX, find_addon_logger, get_addon_logs_folder
 from aqt.qt import *
 from aqt.utils import (
     askUser,
@@ -245,7 +250,7 @@ class AddonManager:
                 __import__(addon.dir_name)
             except AbortAddonImport:
                 pass
-            except:
+            except Exception:
                 name = html.escape(addon.human_name())
                 page = addon.page()
                 if page:
@@ -338,7 +343,7 @@ class AddonManager:
         except json.JSONDecodeError as e:
             print(f"json error in add-on {module}:\n{e}")
             return dict()
-        except:
+        except Exception:
             # missing meta file, etc
             return dict()
 
@@ -404,7 +409,9 @@ class AddonManager:
                 all_conflicts[other_dir].append(addon.dir_name)
         return all_conflicts
 
-    def _disableConflicting(self, module: str, conflicts: list[str] = None) -> set[str]:
+    def _disableConflicting(
+        self, module: str, conflicts: list[str] | None = None
+    ) -> set[str]:
         if not self.isEnabled(module):
             # disabled add-ons should not trigger conflict handling
             return set()
@@ -641,7 +648,7 @@ class AddonManager:
         try:
             with open(path, encoding="utf8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return None
 
     def set_config_help_action(self, module: str, action: Callable[[], str]) -> None:
@@ -662,7 +669,11 @@ class AddonManager:
 
         return markdown.markdown(contents, extensions=[md_in_html.makeExtension()])
 
-    def addonFromModule(self, module: str) -> str:
+    def addonFromModule(self, module: str) -> str:  # softly deprecated
+        return module.split(".")[0]
+
+    @staticmethod
+    def addon_from_module(module: str) -> str:
         return module.split(".")[0]
 
     def configAction(self, module: str) -> Callable[[], bool | None]:
@@ -727,8 +738,9 @@ class AddonManager:
     def _userFilesBackupPath(self) -> str:
         return os.path.join(self.addonsFolder(), "files_backup")
 
-    def backupUserFiles(self, sid: str) -> None:
-        p = self._userFilesPath(sid)
+    def backupUserFiles(self, module: str) -> None:
+        p = self._userFilesPath(module)
+
         if os.path.exists(p):
             os.rename(p, self._userFilesBackupPath())
 
@@ -751,6 +763,38 @@ class AddonManager:
 
     def getWebExports(self, module: str) -> str:
         return self._webExports.get(module)
+
+    # Logging
+    ######################################################################
+
+    @classmethod
+    def get_logger(cls, module: str) -> logging.Logger:
+        """Return a logger for the given add-on module.
+
+        NOTE: This method is static to allow it to be called outside of a
+        running Anki instance, e.g. in add-on unit tests.
+        """
+        return logging.getLogger(
+            f"{ADDON_LOGGER_PREFIX}{cls.addon_from_module(module)}"
+        )
+
+    def has_logger(self, module: str) -> bool:
+        return find_addon_logger(self.addon_from_module(module)) is not None
+
+    def is_debug_logging_enabled(self, module: str) -> bool:
+        if not (logger := find_addon_logger(self.addon_from_module(module))):
+            return False
+        return logger.isEnabledFor(logging.DEBUG)
+
+    def toggle_debug_logging(self, module: str, enable: bool) -> None:
+        if not (logger := find_addon_logger(self.addon_from_module(module))):
+            return
+        logger.setLevel(logging.DEBUG if enable else logging.INFO)
+
+    def logs_folder(self, module: str) -> Path:
+        return get_addon_logs_folder(
+            self.mw.pm.addon_logs(), self.addon_from_module(module)
+        )
 
 
 # Add-ons Dialog
@@ -1022,7 +1066,12 @@ class GetAddons(QDialog):
     def accept(self) -> None:
         # get codes
         try:
-            ids = [int(n) for n in self.form.code.text().split()]
+            sids = self.form.code.text().split()
+            sids = [
+                re.sub(r"^https://ankiweb.net/shared/info/(\d+)$", r"\1", id_)
+                for id_ in sids
+            ]
+            ids = [int(id_) for id_ in sids]
         except ValueError:
             showWarning(tr.addons_invalid_code())
             return
@@ -1044,9 +1093,11 @@ def download_addon(client: HttpClient, id: int) -> DownloadOk | DownloadError:
 
         data = client.stream_content(resp)
 
-        fname = re.match(
+        match = re.match(
             "attachment; filename=(.+)", resp.headers["content-disposition"]
-        ).group(1)
+        )
+        assert match is not None
+        fname = match.group(1)
 
         meta = extract_meta_from_download_url(resp.url)
 
@@ -1074,11 +1125,14 @@ def extract_meta_from_download_url(url: str) -> ExtractedDownloadMeta:
     urlobj = urlparse(url)
     query = parse_qs(urlobj.query)
 
+    def get_first_element(elements: list[str]) -> int:
+        return int(elements[0])
+
     meta = ExtractedDownloadMeta(
-        mod_time=int(query.get("t")[0]),
-        min_point_version=int(query.get("minpt")[0]),
-        max_point_version=int(query.get("maxpt")[0]),
-        branch_index=int(query.get("bidx")[0]),
+        mod_time=get_first_element(query["t"]),
+        min_point_version=get_first_element(query["minpt"]),
+        max_point_version=get_first_element(query["maxpt"]),
+        branch_index=get_first_element(query["bidx"]),
     )
 
     return meta
@@ -1206,7 +1260,9 @@ class DownloaderInstaller(QObject):
         self.mgr.mw.progress.single_shot(50, lambda: self.on_done(self.log))
 
 
-def show_log_to_user(parent: QWidget, log: list[DownloadLogEntry]) -> None:
+def show_log_to_user(
+    parent: QWidget, log: list[DownloadLogEntry], title: str = "Anki"
+) -> None:
     have_problem = download_encountered_problem(log)
 
     if have_problem:
@@ -1216,9 +1272,9 @@ def show_log_to_user(parent: QWidget, log: list[DownloadLogEntry]) -> None:
     text += f"<br><br>{download_log_to_html(log)}"
 
     if have_problem:
-        showWarning(text, textFormat="rich", parent=parent)
+        showWarning(text, textFormat="rich", parent=parent, title=title)
     else:
-        showInfo(text, parent=parent)
+        showInfo(text, parent=parent, title=title)
 
 
 def download_addons(
@@ -1503,6 +1559,32 @@ def prompt_to_update(
     ChooseAddonsToUpdateDialog(parent, mgr, updated_addons).ask(after_choosing)
 
 
+def install_or_update_addon(
+    parent: QWidget,
+    mgr: AddonManager,
+    addon_id: int,
+    on_done: Callable[[list[DownloadLogEntry]], None],
+) -> None:
+    def check() -> list[AddonInfo]:
+        return fetch_update_info([addon_id])
+
+    def update_info_received(future: Future) -> None:
+        try:
+            items = future.result()
+            updated_addons = mgr.get_updated_addons(items)
+            if not updated_addons:
+                on_done([])
+                return
+            client = HttpClient()
+            download_addons(
+                parent, mgr, [addon.id for addon in updated_addons], on_done, client
+            )
+        except Exception as exc:
+            on_done([(addon_id, DownloadError(exception=exc))])
+
+    mgr.mw.taskman.run_in_background(check, update_info_received)
+
+
 # Editing config
 ######################################################################
 
@@ -1543,8 +1625,10 @@ class ConfigEditor(QDialog):
         tooltip(tr.addons_restored_defaults(), parent=self)
 
     def setupFonts(self) -> None:
-        font_mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        font_mono.setPointSize(font_mono.pointSize() + 1)
+        font_mono = QFont("Consolas")
+        if not font_mono.exactMatch():
+            font_mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font_mono.setPointSize(font_mono.pointSize())
         self.form.editor.setFont(font_mono)
 
     def updateHelp(self) -> None:

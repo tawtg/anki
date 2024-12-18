@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import random
 import re
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Literal, Match, Sequence, cast
+from functools import partial
+from typing import Any, Literal, Match, Union, cast
 
 import aqt
 import aqt.browser
@@ -26,6 +27,7 @@ from anki.scheduler.v3 import (
 )
 from anki.tags import MARKED_TAG
 from anki.types import assert_exhaustive
+from anki.utils import is_mac
 from aqt import AnkiQt, gui_hooks
 from aqt.browser.card_info import PreviousReviewerCardInfo, ReviewerCardInfo
 from aqt.deckoptions import confirm_deck_then_display_options
@@ -137,6 +139,11 @@ class AnswerAction(Enum):
     SHOW_REMINDER = 4
 
 
+class QuestionAction(Enum):
+    SHOW_ANSWER = 0
+    SHOW_REMINDER = 1
+
+
 class Reviewer:
     def __init__(self, mw: AnkiQt) -> None:
         self.mw = mw
@@ -145,8 +152,9 @@ class Reviewer:
         self.previous_card: Card | None = None
         self._answeredIds: list[CardId] = []
         self._recordedAudio: str | None = None
-        self.typeCorrect: str = None  # web init happens before this is set
-        self.state: Literal["question", "answer", "transition", None] = None
+        self._combining: bool = True
+        self.typeCorrect: str | None = None  # web init happens before this is set
+        self.state: Literal["question", "answer", "transition"] | None = None
         self._refresh_needed: RefreshNeeded | None = None
         self._v3: V3CardInfo | None = None
         self._state_mutation_key = str(random.randint(0, 2**64 - 1))
@@ -154,7 +162,8 @@ class Reviewer:
         self._card_info = ReviewerCardInfo(self.mw)
         self._previous_card_info = PreviousReviewerCardInfo(self.mw)
         self._states_mutated = True
-        self._reps: int = None
+        self._state_mutation_js = None
+        self._reps: int | None = None
         self._show_question_timer: QTimer | None = None
         self._show_answer_timer: QTimer | None = None
         self.auto_advance_enabled = False
@@ -361,7 +370,7 @@ class Reviewer:
     def _showQuestion(self) -> None:
         self._reps += 1
         self.state = "question"
-        self.typedAnswer: str = None
+        self.typedAnswer: str | None = None
         c = self.card
         # grab the question and play audio
         q = c.question()
@@ -422,7 +431,15 @@ class Reviewer:
         ):
             self.auto_advance_enabled = False
             return
-        self._showAnswer()
+        try:
+            question_action = list(QuestionAction)[conf["questionAction"]]
+        except IndexError:
+            question_action = QuestionAction.SHOW_ANSWER
+
+        if question_action == QuestionAction.SHOW_ANSWER:
+            self._showAnswer()
+        else:
+            tooltip(tr.studying_question_time_elapsed())
 
     def autoplay(self, card: Card) -> bool:
         print("use card.autoplay() instead of reviewer.autoplay(card)")
@@ -496,17 +513,17 @@ class Reviewer:
         try:
             answer_action = list(AnswerAction)[conf["answerAction"]]
         except IndexError:
-            answer_action = AnswerAction.ANSWER_GOOD
-        if answer_action == AnswerAction.BURY_CARD:
-            self.bury_current_card()
-        elif answer_action == AnswerAction.ANSWER_AGAIN:
+            answer_action = AnswerAction.BURY_CARD
+        if answer_action == AnswerAction.ANSWER_AGAIN:
             self._answerCard(1)
         elif answer_action == AnswerAction.ANSWER_HARD:
             self._answerCard(2)
+        elif answer_action == AnswerAction.ANSWER_GOOD:
+            self._answerCard(3)
         elif answer_action == AnswerAction.SHOW_REMINDER:
             tooltip(tr.studying_answer_time_elapsed())
         else:
-            self._answerCard(3)
+            self.bury_current_card()
 
     # Answering a card
     ############################################################
@@ -554,7 +571,7 @@ class Reviewer:
 
     def korean_shortcuts(
         self,
-    ) -> Sequence[Union[tuple[str, Callable], tuple[Qt.Key, Callable]]]:
+    ) -> Sequence[tuple[str, Callable] | tuple[Qt.Key, Callable]]:
         return [
             ("ㄷ", self.mw.onEditCurrent),
             ("ㅡ", self.showContextMenu),
@@ -574,7 +591,19 @@ class Reviewer:
 
     def _shortcutKeys(
         self,
-    ) -> Sequence[Union[tuple[str, Callable], tuple[Qt.Key, Callable]]]:
+    ) -> Sequence[tuple[str, Callable] | tuple[Qt.Key, Callable]]:
+
+        def generate_default_answer_keys() -> (
+            Generator[tuple[str, partial], None, None]
+        ):
+            for ease in aqt.mw.pm.default_answer_keys:
+                key = aqt.mw.pm.get_answer_key(ease)
+                if not key:
+                    continue
+                ease = cast(Literal[1, 2, 3, 4], ease)
+                answer_card_according_to_pressed_key = partial(self._answerCard, ease)
+                yield (key, answer_card_according_to_pressed_key)
+
         return [
             ("e", self.mw.onEditCurrent),
             (" ", self.onEnterKey),
@@ -601,11 +630,7 @@ class Reviewer:
             ("o", self.onOptions),
             ("i", self.on_card_info),
             ("Ctrl+Alt+i", self.on_previous_card_info),
-            *(
-                (key, functools.partial(self._answerCard, ease))
-                for ease in aqt.mw.pm.default_answer_keys
-                if (key := aqt.mw.pm.get_answer_key(ease))
-            ),
+            *generate_default_answer_keys(),
             ("u", self.mw.undo),
             ("5", self.on_pause_audio),
             ("6", self.on_seek_backward),
@@ -675,6 +700,7 @@ class Reviewer:
             return self.typeAnsAnswerFilter(buf)
 
     def typeAnsQuestionFilter(self, buf: str) -> str:
+        self._combining = True
         self.typeCorrect = None
         clozeIdx = None
         m = re.search(self.typeAnsPat, buf)
@@ -685,6 +711,9 @@ class Reviewer:
         if fld.startswith("cloze:"):
             # get field and cloze position
             clozeIdx = self.card.ord + 1
+            fld = fld.split(":")[1]
+        if fld.startswith("nc:"):
+            self._combining = False
             fld = fld.split(":")[1]
         # loop through fields for a match
         for f in self.card.note_type()["flds"]:
@@ -720,12 +749,13 @@ class Reviewer:
     def typeAnsAnswerFilter(self, buf: str) -> str:
         if not self.typeCorrect:
             return re.sub(self.typeAnsPat, "", buf)
+        orig = buf
         origSize = len(buf)
         buf = buf.replace("<hr id=answer>", "")
         hadHR = len(buf) != origSize
         expected = self.typeCorrect
         provided = self.typedAnswer
-        output = self.mw.col.compare_answer(expected, provided)
+        output = self.mw.col.compare_answer(expected, provided, self._combining)
 
         # and update the type answer area
         def repl(match: Match) -> str:
@@ -742,6 +772,9 @@ class Reviewer:
                 # comparison when user is using {{FrontSide}}
                 s = f"<hr id=answer>{s}"
             return s
+
+        if hadHR and not re.search(self.typeAnsPat, buf):
+            return orig
 
         return re.sub(self.typeAnsPat, repl, buf)
 
@@ -821,7 +854,7 @@ timerStopped = false;
         if not self.mw.col.conf["dueCounts"]:
             return ""
 
-        counts: list[Union[int, str]]
+        counts: list[int | str]
         idx, counts_ = self._v3.counts()
         counts = cast(list[Union[int, str]], counts_)
         counts[idx] = f"<u>{counts[idx]}</u>"
@@ -1122,7 +1155,7 @@ timerStopped = false;
     def on_create_copy(self) -> None:
         if self.card:
             aqt.dialogs.open("AddCards", self.mw).set_note(
-                self.card.note(), self.card.did
+                self.card.note(), self.card.current_deck_id()
             )
 
     def delete_current_note(self) -> None:

@@ -39,7 +39,9 @@ pub struct ForeignNote {
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ForeignCard {
-    pub due: i32,
+    /// Seconds-based timestamp
+    pub due: i64,
+    /// In days
     pub interval: u32,
     pub ease_factor: f32,
     pub reps: u32,

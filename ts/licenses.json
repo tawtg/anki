@@ -1,25 +1,25 @@
 {
-    "@bufbuild/protobuf@1.4.2": {
+    "@bufbuild/protobuf@1.10.0": {
         "licenses": "(Apache-2.0 AND BSD-3-Clause)",
         "repository": "https://github.com/bufbuild/protobuf-es",
         "path": "node_modules/@bufbuild/protobuf",
         "licenseFile": "node_modules/@bufbuild/protobuf/README.md"
     },
-    "@floating-ui/core@1.5.0": {
+    "@floating-ui/core@1.6.8": {
         "licenses": "MIT",
         "repository": "https://github.com/floating-ui/floating-ui",
         "publisher": "atomiks",
         "path": "node_modules/@floating-ui/core",
         "licenseFile": "node_modules/@floating-ui/core/LICENSE"
     },
-    "@floating-ui/dom@1.5.3": {
+    "@floating-ui/dom@1.6.11": {
         "licenses": "MIT",
         "repository": "https://github.com/floating-ui/floating-ui",
         "publisher": "atomiks",
         "path": "node_modules/@floating-ui/dom",
         "licenseFile": "node_modules/@floating-ui/dom/LICENSE"
     },
-    "@floating-ui/utils@0.1.6": {
+    "@floating-ui/utils@0.2.8": {
         "licenses": "MIT",
         "repository": "https://github.com/floating-ui/floating-ui",
         "publisher": "atomiks",
@@ -34,7 +34,7 @@
         "path": "node_modules/@fluent/bundle",
         "licenseFile": "node_modules/@fluent/bundle/README.md"
     },
-    "@mdi/svg@7.3.67": {
+    "@mdi/svg@7.4.47": {
         "licenses": "Apache-2.0",
         "repository": "https://github.com/Templarian/MaterialDesign-SVG",
         "publisher": "Austin Andrews",
@@ -84,7 +84,7 @@
         "path": "node_modules/acorn-globals/node_modules/acorn",
         "licenseFile": "node_modules/acorn-globals/node_modules/acorn/LICENSE"
     },
-    "acorn@8.11.2": {
+    "acorn@8.13.0": {
         "licenses": "MIT",
         "repository": "https://github.com/acornjs/acorn",
         "path": "node_modules/acorn",
@@ -98,13 +98,6 @@
         "path": "node_modules/agent-base",
         "licenseFile": "node_modules/agent-base/README.md"
     },
-    "amator@1.1.0": {
-        "licenses": "MIT",
-        "repository": "https://github.com/anvaka/amator",
-        "publisher": "Andrei Kashcha",
-        "path": "node_modules/amator",
-        "licenseFile": "node_modules/amator/LICENSE"
-    },
     "asynckit@0.4.0": {
         "licenses": "MIT",
         "repository": "https://github.com/alexindigo/asynckit",
@@ -113,22 +106,14 @@
         "path": "node_modules/asynckit",
         "licenseFile": "node_modules/asynckit/LICENSE"
     },
-    "bezier-easing@2.1.0": {
-        "licenses": "MIT",
-        "repository": "https://github.com/gre/bezier-easing",
-        "publisher": "Gaëtan Renaudeau",
-        "email": "renaudeau.gaetan@gmail.com",
-        "path": "node_modules/bezier-easing",
-        "licenseFile": "node_modules/bezier-easing/LICENSE"
-    },
-    "bootstrap-icons@1.11.2": {
+    "bootstrap-icons@1.11.3": {
         "licenses": "MIT",
         "repository": "https://github.com/twbs/icons",
         "publisher": "mdo",
         "path": "node_modules/bootstrap-icons",
         "licenseFile": "node_modules/bootstrap-icons/LICENSE"
     },
-    "bootstrap@5.3.2": {
+    "bootstrap@5.3.3": {
         "licenses": "MIT",
         "repository": "https://github.com/twbs/bootstrap",
         "publisher": "The Bootstrap Authors",
@@ -142,7 +127,7 @@
         "path": "node_modules/browser-process-hrtime",
         "licenseFile": "node_modules/browser-process-hrtime/LICENSE"
     },
-    "codemirror@5.65.16": {
+    "codemirror@5.65.18": {
         "licenses": "MIT",
         "repository": "https://github.com/codemirror/CodeMirror",
         "publisher": "Marijn Haverbeke",
@@ -286,7 +271,7 @@
         "path": "node_modules/d3-format",
         "licenseFile": "node_modules/d3-format/LICENSE"
     },
-    "d3-geo@3.1.0": {
+    "d3-geo@3.1.1": {
         "licenses": "ISC",
         "repository": "https://github.com/d3/d3-geo",
         "publisher": "Mike Bostock",
@@ -335,7 +320,7 @@
         "path": "node_modules/d3-random",
         "licenseFile": "node_modules/d3-random/LICENSE"
     },
-    "d3-scale-chromatic@3.0.0": {
+    "d3-scale-chromatic@3.1.0": {
         "licenses": "ISC",
         "repository": "https://github.com/d3/d3-scale-chromatic",
         "publisher": "Mike Bostock",
@@ -398,7 +383,7 @@
         "path": "node_modules/d3-zoom",
         "licenseFile": "node_modules/d3-zoom/LICENSE"
     },
-    "d3@7.8.5": {
+    "d3@7.9.0": {
         "licenses": "ISC",
         "repository": "https://github.com/d3/d3",
         "publisher": "Mike Bostock",
@@ -413,11 +398,10 @@
         "path": "node_modules/data-urls",
         "licenseFile": "node_modules/data-urls/LICENSE.txt"
     },
-    "debug@4.3.4": {
+    "debug@4.3.7": {
         "licenses": "MIT",
         "repository": "https://github.com/debug-js/debug",
         "publisher": "Josh Junon",
-        "email": "josh.junon@protonmail.com",
         "path": "node_modules/debug",
         "licenseFile": "node_modules/debug/LICENSE"
     },
@@ -429,7 +413,7 @@
         "path": "node_modules/decimal.js",
         "licenseFile": "node_modules/decimal.js/LICENCE.md"
     },
-    "delaunator@5.0.0": {
+    "delaunator@5.0.1": {
         "licenses": "ISC",
         "repository": "https://github.com/mapbox/delaunator",
         "publisher": "Vladimir Agafonkin",
@@ -482,7 +466,7 @@
         "path": "node_modules/esutils",
         "licenseFile": "node_modules/esutils/LICENSE.BSD"
     },
-    "fabric@5.3.0": {
+    "fabric@5.4.0": {
         "licenses": "MIT",
         "repository": "https://github.com/fabricjs/fabric.js",
         "publisher": "Juriy Zaytsev",
@@ -490,13 +474,21 @@
         "path": "node_modules/fabric",
         "licenseFile": "node_modules/fabric/LICENSE"
     },
-    "form-data@4.0.0": {
+    "form-data@4.0.1": {
         "licenses": "MIT",
         "repository": "https://github.com/form-data/form-data",
         "publisher": "Felix Geisendörfer",
         "email": "felix@debuggable.com",
         "path": "node_modules/form-data",
         "licenseFile": "node_modules/form-data/License"
+    },
+    "hammerjs@2.0.8": {
+        "licenses": "MIT",
+        "repository": "https://github.com/hammerjs/hammer.js",
+        "publisher": "Jorik Tangelder",
+        "email": "j.tangelder@gmail.com",
+        "path": "node_modules/hammerjs",
+        "licenseFile": "node_modules/hammerjs/LICENSE.md"
     },
     "html-encoding-sniffer@3.0.0": {
         "licenses": "MIT",
@@ -552,10 +544,10 @@
         "path": "node_modules/is-potential-custom-element-name",
         "licenseFile": "node_modules/is-potential-custom-element-name/LICENSE-MIT.txt"
     },
-    "jquery-ui-dist@1.13.2": {
+    "jquery-ui-dist@1.13.3": {
         "licenses": "MIT",
         "repository": "https://github.com/jquery/jquery-ui",
-        "publisher": "jQuery Foundation and other contributors",
+        "publisher": "OpenJS Foundation and other contributors",
         "path": "node_modules/jquery-ui-dist",
         "licenseFile": "node_modules/jquery-ui-dist/LICENSE.txt"
     },
@@ -605,33 +597,19 @@
         "path": "node_modules/mime-types",
         "licenseFile": "node_modules/mime-types/LICENSE"
     },
-    "ms@2.1.2": {
+    "ms@2.1.3": {
         "licenses": "MIT",
-        "repository": "https://github.com/zeit/ms",
+        "repository": "https://github.com/vercel/ms",
         "path": "node_modules/ms",
         "licenseFile": "node_modules/ms/license.md"
     },
-    "ngraph.events@1.2.2": {
-        "licenses": "BSD-3-Clause",
-        "repository": "https://github.com/anvaka/ngraph.events",
-        "publisher": "Andrei Kashcha",
-        "path": "node_modules/ngraph.events",
-        "licenseFile": "node_modules/ngraph.events/LICENSE"
-    },
-    "nwsapi@2.2.7": {
+    "nwsapi@2.2.13": {
         "licenses": "MIT",
         "repository": "https://github.com/dperini/nwsapi",
         "publisher": "Diego Perini",
         "email": "diego.perini@gmail.com",
         "path": "node_modules/nwsapi",
         "licenseFile": "node_modules/nwsapi/LICENSE"
-    },
-    "panzoom@9.4.3": {
-        "licenses": "MIT",
-        "repository": "https://github.com/anvaka/panzoom",
-        "publisher": "Andrei Kashcha",
-        "path": "node_modules/panzoom",
-        "licenseFile": "node_modules/panzoom/LICENSE"
     },
     "parse5@6.0.1": {
         "licenses": "MIT",
@@ -716,7 +694,7 @@
         "path": "node_modules/symbol-tree",
         "licenseFile": "node_modules/symbol-tree/LICENSE"
     },
-    "tough-cookie@4.1.3": {
+    "tough-cookie@4.1.4": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/salesforce/tough-cookie",
         "publisher": "Jeremy Stashewsky",
@@ -801,14 +779,7 @@
         "path": "node_modules/data-urls/node_modules/whatwg-url",
         "licenseFile": "node_modules/data-urls/node_modules/whatwg-url/LICENSE.txt"
     },
-    "wheel@1.0.0": {
-        "licenses": "MIT",
-        "repository": "https://github.com/anvaka/wheel",
-        "publisher": "Andrei Kashcha",
-        "path": "node_modules/wheel",
-        "licenseFile": "node_modules/wheel/LICENSE"
-    },
-    "ws@8.14.2": {
+    "ws@8.18.0": {
         "licenses": "MIT",
         "repository": "https://github.com/websockets/ws",
         "publisher": "Einar Otto Stangvik",
@@ -833,3 +804,4 @@
         "licenseFile": "node_modules/xmlchars/LICENSE"
     }
 }
+

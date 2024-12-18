@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from typing import Tuple
-
 import aqt
 import aqt.forms
 import aqt.operations
@@ -37,12 +35,12 @@ class CustomStudy(QDialog):
     def fetch_data_and_show(mw: aqt.AnkiQt) -> None:
         def fetch_data(
             col: Collection,
-        ) -> Tuple[DeckId, CustomStudyDefaults]:
+        ) -> tuple[DeckId, CustomStudyDefaults]:
             deck_id = mw.col.decks.get_current_id()
             defaults = col.sched.custom_study_defaults(deck_id)
             return (deck_id, defaults)
 
-        def show_dialog(data: Tuple[DeckId, CustomStudyDefaults]) -> None:
+        def show_dialog(data: tuple[DeckId, CustomStudyDefaults]) -> None:
             deck_id, defaults = data
             CustomStudy(mw=mw, deck_id=deck_id, defaults=defaults)
 
@@ -130,6 +128,8 @@ class CustomStudy(QDialog):
             ok = tr.custom_study_choose_tags()
             current_spinner_value = 100
             show_cram_type = True
+        else:
+            assert 0
 
         form.spin.setVisible(True)
         form.cardType.setVisible(show_cram_type)
@@ -144,7 +144,11 @@ class CustomStudy(QDialog):
         form.spin.setValue(current_spinner_value)
         form.preSpin.setText(text_before_spinner)
         form.postSpin.setText(text_after_spinner)
-        form.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText(ok)
+
+        ok_button = form.buttonBox.button(QDialogButtonBox.StandardButton.Ok)
+        assert ok_button is not None
+        ok_button.setText(ok)
+
         self.radioIdx = idx
 
     def accept(self) -> None:

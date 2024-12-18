@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 pub use anki_proto::notetypes::notetype::config::card_requirement::Kind as CardRequirementKind;
 pub use anki_proto::notetypes::notetype::config::CardRequirement;
@@ -33,7 +34,6 @@ pub use anki_proto::notetypes::Notetype as NotetypeProto;
 pub(crate) use cardgen::AlreadyGeneratedCardInfo;
 pub(crate) use cardgen::CardGenContext;
 pub use fields::NoteField;
-use lazy_static::lazy_static;
 pub use notetypechange::ChangeNotetypeInput;
 pub use notetypechange::NotetypeChangeInfo;
 use regex::Regex;
@@ -67,9 +67,9 @@ pub(crate) const DEFAULT_CSS: &str = include_str!("styling.css");
 pub(crate) const DEFAULT_CLOZE_CSS: &str = include_str!("cloze_styling.css");
 pub(crate) const DEFAULT_LATEX_HEADER: &str = include_str!("header.tex");
 pub(crate) const DEFAULT_LATEX_FOOTER: &str = r"\end{document}";
-lazy_static! {
-    /// New entries must be handled in render.rs/add_special_fields().
-    static ref SPECIAL_FIELDS: HashSet<&'static str> = HashSet::from_iter(vec![
+/// New entries must be handled in render.rs/add_special_fields().
+static SPECIAL_FIELDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from_iter(vec![
         "FrontSide",
         "Card",
         "CardFlag",
@@ -77,8 +77,8 @@ lazy_static! {
         "Subdeck",
         "Tags",
         "Type",
-    ]);
-}
+    ])
+});
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Notetype {
@@ -365,9 +365,8 @@ impl Notetype {
     }
 
     fn ensure_template_fronts_unique(&self) -> Result<(), CardTypeError> {
-        lazy_static! {
-            static ref CARD_TAG: Regex = Regex::new(r"\{\{\s*Card\s*\}\}").unwrap();
-        }
+        static CARD_TAG: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\{\{\s*Card\s*\}\}").unwrap());
 
         let mut map = HashMap::new();
         for (index, card) in self.templates.iter().enumerate() {
@@ -410,8 +409,12 @@ impl Notetype {
             if q_fields.is_empty() {
                 return Err(CardTypeErrorDetails::NoFrontField);
             }
-            if self.unknown_field_name(q_fields.union(&a.all_referenced_field_names())) {
-                return Err(CardTypeErrorDetails::NoSuchField);
+            if let Some(unknown_field) =
+                self.first_unknown_field_name(q_fields.union(&a.all_referenced_field_names()))
+            {
+                return Err(CardTypeErrorDetails::NoSuchField {
+                    field: unknown_field.to_string(),
+                });
             }
             Ok(())
         } else {
@@ -419,14 +422,14 @@ impl Notetype {
         }
     }
 
-    /// True if any non-empty name in names does not denote a special field or
-    /// a field of this notetype.
-    fn unknown_field_name<T, I>(&self, names: T) -> bool
+    /// Return the first non-empty name in names that does not denote a special
+    /// field or a field of this notetype.
+    fn first_unknown_field_name<T, I>(&self, names: T) -> Option<I>
     where
         T: IntoIterator<Item = I>,
         I: AsRef<str>,
     {
-        names.into_iter().any(|name| {
+        names.into_iter().find(|name| {
             // The empty field name is allowed as it may be used by add-ons.
             !name.as_ref().is_empty()
                 && !SPECIAL_FIELDS.contains(&name.as_ref())
@@ -491,13 +494,18 @@ impl Notetype {
         self.reposition_sort_idx();
 
         let mut parsed_templates = self.parsed_templates();
+        let mut parsed_browser_templates = self.parsed_browser_templates();
         let reqs = self.updated_requirements(&parsed_templates);
 
         // handle renamed+deleted fields
         if let Some(existing) = existing {
             let fields = self.renamed_and_removed_fields(existing);
             if !fields.is_empty() {
-                self.update_templates_for_renamed_and_removed_fields(fields, &mut parsed_templates);
+                self.update_templates_for_renamed_and_removed_fields(
+                    fields,
+                    &mut parsed_templates,
+                    &mut parsed_browser_templates,
+                );
             }
         }
         self.config.reqs = reqs;
@@ -552,24 +560,49 @@ impl Notetype {
         &mut self,
         fields: HashMap<String, Option<String>>,
         parsed: &mut [(Option<ParsedTemplate>, Option<ParsedTemplate>)],
+        parsed_browser: &mut [(Option<ParsedTemplate>, Option<ParsedTemplate>)],
     ) {
         let first_remaining_field_name = &self.fields.first().unwrap().name;
         let is_cloze = self.is_cloze();
-        for (idx, (q_opt, a_opt)) in parsed.iter_mut().enumerate() {
+
+        let q_update_fields = |q_opt: &mut Option<ParsedTemplate>, template_target: &mut String| {
             if let Some(q) = q_opt {
                 q.rename_and_remove_fields(&fields);
                 if !q.contains_field_replacement() || is_cloze && !q.contains_cloze_replacement() {
                     q.add_missing_field_replacement(first_remaining_field_name, is_cloze);
                 }
-                self.templates[idx].config.q_format = q.template_to_string();
+                *template_target = q.template_to_string();
             }
+        };
+
+        let a_update_fields = |a_opt: &mut Option<ParsedTemplate>, template_target: &mut String| {
             if let Some(a) = a_opt {
                 a.rename_and_remove_fields(&fields);
                 if is_cloze && !a.contains_cloze_replacement() {
                     a.add_missing_field_replacement(first_remaining_field_name, is_cloze);
                 }
-                self.templates[idx].config.a_format = a.template_to_string();
+                *template_target = a.template_to_string();
             }
+        };
+
+        // Update main templates
+        for (idx, (q_opt, a_opt)) in parsed.iter_mut().enumerate() {
+            q_update_fields(q_opt, &mut self.templates[idx].config.q_format);
+
+            a_update_fields(a_opt, &mut self.templates[idx].config.a_format);
+        }
+
+        // Update browser templates, if they exist
+        for (idx, (q_browser_opt, a_browser_opt)) in parsed_browser.iter_mut().enumerate() {
+            q_update_fields(
+                q_browser_opt,
+                &mut self.templates[idx].config.q_format_browser,
+            );
+
+            a_update_fields(
+                a_browser_opt,
+                &mut self.templates[idx].config.a_format_browser,
+            );
         }
     }
 
@@ -577,6 +610,17 @@ impl Notetype {
         self.templates
             .iter()
             .map(|t| (t.parsed_question(), t.parsed_answer()))
+            .collect()
+    }
+    fn parsed_browser_templates(&self) -> Vec<(Option<ParsedTemplate>, Option<ParsedTemplate>)> {
+        self.templates
+            .iter()
+            .map(|t| {
+                (
+                    t.parsed_question_format_for_browser(),
+                    t.parsed_answer_format_for_browser(),
+                )
+            })
             .collect()
     }
 
@@ -786,12 +830,17 @@ mod test {
         nt_norm.add_template("Card 1", "front {{foo}}", "back {{bar}}");
         nt_norm.templates[0].ord = Some(0);
         let mut parsed = nt_norm.parsed_templates();
+        let mut parsed_browser = nt_norm.parsed_browser_templates();
 
         let mut field_map: HashMap<String, Option<String>> = HashMap::new();
         field_map.insert("foo".to_owned(), None);
         field_map.insert("bar".to_owned(), None);
 
-        nt_norm.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        nt_norm.update_templates_for_renamed_and_removed_fields(
+            field_map,
+            &mut parsed,
+            &mut parsed_browser,
+        );
         assert_eq!(nt_norm.templates[0].config.q_format, "front {{baz}}");
         assert_eq!(nt_norm.templates[0].config.a_format, "back ");
 
@@ -811,7 +860,11 @@ mod test {
         field_map.insert("foo".to_owned(), None);
         field_map.insert("bar".to_owned(), None);
 
-        nt_cloze.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        nt_cloze.update_templates_for_renamed_and_removed_fields(
+            field_map,
+            &mut parsed,
+            &mut parsed_browser,
+        );
         assert_eq!(nt_cloze.templates[0].config.q_format, "front {{cloze:baz}}");
         assert_eq!(nt_cloze.templates[0].config.a_format, "back {{cloze:baz}}");
 
@@ -833,7 +886,11 @@ mod test {
         let mut field_map: HashMap<String, Option<String>> = HashMap::new();
         field_map.insert("bar".to_owned(), None);
 
-        nt_cloze.update_templates_for_renamed_and_removed_fields(field_map, &mut parsed);
+        nt_cloze.update_templates_for_renamed_and_removed_fields(
+            field_map,
+            &mut parsed,
+            &mut parsed_browser,
+        );
         assert_eq!(nt_cloze.templates[0].config.q_format, "front {{cloze:foo}}");
         assert_eq!(nt_cloze.templates[0].config.a_format, "back {{cloze:foo}}");
     }
