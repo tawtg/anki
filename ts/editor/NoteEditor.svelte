@@ -45,6 +45,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import { bridgeCommand } from "@tslib/bridgecommand";
     import { onMount, tick } from "svelte";
     import { get, writable } from "svelte/store";
+    import { nodeIsCommonElement } from "@tslib/dom";
 
     import Absolute from "$lib/components/Absolute.svelte";
     import Badge from "$lib/components/Badge.svelte";
@@ -57,7 +58,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         type ImageLoadedEvent,
         resetIOImage,
     } from "../routes/image-occlusion/mask-editor";
-    import { ChangeTimer } from "./change-timer";
+    import { ChangeTimer } from "../editable/change-timer";
     import { clearableArray } from "./destroyable";
     import DuplicateLink from "./DuplicateLink.svelte";
     import EditorToolbar from "./editor-toolbar";
@@ -277,8 +278,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         hidden: hideFieldInOcclusionType(index, ioFields),
     })) as FieldData[];
 
+    let lastSavedTags: string[] | null = null;
     function saveTags({ detail }: CustomEvent): void {
         tagAmount = detail.tags.filter((tag: string) => tag != "").length;
+        lastSavedTags = detail.tags;
         bridgeCommand(`saveTags:${JSON.stringify(detail.tags)}`);
     }
 
@@ -320,15 +323,25 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     export function focusIfField(x: number, y: number): boolean {
         const elements = document.elementsFromPoint(x, y);
-        const first = elements[0];
+        const first = elements[0].closest(".field-container");
 
-        if (first.shadowRoot) {
-            const richTextInput = first.shadowRoot.lastElementChild! as HTMLElement;
-            richTextInput.focus();
-            return true;
+        if (!first || !nodeIsCommonElement(first)) {
+            return false;
         }
 
-        return false;
+        const index = parseInt(first.dataset?.index ?? "");
+
+        if (Number.isNaN(index) || !fields[index] || fieldsCollapsed[index]) {
+            return false;
+        }
+
+        if (richTextsHidden[index]) {
+            toggleRichTextInput(index);
+        } else {
+            richTextInputs[index].api.refocus();
+        }
+
+        return true;
     }
 
     let richTextInputs: RichTextInput[] = [];
@@ -386,9 +399,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
      * Enable/Disable add-on buttons that do not have the `perm` class
      */
     function setAddonButtonsDisabled(disabled: boolean): void {
-        document.querySelectorAll("button.linkb:not(.perm)").forEach((button) => {
-            (button as HTMLButtonElement).disabled = disabled;
-        });
+        document
+            .querySelectorAll<HTMLButtonElement>("button.linkb:not(.perm)")
+            .forEach((button) => {
+                button.disabled = disabled;
+            });
     }
 
     import { ImageOcclusionFieldIndexes } from "@generated/anki/image_occlusion_pb";
@@ -397,7 +412,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     import Shortcut from "$lib/components/Shortcut.svelte";
 
-    import { mathjaxConfig } from "../editable/mathjax-element";
+    import { mathjaxConfig } from "../editable/mathjax-element.svelte";
     import ImageOcclusionPage from "../routes/image-occlusion/ImageOcclusionPage.svelte";
     import ImageOcclusionPicker from "../routes/image-occlusion/ImageOcclusionPicker.svelte";
     import type { IOMode } from "../routes/image-occlusion/lib";
@@ -429,7 +444,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         imageOcclusionMode = undefined;
         await tick();
         imageOcclusionMode = options.mode;
-        if (options.mode.kind === "add") {
+        if (options.mode.kind === "add" && !("clonedNoteId" in options.mode)) {
             fieldStores[ioFields.image].set(options.html);
             // the image field is set programmatically and does not need debouncing
             // commit immediately to avoid a race condition with the occlusions field
@@ -467,6 +482,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         isIOImageLoaded = false;
         globalThis.canvas.clear();
         globalThis.canvas = undefined;
+        if (imageOcclusionMode?.kind === "add") {
+            // canvas.clear indirectly calls saveOcclusions
+            saveFieldNow();
+            fieldStores[ioFields.image].set("");
+        }
         const page = document.querySelector(".image-occlusion");
         if (page) {
             page.remove();
@@ -532,6 +552,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         isIOImageLoaded,
         imageOcclusionMode,
     );
+
+    $: if (isImageOcclusion && $ioMaskEditorVisible && lastSavedTags) {
+        setTags(lastSavedTags);
+        lastSavedTags = null;
+    }
 
     onMount(() => {
         function wrap(before: string, after: string): void {
@@ -654,6 +679,7 @@ the AddCards dialog) should be implemented in the user of this component.
                 <EditorField
                     {field}
                     {content}
+                    {index}
                     flipInputs={plainTextDefaults[index]}
                     api={fields[index]}
                     on:focusin={() => {
@@ -696,6 +722,13 @@ the AddCards dialog) should be implemented in the user of this component.
                                 {#if cols[index] === "dupe"}
                                     <DuplicateLink />
                                 {/if}
+                                <slot
+                                    name="field-state"
+                                    {field}
+                                    {index}
+                                    show={fields[index] === $hoveredField ||
+                                        fields[index] === $focusedField}
+                                />
                                 {#if plainTextDefaults[index]}
                                     <RichTextBadge
                                         show={!fieldsCollapsed[index] &&
@@ -713,13 +746,6 @@ the AddCards dialog) should be implemented in the user of this component.
                                         on:toggle={() => togglePlainTextInput(index)}
                                     />
                                 {/if}
-                                <slot
-                                    name="field-state"
-                                    {field}
-                                    {index}
-                                    show={fields[index] === $hoveredField ||
-                                        fields[index] === $focusedField}
-                                />
                             </FieldState>
                         </LabelContainer>
                     </svelte:fragment>

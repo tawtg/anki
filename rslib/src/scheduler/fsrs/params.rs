@@ -14,8 +14,10 @@ use anki_proto::stats::DeckEntry;
 use chrono::NaiveDate;
 use chrono::NaiveTime;
 use fsrs::CombinedProgressState;
+use fsrs::ComputeParametersInput;
 use fsrs::FSRSItem;
 use fsrs::FSRSReview;
+use fsrs::MemoryState;
 use fsrs::ModelEvaluation;
 use fsrs::FSRS;
 use itertools::Itertools;
@@ -60,8 +62,9 @@ impl Collection {
         current_preset: u32,
         total_presets: u32,
         current_params: &Params,
+        num_of_relearning_steps: usize,
     ) -> Result<ComputeFsrsParamsResponse> {
-        let mut anki_progress = self.new_progress_handler::<ComputeParamsProgress>();
+        self.clear_progress();
         let timing = self.timing_today()?;
         let revlogs = self.revlog_for_srs(search)?;
         let (items, review_count) =
@@ -74,38 +77,72 @@ impl Collection {
                 fsrs_items,
             });
         }
-        anki_progress.update(false, |p| {
-            p.current_preset = current_preset;
-            p.total_presets = total_presets;
-        })?;
         // adapt the progress handler to our built-in progress handling
-        let progress = CombinedProgressState::new_shared();
-        let progress2 = progress.clone();
-        let progress_thread = thread::spawn(move || {
-            let mut finished = false;
-            while !finished {
-                thread::sleep(Duration::from_millis(100));
-                let mut guard = progress.lock().unwrap();
-                if let Err(_err) = anki_progress.update(false, |s| {
-                    s.total_iterations = guard.total() as u32;
-                    s.current_iteration = guard.current() as u32;
-                    s.reviews = review_count as u32;
-                    finished = guard.finished();
-                }) {
-                    guard.want_abort = true;
-                    return;
+
+        let create_progress_thread = || -> Result<_> {
+            let mut anki_progress = self.new_progress_handler::<ComputeParamsProgress>();
+            anki_progress.update(false, |p| {
+                p.current_preset = current_preset;
+                p.total_presets = total_presets;
+            })?;
+            let progress = CombinedProgressState::new_shared();
+            let progress2 = progress.clone();
+            let progress_thread = thread::spawn(move || {
+                let mut finished = false;
+                while !finished {
+                    thread::sleep(Duration::from_millis(100));
+                    let mut guard = progress.lock().unwrap();
+                    if let Err(_err) = anki_progress.update(false, |s| {
+                        s.total_iterations = guard.total() as u32;
+                        s.current_iteration = guard.current() as u32;
+                        s.reviews = review_count as u32;
+                        finished = guard.finished();
+                    }) {
+                        guard.want_abort = true;
+                        return;
+                    }
                 }
-            }
-        });
-        let mut params =
-            FSRS::new(None)?.compute_parameters(items.clone(), Some(progress2), true)?;
+            });
+            Ok((progress2, progress_thread))
+        };
+
+        let (progress, progress_thread) = create_progress_thread()?;
+        let fsrs = FSRS::new(None)?;
+        let mut params = fsrs.compute_parameters(ComputeParametersInput {
+            train_set: items.clone(),
+            progress: Some(progress.clone()),
+            enable_short_term: true,
+            num_relearning_steps: Some(num_of_relearning_steps),
+        })?;
         progress_thread.join().ok();
         if let Ok(fsrs) = FSRS::new(Some(current_params)) {
             let current_rmse = fsrs.evaluate(items.clone(), |_| true)?.rmse_bins;
             let optimized_fsrs = FSRS::new(Some(&params))?;
             let optimized_rmse = optimized_fsrs.evaluate(items.clone(), |_| true)?.rmse_bins;
             if current_rmse <= optimized_rmse {
-                params = current_params.to_vec();
+                if num_of_relearning_steps <= 1 {
+                    params = current_params.to_vec();
+                } else {
+                    let current_fsrs = FSRS::new(Some(current_params))?;
+                    let memory_state = MemoryState {
+                        stability: 1.0,
+                        difficulty: 1.0,
+                    };
+
+                    let s_fail = current_fsrs.next_states(Some(memory_state), 0.9, 2)?.again;
+                    let mut s_short_term = s_fail.memory;
+
+                    for _ in 0..num_of_relearning_steps {
+                        s_short_term = current_fsrs
+                            .next_states(Some(s_short_term), 0.9, 0)?
+                            .good
+                            .memory;
+                    }
+
+                    if s_short_term.stability < memory_state.stability {
+                        params = current_params.to_vec();
+                    }
+                }
             }
         }
 
@@ -340,6 +377,9 @@ pub(crate) fn reviews_for_fsrs(
         if idx > 0 {
             entries.drain(..idx);
         }
+    } else {
+        // if no valid user grades were found, ignore the card.
+        return None;
     }
 
     // Filter out unwanted entries
@@ -424,7 +464,7 @@ fn revlog_entry_to_proto(e: RevlogEntry) -> anki_proto::stats::RevlogEntry {
 pub(crate) mod tests {
     use super::*;
 
-    const NEXT_DAY_AT: TimestampSecs = TimestampSecs(86400 * 100);
+    const NEXT_DAY_AT: TimestampSecs = TimestampSecs(86400 * 1000);
 
     fn days_ago_ms(days_ago: i64) -> TimestampMillis {
         ((NEXT_DAY_AT.0 - days_ago * 86400) * 1000).into()
@@ -708,5 +748,15 @@ pub(crate) mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn ignore_before_after_last_revlog_entry() {
+        let revlogs = &[
+            revlog(RevlogReviewKind::Learning, 10),
+            revlog(RevlogReviewKind::Review, 6),
+        ];
+        // L R |
+        assert_eq!(convert_ignore_before(revlogs, false, days_ago_ms(4)), None);
     }
 }

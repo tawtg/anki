@@ -82,12 +82,6 @@ export function renderSimulationChart(
         [SimulateSubgraph.memorized]: convertedData.map(d => ({ ...d, y: d.memorized })),
     })[subgraph];
 
-    const subgraph_title = ({
-        [SimulateSubgraph.count]: tr.deckConfigFsrsSimulatorYAxisTitleCount(),
-        [SimulateSubgraph.time]: tr.deckConfigFsrsSimulatorYAxisTitleTime(),
-        [SimulateSubgraph.memorized]: tr.deckConfigFsrsSimulatorYAxisTitleMemorized(),
-    })[subgraph];
-
     const yMax = max(subgraph_data, d => d.y)!;
     const y = scaleLinear()
         .range([bounds.height - bounds.marginBottom, bounds.marginTop])
@@ -113,9 +107,7 @@ export function renderSimulationChart(
         .attr("x", 0 - (bounds.height / 2))
         .attr("font-size", "1rem")
         .attr("dy", "1.1em")
-        .attr("fill", "currentColor")
-        .style("text-anchor", "middle")
-        .text(subgraph_title);
+        .attr("fill", "currentColor");
 
     // x lines
     const points = subgraph_data.map((d) => [x(d.date), y(d.y), d.label]);
@@ -132,6 +124,7 @@ export function renderSimulationChart(
         .selectAll("path")
         .data(Array.from(groups.entries()))
         .join("path")
+        .attr("vector-effect", "non-scaling-stroke")
         .attr("stroke", (d, i) => color[i % color.length])
         .attr("d", d => line()(d[1].map(p => [p[0], p[1]])))
         .attr("data-group", d => d[0]);

@@ -18,8 +18,8 @@ import {
     bin,
     cumsum,
     curveBasis,
+    interpolateBlues,
     interpolateGreens,
-    interpolateOranges,
     interpolatePurples,
     interpolateReds,
     max,
@@ -181,7 +181,7 @@ export function renderReviews(
     const reds = scaleSequential((n) => interpolateReds(cappedRange(n)!)).domain(
         x.domain() as any,
     );
-    const oranges = scaleSequential((n) => interpolateOranges(cappedRange(n)!)).domain(
+    const blues = scaleSequential((n) => interpolateBlues(cappedRange(n)!)).domain(
         x.domain() as any,
     );
     const purples = scaleSequential((n) => interpolatePurples(cappedRange(n)!)).domain(
@@ -195,7 +195,7 @@ export function renderReviews(
             case BinIndex.Young:
                 return lighterGreens;
             case BinIndex.Learn:
-                return oranges;
+                return blues;
             case BinIndex.Relearn:
                 return reds;
             case BinIndex.Filtered:
@@ -291,7 +291,7 @@ export function renderReviews(
             .attr("direction", "ltr");
 
         svg.select("path.cumulative-overlay")
-            .datum(areaData as any)
+            .datum(areaData)
             .attr(
                 "d",
                 area()
@@ -397,15 +397,17 @@ export function renderReviews(
         { label: tr.statisticsTotal(), value: totalString },
 
         {
-            label: tr.statisticsAverageForDaysStudied(),
-            value: averageForDaysStudied,
-        },
-
-        {
             label: tr.statisticsAverageOverPeriod(),
             value: averageForPeriod,
         },
     ];
+
+    if (studiedPercent < 100) {
+        tableData.push({
+            label: tr.statisticsAverageForDaysStudied(),
+            value: averageForDaysStudied,
+        });
+    }
 
     if (averageAnswerTime) {
         tableData.push({ label: averageAnswerTimeLabel, value: averageAnswerTime });

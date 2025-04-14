@@ -215,6 +215,7 @@ impl Collection {
                     .unwrap_or_default();
                 let previous_params = previous_config.map(|c| c.fsrs_params());
                 let previous_retention = previous_config.map(|c| c.inner.desired_retention);
+                let previous_easy_days = previous_config.map(|c| &c.inner.easy_days_percentages);
 
                 // if a selected (sub)deck, or its old config was removed, update deck to point
                 // to new config
@@ -242,9 +243,11 @@ impl Collection {
                 // if params differ, memory state needs to be recomputed
                 let current_params = current_config.map(|c| c.fsrs_params());
                 let current_retention = current_config.map(|c| c.inner.desired_retention);
+                let current_easy_days = current_config.map(|c| &c.inner.easy_days_percentages);
                 if fsrs_toggled
                     || previous_params != current_params
                     || previous_retention != current_retention
+                    || (req.fsrs_reschedule && previous_easy_days != current_easy_days)
                 {
                     decks_needing_memory_recompute
                         .entry(current_config_id)
@@ -356,12 +359,14 @@ impl Collection {
                 config.inner.param_search.clone()
             };
             let ignore_revlogs_before_ms = ignore_revlogs_before_ms_from_config(config)?;
+            let num_of_relearning_steps = config.inner.relearn_steps.len();
             match self.compute_params(
                 &search,
                 ignore_revlogs_before_ms,
                 idx as u32 + 1,
                 config_len,
                 config.fsrs_params(),
+                num_of_relearning_steps,
             ) {
                 Ok(params) => {
                     println!("{}: {:?}", config.name, params.params);
@@ -406,10 +411,16 @@ fn update_deck_limits(deck: &mut NormalDeck, limits: &Limits, today: u32) {
 fn update_day_limit(day_limit: &mut Option<DayLimit>, new_limit: Option<u32>, today: u32) {
     if let Some(limit) = new_limit {
         day_limit.replace(DayLimit { limit, today });
-    } else if let Some(limit) = day_limit {
-        // instead of setting to None, only make sure today is in the past,
-        // thus preserving last used value
-        limit.today = limit.today.min(today - 1);
+    } else {
+        // if the collection was created today, the
+        // "preserve last value" hack below won't work
+        // clear "future" limits as well (from imports)
+        day_limit.take_if(|limit| limit.today == 0 || limit.today > today);
+        if let Some(limit) = day_limit {
+            // instead of setting to None, only make sure today is in the past,
+            // thus preserving last used value
+            limit.today = limit.today.min(today.saturating_sub(1));
+        }
     }
 }
 

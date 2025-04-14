@@ -57,7 +57,8 @@ class AddCards(QMainWindow):
         gui_hooks.operation_did_execute.append(self.on_operation_did_execute)
         restoreGeom(self, "add")
         gui_hooks.add_cards_did_init(self)
-        self.setMenuBar(None)
+        if not is_mac:
+            self.setMenuBar(None)
         self.show()
 
     def set_deck(self, deck_id: DeckId) -> None:
@@ -78,6 +79,7 @@ class AddCards(QMainWindow):
         new_note.fields = note.fields[:]
         new_note.tags = note.tags[:]
 
+        self.editor.orig_note_id = note.id
         self.setAndFocusNote(new_note)
 
     def setupEditor(self) -> None:
@@ -106,6 +108,16 @@ class AddCards(QMainWindow):
             starting_deck_id=DeckId(defaults.deck_id),
             on_deck_changed=self.on_deck_changed,
         )
+
+    def reopen(self, mw: AnkiQt) -> None:
+        if not self.editor.fieldsAreBlank():
+            return
+
+        defaults = self.col.defaults_for_adding(
+            current_review_card=self.mw.reviewer.card
+        )
+        self.set_note_type(NotetypeId(defaults.notetype_id))
+        self.set_deck(DeckId(defaults.deck_id))
 
     def helpRequested(self) -> None:
         openHelp(HelpPage.ADDING_CARD_AND_NOTE)

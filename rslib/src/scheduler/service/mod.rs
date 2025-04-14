@@ -17,6 +17,7 @@ use anki_proto::scheduler::FuzzDeltaResponse;
 use anki_proto::scheduler::GetOptimalRetentionParametersResponse;
 use anki_proto::scheduler::SimulateFsrsReviewRequest;
 use anki_proto::scheduler::SimulateFsrsReviewResponse;
+use fsrs::ComputeParametersInput;
 use fsrs::FSRSItem;
 use fsrs::FSRSReview;
 use fsrs::FSRS;
@@ -55,7 +56,7 @@ impl crate::services::SchedulerService for Collection {
         self.transact_no_undo(|col| {
             let today = col.current_due_day(0)?;
             let usn = col.usn()?;
-            col.update_deck_stats(today, usn, input).map(Into::into)
+            col.update_deck_stats(today, usn, input)
         })
     }
 
@@ -70,7 +71,6 @@ impl crate::services::SchedulerService for Collection {
                 input.new_delta,
                 input.review_delta,
             )
-            .map(Into::into)
         })
     }
 
@@ -166,6 +166,14 @@ impl crate::services::SchedulerService for Collection {
         self.set_due_date(&cids, &days, config).map(Into::into)
     }
 
+    fn grade_now(
+        &mut self,
+        input: scheduler::GradeNowRequest,
+    ) -> Result<anki_proto::collection::OpChanges> {
+        self.grade_now(&input.card_ids.into_newtype(CardId), input.rating)
+            .map(Into::into)
+    }
+
     fn sort_cards(
         &mut self,
         input: scheduler::SortCardsRequest,
@@ -229,7 +237,6 @@ impl crate::services::SchedulerService for Collection {
 
     fn upgrade_scheduler(&mut self) -> Result<()> {
         self.transact_no_undo(|col| col.upgrade_to_v2_scheduler())
-            .map(Into::into)
     }
 
     fn get_queued_cards(
@@ -264,6 +271,7 @@ impl crate::services::SchedulerService for Collection {
             1,
             1,
             &input.current_params,
+            input.num_of_relearning_steps as usize,
         )
     }
 
@@ -345,11 +353,12 @@ impl crate::services::BackendSchedulerService for Backend {
     ) -> Result<scheduler::ComputeFsrsParamsResponse> {
         let fsrs = FSRS::new(None)?;
         let fsrs_items = req.items.len() as u32;
-        let params = fsrs.compute_parameters(
-            req.items.into_iter().map(fsrs_item_proto_to_fsrs).collect(),
-            None,
-            true,
-        )?;
+        let params = fsrs.compute_parameters(ComputeParametersInput {
+            train_set: req.items.into_iter().map(fsrs_item_proto_to_fsrs).collect(),
+            progress: None,
+            enable_short_term: true,
+            num_relearning_steps: None,
+        })?;
         Ok(ComputeFsrsParamsResponse { params, fsrs_items })
     }
 
@@ -363,7 +372,12 @@ impl crate::services::BackendSchedulerService for Backend {
             .into_iter()
             .map(fsrs_item_proto_to_fsrs)
             .collect();
-        let params = fsrs.benchmark(train_set, true);
+        let params = fsrs.benchmark(ComputeParametersInput {
+            train_set,
+            progress: None,
+            enable_short_term: true,
+            num_relearning_steps: None,
+        });
         Ok(FsrsBenchmarkResponse { params })
     }
 

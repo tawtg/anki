@@ -10,10 +10,12 @@ use fsrs::FSRS;
 use itertools::Itertools;
 
 use super::params::ignore_revlogs_before_ms_from_config;
+use super::rescheduler::Rescheduler;
 use crate::card::CardType;
 use crate::prelude::*;
 use crate::revlog::RevlogEntry;
 use crate::revlog::RevlogReviewKind;
+use crate::scheduler::answering::get_fuzz_seed;
 use crate::scheduler::fsrs::params::reviews_for_fsrs;
 use crate::scheduler::fsrs::params::Params;
 use crate::scheduler::states::fuzz::with_review_fuzz;
@@ -69,6 +71,10 @@ impl Collection {
             } else {
                 None
             };
+            let mut rescheduler = self
+                .get_config_bool(BoolKey::LoadBalancerEnabled)
+                .then(|| Rescheduler::new(self))
+                .transpose()?;
             let fsrs = FSRS::new(req.as_ref().map(|w| &w.params[..]).or(Some([].as_slice())))?;
             let historical_retention = req.as_ref().map(|w| w.historical_retention);
             let items = fsrs_items_for_memory_states(
@@ -85,8 +91,8 @@ impl Collection {
                 progress.update(true, |state| state.current_cards = idx as u32 + 1)?;
                 let mut card = self.storage.get_card(card_id)?.or_not_found(card_id)?;
                 let original = card.clone();
-                if let Some(req) = &req {
-                    card.set_memory_state(&fsrs, item, historical_retention.unwrap())?;
+                if let (Some(req), Some(item)) = (&req, item) {
+                    card.set_memory_state(&fsrs, Some(item), historical_retention.unwrap())?;
                     card.desired_retention = desired_retention;
                     // if rescheduling
                     if let Some(reviews) = &last_revlog_info {
@@ -99,6 +105,10 @@ impl Collection {
                                 if let Some(state) = &card.memory_state {
                                     // or in (re)learning
                                     if card.ctype == CardType::Review {
+                                        let deck = self
+                                            .get_deck(card.original_or_current_deck_id())?
+                                            .or_not_found(card.original_or_current_deck_id())?;
+                                        let deckconfig_id = deck.config_id().unwrap();
                                         // reschedule it
                                         let original_interval = card.interval;
                                         let interval = fsrs.next_interval(
@@ -106,19 +116,41 @@ impl Collection {
                                             card.desired_retention.unwrap(),
                                             0,
                                         );
-                                        card.interval = with_review_fuzz(
-                                            card.get_fuzz_factor(true),
-                                            interval,
-                                            1,
-                                            req.max_interval,
-                                        );
+                                        card.interval = rescheduler
+                                            .as_mut()
+                                            .and_then(|r| {
+                                                r.find_interval(
+                                                    interval,
+                                                    1,
+                                                    req.max_interval,
+                                                    days_elapsed as u32,
+                                                    deckconfig_id,
+                                                    get_fuzz_seed(&card, true),
+                                                )
+                                            })
+                                            .unwrap_or_else(|| {
+                                                with_review_fuzz(
+                                                    card.get_fuzz_factor(true),
+                                                    interval,
+                                                    1,
+                                                    req.max_interval,
+                                                )
+                                            });
                                         let due = if card.original_due != 0 {
                                             &mut card.original_due
                                         } else {
                                             &mut card.due
                                         };
-                                        *due = (timing.days_elapsed as i32) - days_elapsed
+                                        let new_due = (timing.days_elapsed as i32) - days_elapsed
                                             + card.interval as i32;
+                                        if let Some(rescheduler) = &mut rescheduler {
+                                            rescheduler.update_due_cnt_per_day(
+                                                *due,
+                                                new_due,
+                                                deckconfig_id,
+                                            );
+                                        }
+                                        *due = new_due;
                                         // Add a rescheduled revlog entry if the last entry wasn't
                                         // rescheduled
                                         if !last_info.last_revlog_is_rescheduled {
@@ -163,11 +195,20 @@ impl Collection {
             historical_retention,
             ignore_revlogs_before_ms_from_config(&config)?,
         )?;
-        card.set_memory_state(&fsrs, item, historical_retention)?;
-        Ok(ComputeMemoryStateResponse {
-            state: card.memory_state.map(Into::into),
-            desired_retention,
-        })
+        if item.is_some() {
+            card.set_memory_state(&fsrs, item, historical_retention)?;
+            Ok(ComputeMemoryStateResponse {
+                state: card.memory_state.map(Into::into),
+                desired_retention,
+            })
+        } else {
+            card.memory_state = None;
+            card.desired_retention = None;
+            Ok(ComputeMemoryStateResponse {
+                state: None,
+                desired_retention,
+            })
+        }
     }
 }
 
@@ -180,7 +221,7 @@ impl Card {
     ) -> Result<()> {
         let memory_state = if let Some(i) = item {
             Some(fsrs.memory_state(i.item, i.starting_state)?)
-        } else if self.ctype == CardType::New || self.interval == 0 || self.reps == 0 {
+        } else if self.ctype == CardType::New || self.interval == 0 {
             None
         } else {
             // no valid revlog entries; infer state from current card state
@@ -201,6 +242,7 @@ pub(crate) struct FsrsItemForMemoryState {
     /// When revlogs have been truncated, this stores the initial state at first
     /// review
     pub starting_state: Option<MemoryState>,
+    pub filtered_revlogs: Vec<RevlogEntry>,
 }
 
 /// Like [fsrs_item_for_memory_state], but for updating multiple cards at once.
@@ -289,6 +331,7 @@ pub(crate) fn fsrs_item_for_memory_state(
             Ok(Some(FsrsItemForMemoryState {
                 item,
                 starting_state: None,
+                filtered_revlogs: output.filtered_revlogs,
             }))
         } else if let Some(first_user_grade) = output.filtered_revlogs.first() {
             // the revlog has been truncated, but not fully
@@ -315,6 +358,7 @@ pub(crate) fn fsrs_item_for_memory_state(
             Ok(Some(FsrsItemForMemoryState {
                 item,
                 starting_state: Some(starting_state),
+                filtered_revlogs: output.filtered_revlogs,
             }))
         } else {
             // only manual and rescheduled revlogs; treat like empty

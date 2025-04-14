@@ -121,19 +121,34 @@ impl Collection {
     }
 
     fn parse_meta_value(&mut self, key: &str, value: &str, metadata: &mut CsvMetadata) {
+        // trim potential delimiters past the first char* if
+        // metadata line was mistakenly exported as a record
+        // *to allow cases like #separator:,
+        // ASSUMPTION: delimiters are not ascii-alphanumeric
+        let trimmed_value = value
+            .char_indices()
+            .nth(1)
+            .and_then(|(i, _)| {
+                value[i..] // SAFETY: char_indices are on char boundaries
+                    .find(|c| !char::is_ascii_alphanumeric(&c))
+                    .map(|j| value.split_at(i + j).0)
+            })
+            .unwrap_or(value);
+
         match key.trim().to_ascii_lowercase().as_str() {
             "separator" => {
-                if let Some(delimiter) = delimiter_from_value(value) {
+                if let Some(delimiter) = delimiter_from_value(trimmed_value) {
                     metadata.delimiter = delimiter as i32;
                     metadata.force_delimiter = true;
                 }
             }
             "html" => {
-                if let Ok(is_html) = value.to_lowercase().parse() {
+                if let Ok(is_html) = trimmed_value.to_lowercase().parse() {
                     metadata.is_html = is_html;
                     metadata.force_is_html = true;
                 }
             }
+            // freeform values cannot be trimmed thus without knowing the exact delimiter
             "tags" => metadata.global_tags = collect_tags(value),
             "columns" => {
                 if let Ok(columns) = parse_columns(value, metadata.delimiter()) {
@@ -151,22 +166,22 @@ impl Collection {
                 }
             }
             "notetype column" => {
-                if let Ok(n) = value.trim().parse() {
+                if let Ok(n) = trimmed_value.trim().parse() {
                     metadata.notetype = Some(CsvNotetype::NotetypeColumn(n));
                 }
             }
             "deck column" => {
-                if let Ok(n) = value.trim().parse() {
+                if let Ok(n) = trimmed_value.trim().parse() {
                     metadata.deck = Some(CsvDeck::DeckColumn(n));
                 }
             }
             "tags column" => {
-                if let Ok(n) = value.trim().parse() {
+                if let Ok(n) = trimmed_value.trim().parse() {
                     metadata.tags_column = n;
                 }
             }
             "guid column" => {
-                if let Ok(n) = value.trim().parse() {
+                if let Ok(n) = trimmed_value.trim().parse() {
                     metadata.guid_column = n;
                 }
             }
@@ -688,6 +703,35 @@ pub(in crate::import_export) mod test {
     }
 
     #[test]
+    fn should_fallback_to_parsing_deck_ids_as_deck_names() {
+        let mut col = Collection::new();
+        let numeric_deck_id = col.get_or_create_normal_deck("123456789").unwrap().id.0;
+        let numeric_deck_2_id = col
+            .get_or_create_normal_deck(&numeric_deck_id.to_string())
+            .unwrap()
+            .id
+            .0;
+
+        assert_eq!(
+            metadata!(col, "#deck:123456789\n").unwrap_deck_id(),
+            numeric_deck_id
+        );
+        // parsed as id first, fallback to name after
+        assert_eq!(
+            metadata!(col, format!("#deck:{numeric_deck_id}\n")).unwrap_deck_id(),
+            numeric_deck_id
+        );
+        assert_eq!(
+            metadata!(col, format!("#deck:{numeric_deck_2_id}\n")).unwrap_deck_id(),
+            numeric_deck_2_id
+        );
+        assert_eq!(
+            metadata!(col, format!("#deck:1234\n")).unwrap_deck_id(),
+            1 // default deck
+        );
+    }
+
+    #[test]
     fn should_detect_valid_delimiters() {
         let mut col = Collection::new();
         assert_eq!(
@@ -861,5 +905,33 @@ pub(in crate::import_export) mod test {
         metadata.column_labels.push(String::new());
         maybe_set_tags_column(&mut metadata, &meta_columns);
         assert_eq!(metadata.tags_column, 4);
+    }
+
+    #[test]
+    fn should_allow_non_freeform_metadata_lines_to_be_suffixed_by_delimiters() {
+        let mut col = Collection::new();
+        let metadata = metadata!(
+            col,
+            r#"
+#separator:Pipe,,,,,,,
+#html:true|||||
+#tags:foo bar::世界,,,
+#guid column:8   
+#tags column:123abc 
+        "#
+            .trim()
+        );
+        assert_eq!(metadata.delimiter(), Delimiter::Pipe);
+        assert!(metadata.is_html);
+        assert_eq!(metadata.guid_column, 8);
+        // tags is freeform, potential delimiters aren't trimmed
+        assert_eq!(metadata.global_tags, ["foo", "bar::世界,,,"]);
+        // ascii alphanumerics aren't trimmed away
+        assert_eq!(metadata.tags_column, 0);
+
+        assert_eq!(
+            metadata!(col, "#separator:\t|,:\n").delimiter(),
+            Delimiter::Tab
+        );
     }
 }

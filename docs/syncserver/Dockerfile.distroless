@@ -7,16 +7,16 @@ RUN apt-get update && apt-get install -y build-essential protobuf-compiler && ap
 RUN cargo install --git https://github.com/ankitects/anki.git \
 --tag ${ANKI_VERSION} \
 --root /anki-server  \
+--locked \
 anki-sync-server
 
 FROM gcr.io/distroless/cc-debian12
 
-ARG SYNC_PORT=8080
-
 COPY --from=builder /anki-server/bin/anki-sync-server /usr/bin/anki-sync-server
 
-ENV SYNC_PORT=${SYNC_PORT}
-
+# Note that as a user of the container you should NOT overwrite these values
+# for safety and simplicity reasons
+ENV SYNC_PORT=8080
 ENV SYNC_BASE=/anki_data
 
 EXPOSE ${SYNC_PORT}

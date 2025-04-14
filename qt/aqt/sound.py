@@ -142,6 +142,8 @@ class AVPlayer:
     interrupt_current_audio = True
     # caller key for the current playback (optional)
     current_caller = None
+    # whether the last call to play_file_with_caller interrupted another
+    current_caller_interrupted = False
 
     def __init__(self) -> None:
         self._enqueued: list[AVTag] = []
@@ -178,6 +180,8 @@ class AVPlayer:
         self.play_tags([SoundOrVideoTag(filename=filename)])
 
     def play_file_with_caller(self, filename: str, caller) -> None:
+        if self.current_caller:
+            self.current_caller_interrupted = True
         self.current_caller = caller
         self.play_file(filename)
 
@@ -197,6 +201,7 @@ class AVPlayer:
         self.stop_and_clear_queue()
         for player in self.players:
             player.shutdown()
+        self.players.clear()
 
     def _stop_if_playing(self) -> None:
         if self.current_player:
@@ -208,7 +213,9 @@ class AVPlayer:
         return self._enqueued.pop(0)
 
     def _on_play_finished(self) -> None:
-        self.current_caller = None
+        if not self.current_caller_interrupted:
+            self.current_caller = None
+        self.current_caller_interrupted = False
         gui_hooks.av_player_did_end_playing(self.current_player)
         self.current_player = None
         self._play_next_if_idle()
@@ -844,7 +851,7 @@ def av_refs_to_play_icons(text: str) -> str:
 
     def repl(match: re.Match) -> str:
         return f"""
-<a class="replay-button soundLink" href=# onclick="pycmd('{match.group(1)}'); return false;">
+<a class="replay-button soundLink" href=# onclick="pycmd('{match.group(1)}'); return false;" draggable="false">
     <svg class="playImage" viewBox="0 0 64 64" version="1.1">
         <circle cx="32" cy="32" r="29" />
         <path d="M56.502,32.301l-37.502,20.101l0.329,-40.804l37.173,20.703Z" />

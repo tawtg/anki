@@ -89,7 +89,7 @@ pub(crate) struct StateContext<'a> {
     pub fuzz_factor: Option<f32>,
     pub fsrs_next_states: Option<NextStates>,
     pub fsrs_short_term_with_steps_enabled: bool,
-
+    pub fsrs_allow_short_term: bool,
     // learning
     pub steps: LearningSteps<'a>,
     pub graduating_interval_good: u32,
@@ -102,7 +102,7 @@ pub(crate) struct StateContext<'a> {
     pub interval_multiplier: f32,
     pub maximum_review_interval: u32,
     pub leech_threshold: u32,
-    pub load_balancer: Option<LoadBalancerContext<'a>>,
+    pub load_balancer_ctx: Option<LoadBalancerContext<'a>>,
 
     // relearning
     pub relearn_steps: LearningSteps<'a>,
@@ -114,7 +114,7 @@ pub(crate) struct StateContext<'a> {
     pub preview_delays: PreviewDelays,
 }
 
-impl<'a> StateContext<'a> {
+impl StateContext<'_> {
     /// Return the minimum and maximum review intervals.
     /// - `maximum` is `self.maximum_review_interval`, but at least 1.
     /// - `minimum` is as passed, but at least 1, and at most `maximum`.
@@ -137,7 +137,7 @@ impl<'a> StateContext<'a> {
             interval_multiplier: 1.0,
             maximum_review_interval: 36500,
             leech_threshold: 8,
-            load_balancer: None,
+            load_balancer_ctx: None,
             relearn_steps: LearningSteps::new(&[10.0]),
             lapse_multiplier: 0.0,
             minimum_lapse_interval: 1,
@@ -149,6 +149,7 @@ impl<'a> StateContext<'a> {
             },
             fsrs_next_states: None,
             fsrs_short_term_with_steps_enabled: false,
+            fsrs_allow_short_term: false,
         }
     }
 }

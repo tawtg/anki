@@ -107,8 +107,8 @@ static HTML_LINEBREAK_TAGS: LazyLock<Regex> = LazyLock::new(|| {
 pub static HTML_MEDIA_TAGS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?xsi)
-            # the start of the image, audio, or object tag
-            <\b(?:img|audio|video|object)\b
+            # the start of the image, audio, object, or source tag
+            <\b(?:img|audio|video|object|source)\b
 
             # any non-`>`, except inside `"` or `'`
             (?:
@@ -186,7 +186,7 @@ static UNDERSCORED_CSS_IMPORTS: LazyLock<Regex> = LazyLock::new(|| {
                 |                   # or
                 '(_[^']+)'          # single quoted
                 |                   # or
-                (_.+)               # unquoted filename
+                (_.+?)              # unquoted filename
             \s*\))
     "#,
     )
@@ -649,8 +649,17 @@ mod test {
                 "URL(\"_bar.css\")\n",
                 "@import url('_baz.css')\n",
                 "url('nope.css')\n",
+                "url(_foo.woff2) format('woff2')",
             )),
-            vec!["_foo.css", "_bar.css", "_baz.css", "_foo.css", "_bar.css", "_baz.css",]
+            vec![
+                "_foo.css",
+                "_bar.css",
+                "_baz.css",
+                "_foo.css",
+                "_bar.css",
+                "_baz.css",
+                "_foo.woff2"
+            ]
         );
         assert_eq!(
             extract_underscored_references(concat!(

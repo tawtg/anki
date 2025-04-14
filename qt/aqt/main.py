@@ -554,6 +554,8 @@ class AnkiQt(QMainWindow):
                 last_day_cutoff = self.col.sched.day_cutoff
                 self.reviewer._refresh_needed = RefreshNeeded.QUEUES
                 self.reviewer.refresh_if_needed()
+            if last_day_cutoff != current_cutoff:
+                gui_hooks.day_did_change()
 
             # schedule another check
             secs_until_cutoff = current_cutoff - int_time()
@@ -800,14 +802,19 @@ class AnkiQt(QMainWindow):
     def _reviewState(self, oldState: MainWindowState) -> None:
         self.reviewer.show()
 
-        if self.fullscreen:
-            self.hide_menubar()
+        fullscreen_was_checked = False
 
         if self.pm.hide_top_bar():
             self.toolbarWeb.hide_timer.setInterval(500)
             self.toolbarWeb.hide_timer.start()
+
+            # check the `hide_if_allowed` method in `qt/aqt/toolbar.py`
+            fullscreen_was_checked = True
         else:
             self.toolbarWeb.flatten()
+
+        if not fullscreen_was_checked and self.fullscreen:
+            self.hide_menubar()
 
         if self.pm.hide_bottom_bar():
             self.bottomWeb.hide_timer.setInterval(500)

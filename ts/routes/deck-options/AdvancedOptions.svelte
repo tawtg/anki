@@ -20,6 +20,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import SpinBoxFloatRow from "./SpinBoxFloatRow.svelte";
     import SpinBoxRow from "./SpinBoxRow.svelte";
     import DateInput from "./DateInput.svelte";
+    import Warning from "./Warning.svelte";
 
     export let state: DeckOptionsState;
     export let api: Record<string, never>;
@@ -81,7 +82,14 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             url: "https://faqs.ankiweb.net/the-2021-scheduler.html#add-ons-and-custom-scheduling",
         },
     };
-    const helpSections = Object.values(settings) as HelpItem[];
+    const helpSections: HelpItem[] = Object.values(settings);
+
+    $: maxIntervalWarningClass =
+        $config.maximumReviewInterval < 50 ? "alert-danger" : "alert-warning";
+    $: maxIntervalWarning =
+        $config.maximumReviewInterval < 180
+            ? tr.deckConfigTooShortMaximumInterval()
+            : "";
 
     let modal: Modal;
     let carousel: Carousel;
@@ -119,6 +127,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                     {settings.maximumInterval.title}
                 </SettingTitle>
             </SpinBoxRow>
+        </Item>
+
+        <Item>
+            <Warning warning={maxIntervalWarning} className={maxIntervalWarningClass}
+            ></Warning>
         </Item>
 
         {#if !$fsrs}
@@ -212,6 +225,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 defaultValue={defaults.historicalRetention}
                 min={0.5}
                 max={1.0}
+                percentage={true}
             >
                 <SettingTitle
                     on:click={() =>

@@ -79,7 +79,10 @@ def show(mw: aqt.AnkiQt) -> QDialog:
         + "</span>"
     )
 
-    # automatically sorted; add new lines at the end
+    # Automatically sorted; add new lines at the end.
+    # This is a list of users who want to appear in the dialog, and includes people who have
+    # contributed in non-code ways, like providing support on the forums, so it cannot be
+    # generated from the CONTRIBUTORS file.
     allusers = sorted(
         (
             "Aaron Harsh",
@@ -165,7 +168,7 @@ def show(mw: aqt.AnkiQt) -> QDialog:
             "Ádám Szegi",
             "赵金鹏",
             "黃文龍",
-            "David Bailey",
+            "Valerie Enfys",
             "Arman High",
             "Arthur Milchior",
             "Rai (Michael Pokorny)",
@@ -208,11 +211,19 @@ def show(mw: aqt.AnkiQt) -> QDialog:
             "Ian Samir Yep Manzano",
             "Asuka Minato",
             "Eros Cardoso",
+            "Gregory Abrasaldo",
+            "Danika_Dakika",
+            "Marcelo Vasconcelos",
+            "Mumtaz Hajjo Alrifai",
+            "Luc Mcgrady",
+            "Brayan Oliveira",
+            "Market345",
+            "Yuki",
         )
     )
 
     abouttext += "<p>" + tr.about_written_by_damien_elmes_with_patches(
-        cont=", ".join(allusers)
+        cont=", ".join(allusers) + f", {tr.about_and_others()}"
     )
     abouttext += f"<p>{tr.about_if_you_have_contributed_and_are()}"
     abouttext += f"<p>{tr.about_a_big_thanks_to_all_the()}"

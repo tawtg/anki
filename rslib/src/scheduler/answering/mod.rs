@@ -52,6 +52,7 @@ pub struct CardAnswer {
     pub answered_at: TimestampMillis,
     pub milliseconds_taken: u32,
     pub custom_data: Option<String>,
+    pub from_queue: bool,
 }
 
 impl CardAnswer {
@@ -74,6 +75,7 @@ struct CardStateUpdater {
     /// Set if FSRS is enabled.
     desired_retention: Option<f32>,
     fsrs_short_term_with_steps: bool,
+    fsrs_allow_short_term: bool,
 }
 
 impl CardStateUpdater {
@@ -82,7 +84,7 @@ impl CardStateUpdater {
     /// state handling code from the rest of the Anki codebase.
     pub(crate) fn state_context<'a>(
         &'a self,
-        load_balancer: Option<LoadBalancerContext<'a>>,
+        load_balancer_ctx: Option<LoadBalancerContext<'a>>,
     ) -> StateContext<'a> {
         StateContext {
             fuzz_factor: get_fuzz_factor(self.fuzz_seed),
@@ -95,8 +97,8 @@ impl CardStateUpdater {
             interval_multiplier: self.config.inner.interval_multiplier,
             maximum_review_interval: self.config.inner.maximum_review_interval,
             leech_threshold: self.config.inner.leech_threshold,
-            load_balancer: load_balancer
-                .map(|load_balancer| load_balancer.set_fuzz_seed(self.fuzz_seed)),
+            load_balancer_ctx: load_balancer_ctx
+                .map(|load_balancer_ctx| load_balancer_ctx.set_fuzz_seed(self.fuzz_seed)),
             relearn_steps: self.relearn_steps(),
             lapse_multiplier: self.config.inner.lapse_multiplier,
             minimum_lapse_interval: self.config.inner.minimum_lapse_interval,
@@ -112,6 +114,7 @@ impl CardStateUpdater {
             },
             fsrs_next_states: self.fsrs_next_states.clone(),
             fsrs_short_term_with_steps_enabled: self.fsrs_short_term_with_steps,
+            fsrs_allow_short_term: self.fsrs_allow_short_term,
         }
     }
 
@@ -238,22 +241,16 @@ impl Collection {
         let ctx = self.card_state_updater(card)?;
         let current = ctx.current_card_state();
 
-        let load_balancer = self
-            .get_config_bool(BoolKey::LoadBalancerEnabled)
-            .then(|| {
-                let deckconfig_id = deck.config_id();
+        let load_balancer_ctx = self.state.card_queues.as_ref().and_then(|card_queues| {
+            match card_queues.load_balancer.as_ref() {
+                None => None,
+                Some(load_balancer) => {
+                    Some(load_balancer.review_context(note_id, deck.config_id()?))
+                }
+            }
+        });
 
-                self.state.card_queues.as_ref().and_then(|card_queues| {
-                    Some(
-                        card_queues
-                            .load_balancer
-                            .review_context(note_id, deckconfig_id?),
-                    )
-                })
-            })
-            .flatten();
-
-        let state_ctx = ctx.state_context(load_balancer);
+        let state_ctx = ctx.state_context(load_balancer_ctx);
         Ok(current.next_states(&state_ctx))
     }
 
@@ -310,7 +307,7 @@ impl Collection {
         self.transact(Op::AnswerCard, |col| col.answer_card_inner(answer))
     }
 
-    fn answer_card_inner(&mut self, answer: &mut CardAnswer) -> Result<()> {
+    pub(crate) fn answer_card_inner(&mut self, answer: &mut CardAnswer) -> Result<()> {
         let card = self
             .storage
             .get_card(answer.card_id)?
@@ -351,24 +348,31 @@ impl Collection {
             let deck = self.get_deck(card.deck_id)?;
             if let Some(card_queues) = self.state.card_queues.as_mut() {
                 if let Some(deckconfig_id) = deck.and_then(|deck| deck.config_id()) {
-                    card_queues.load_balancer.add_card(
-                        card.id,
-                        card.note_id,
-                        deckconfig_id,
-                        card.interval,
-                    )
+                    if let Some(load_balancer) = card_queues.load_balancer.as_mut() {
+                        load_balancer.add_card(card.id, card.note_id, deckconfig_id, card.interval)
+                    }
                 }
             }
         }
 
-        self.update_queues_after_answering_card(
-            &card,
-            timing,
-            matches!(
-                answer.new_state,
-                CardState::Filtered(FilteredState::Preview(PreviewState { finished: true, .. }))
-            ),
-        )
+        // Handle queue updates based on from_queue flag
+        if answer.from_queue {
+            self.update_queues_after_answering_card(
+                &card,
+                timing,
+                matches!(
+                    answer.new_state,
+                    CardState::Filtered(FilteredState::Preview(PreviewState {
+                        finished: true,
+                        ..
+                    }))
+                ),
+            )?;
+        } else if card.queue == CardQueue::Suspended {
+            invalid_input!("Can't answer suspended cards");
+        }
+
+        Ok(())
     }
 
     fn maybe_bury_siblings(&mut self, card: &Card, config: &DeckConfig) -> Result<()> {
@@ -462,6 +466,16 @@ impl Collection {
         let desired_retention = fsrs_enabled.then_some(config.inner.desired_retention);
         let fsrs_short_term_with_steps =
             self.get_config_bool(BoolKey::FsrsShortTermWithStepsEnabled);
+        let fsrs_allow_short_term = if fsrs_enabled {
+            let params = config.fsrs_params();
+            if params.len() == 19 {
+                params[17] > 0.0 && params[18] > 0.0
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         Ok(CardStateUpdater {
             fuzz_seed: get_fuzz_seed(&card, false),
             card,
@@ -472,6 +486,7 @@ impl Collection {
             fsrs_next_states,
             desired_retention,
             fsrs_short_term_with_steps,
+            fsrs_allow_short_term,
         })
     }
 
@@ -575,6 +590,7 @@ pub mod test_helpers {
                 answered_at: TimestampMillis::now(),
                 milliseconds_taken: 0,
                 custom_data: None,
+                from_queue: true,
             })?;
             Ok(PostAnswerState {
                 card_id: queued.card.id,
@@ -595,7 +611,7 @@ impl Card {
 /// Return a consistent seed for a given card at a given number of reps.
 /// If for_reschedule is true, we use card.reps - 1 to match the previous
 /// review.
-fn get_fuzz_seed(card: &Card, for_reschedule: bool) -> Option<u64> {
+pub(crate) fn get_fuzz_seed(card: &Card, for_reschedule: bool) -> Option<u64> {
     let reps = if for_reschedule {
         card.reps.saturating_sub(1)
     } else {
@@ -620,7 +636,7 @@ fn get_fuzz_factor(seed: Option<u64>) -> Option<f32> {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::card::CardType;
     use crate::deckconfig::ReviewMix;
@@ -741,7 +757,7 @@ mod test {
         Ok(())
     }
 
-    fn v3_test_collection(cards: usize) -> Result<(Collection, Vec<CardId>)> {
+    pub(crate) fn v3_test_collection(cards: usize) -> Result<(Collection, Vec<CardId>)> {
         let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         for _ in 0..cards {

@@ -98,9 +98,12 @@ class TaskManager(QObject):
         label: str | None = None,
         immediate: bool = False,
         uses_collection=True,
+        title: str = "Anki",
     ) -> None:
         "Use QueryOp()/CollectionOp() in new code."
-        self.mw.progress.start(parent=parent, label=label, immediate=immediate)
+        self.mw.progress.start(
+            parent=parent, label=label, immediate=immediate, title=title
+        )
 
         def wrapped_done(fut: Future) -> None:
             self.mw.progress.finish()
@@ -141,4 +144,11 @@ class TaskManager(QObject):
             self._closures = []
 
         for closure in closures:
-            closure()
+            try:
+                closure()
+            except Exception as e:
+
+                def raise_exception(exception=e) -> None:
+                    raise exception
+
+                QTimer.singleShot(0, raise_exception)

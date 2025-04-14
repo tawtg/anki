@@ -32,9 +32,11 @@ pub enum Op {
     ScheduleAsNew,
     SetCardDeck,
     SetDueDate,
+    GradeNow,
     SetFlag,
     SortCards,
     Suspend,
+    ToggleLoadBalancer,
     UnburyUnsuspend,
     UpdateCard,
     UpdateConfig,
@@ -65,6 +67,8 @@ impl Op {
             Op::RenameDeck => tr.actions_rename_deck(),
             Op::ScheduleAsNew => tr.actions_forget_card(),
             Op::SetDueDate => tr.actions_set_due_date(),
+            Op::ToggleLoadBalancer => tr.actions_toggle_load_balancer(),
+            Op::GradeNow => tr.actions_grade_now(),
             Op::Suspend => tr.studying_suspend(),
             Op::UnburyUnsuspend => tr.actions_unbury_unsuspend(),
             Op::UpdateCard => tr.actions_update_card(),
@@ -168,7 +172,10 @@ impl OpChanges {
             || (c.config
                 && matches!(
                     self.op,
-                    Op::SetCurrentDeck | Op::UpdatePreferences | Op::UpdateDeckConfig
+                    Op::SetCurrentDeck
+                        | Op::UpdatePreferences
+                        | Op::UpdateDeckConfig
+                        | Op::ToggleLoadBalancer
                 ))
             || c.deck_config
     }
