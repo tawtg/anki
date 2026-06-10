@@ -9,7 +9,6 @@ use anki_proto::generic;
 use anki_proto::scheduler;
 use anki_proto::scheduler::ComputeFsrsParamsResponse;
 use anki_proto::scheduler::ComputeMemoryStateResponse;
-use anki_proto::scheduler::ComputeOptimalRetentionRequest;
 use anki_proto::scheduler::ComputeOptimalRetentionResponse;
 use anki_proto::scheduler::FsrsBenchmarkResponse;
 use anki_proto::scheduler::FuzzDeltaRequest;
@@ -17,6 +16,7 @@ use anki_proto::scheduler::FuzzDeltaResponse;
 use anki_proto::scheduler::GetOptimalRetentionParametersResponse;
 use anki_proto::scheduler::SimulateFsrsReviewRequest;
 use anki_proto::scheduler::SimulateFsrsReviewResponse;
+use anki_proto::scheduler::SimulateFsrsWorkloadResponse;
 use fsrs::ComputeParametersInput;
 use fsrs::FSRSItem;
 use fsrs::FSRSReview;
@@ -24,6 +24,7 @@ use fsrs::FSRS;
 
 use crate::backend::Backend;
 use crate::prelude::*;
+use crate::scheduler::fsrs::params::ComputeParamsRequest;
 use crate::scheduler::new::NewCardDueOrder;
 use crate::scheduler::states::CardState;
 use crate::scheduler::states::SchedulingStates;
@@ -265,14 +266,15 @@ impl crate::services::SchedulerService for Collection {
         &mut self,
         input: scheduler::ComputeFsrsParamsRequest,
     ) -> Result<scheduler::ComputeFsrsParamsResponse> {
-        self.compute_params(
-            &input.search,
-            input.ignore_revlogs_before_ms.into(),
-            1,
-            1,
-            &input.current_params,
-            input.num_of_relearning_steps as usize,
-        )
+        self.compute_params(ComputeParamsRequest {
+            search: &input.search,
+            ignore_revlogs_before_ms: input.ignore_revlogs_before_ms.into(),
+            current_preset: 1,
+            total_presets: 1,
+            current_params: &input.current_params,
+            num_of_relearning_steps: input.num_of_relearning_steps as usize,
+            health_check: input.health_check,
+        })
     }
 
     fn simulate_fsrs_review(
@@ -282,9 +284,16 @@ impl crate::services::SchedulerService for Collection {
         self.simulate_review(input)
     }
 
+    fn simulate_fsrs_workload(
+        &mut self,
+        input: SimulateFsrsReviewRequest,
+    ) -> Result<SimulateFsrsWorkloadResponse> {
+        self.simulate_workload(input)
+    }
+
     fn compute_optimal_retention(
         &mut self,
-        input: ComputeOptimalRetentionRequest,
+        input: SimulateFsrsReviewRequest,
     ) -> Result<ComputeOptimalRetentionResponse> {
         Ok(ComputeOptimalRetentionResponse {
             optimal_retention: self.compute_optimal_retention(input)?,
@@ -296,6 +305,21 @@ impl crate::services::SchedulerService for Collection {
         input: scheduler::EvaluateParamsRequest,
     ) -> Result<scheduler::EvaluateParamsResponse> {
         let ret = self.evaluate_params(
+            &input.search,
+            input.ignore_revlogs_before_ms.into(),
+            input.num_of_relearning_steps as usize,
+        )?;
+        Ok(scheduler::EvaluateParamsResponse {
+            log_loss: ret.log_loss,
+            rmse_bins: ret.rmse_bins,
+        })
+    }
+
+    fn evaluate_params_legacy(
+        &mut self,
+        input: scheduler::EvaluateParamsLegacyRequest,
+    ) -> Result<scheduler::EvaluateParamsResponse> {
+        let ret = self.evaluate_params_legacy(
             &input.params,
             &input.search,
             input.ignore_revlogs_before_ms.into(),
@@ -321,17 +345,31 @@ impl crate::services::SchedulerService for Collection {
             learn_span: simulator_config.learn_span as u32,
             max_cost_perday: simulator_config.max_cost_perday,
             max_ivl: simulator_config.max_ivl,
-            learn_costs: simulator_config.learn_costs.to_vec(),
-            review_costs: simulator_config.review_costs.to_vec(),
             first_rating_prob: simulator_config.first_rating_prob.to_vec(),
             review_rating_prob: simulator_config.review_rating_prob.to_vec(),
-            first_rating_offsets: simulator_config.first_rating_offsets.to_vec(),
-            first_session_lens: simulator_config.first_session_lens.to_vec(),
-            forget_rating_offset: simulator_config.forget_rating_offset,
-            forget_session_len: simulator_config.forget_session_len,
-            loss_aversion: simulator_config.loss_aversion,
+            loss_aversion: 1.0,
             learn_limit: simulator_config.learn_limit as u32,
             review_limit: simulator_config.review_limit as u32,
+            learning_step_transitions: simulator_config
+                .learning_step_transitions
+                .iter()
+                .flatten()
+                .cloned()
+                .collect(),
+            relearning_step_transitions: simulator_config
+                .relearning_step_transitions
+                .iter()
+                .flatten()
+                .cloned()
+                .collect(),
+            state_rating_costs: simulator_config
+                .state_rating_costs
+                .iter()
+                .flatten()
+                .cloned()
+                .collect(),
+            learning_step_count: simulator_config.learning_step_count as u32,
+            relearning_step_count: simulator_config.relearning_step_count as u32,
         })
     }
 
@@ -359,7 +397,11 @@ impl crate::services::BackendSchedulerService for Backend {
             enable_short_term: true,
             num_relearning_steps: None,
         })?;
-        Ok(ComputeFsrsParamsResponse { params, fsrs_items })
+        Ok(ComputeFsrsParamsResponse {
+            params,
+            fsrs_items,
+            health_check_passed: None,
+        })
     }
 
     fn fsrs_benchmark(

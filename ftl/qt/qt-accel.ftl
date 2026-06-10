@@ -1,4 +1,5 @@
 qt-accel-about = &About
+qt-accel-about-mac = About Anki...
 qt-accel-cards = &Cards
 qt-accel-check-database = &Check Database
 qt-accel-check-media = Check &Media
@@ -40,7 +41,9 @@ qt-accel-layout-horizontal = &Horizontal
 qt-accel-zoom-in = Zoom &In
 qt-accel-zoom-out = Zoom &Out
 qt-accel-reset-zoom = &Reset Zoom
+qt-accel-toggle-sidebar = Toggle Sidebar
 qt-accel-zoom-editor-in = Zoom Editor &In
 qt-accel-zoom-editor-out = Zoom Editor &Out
 qt-accel-create-backup = Create &Backup
 qt-accel-load-backup = &Revert to Backup
+qt-accel-upgrade-downgrade = Upgrade/Downgrade

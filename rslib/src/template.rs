@@ -13,9 +13,10 @@ use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::combinator::map;
 use nom::sequence::delimited;
+use nom::Parser;
 use regex::Regex;
 
-use crate::cloze::add_cloze_numbers_in_string;
+use crate::cloze::cloze_number_in_fields;
 use crate::error::AnkiError;
 use crate::error::Result;
 use crate::error::TemplateError;
@@ -67,7 +68,8 @@ impl TemplateMode {
                 tag(self.end_tag()),
             ),
             |out| classify_handle(out),
-        )(s)
+        )
+        .parse(s)
     }
 
     /// Return the next handlebar, comment or text token.
@@ -119,7 +121,7 @@ pub enum Token<'a> {
     CloseConditional(&'a str),
 }
 
-fn comment_token(s: &str) -> nom::IResult<&str, Token> {
+fn comment_token(s: &str) -> nom::IResult<&str, Token<'_>> {
     map(
         delimited(
             tag(COMMENT_START),
@@ -127,7 +129,8 @@ fn comment_token(s: &str) -> nom::IResult<&str, Token> {
             tag(COMMENT_END),
         ),
         Token::Comment,
-    )(s)
+    )
+    .parse(s)
 }
 
 fn tokens(mut template: &str) -> impl Iterator<Item = TemplateResult<Token<'_>>> {
@@ -148,7 +151,7 @@ fn tokens(mut template: &str) -> impl Iterator<Item = TemplateResult<Token<'_>>>
 }
 
 /// classify handle based on leading character
-fn classify_handle(s: &str) -> Token {
+fn classify_handle(s: &str) -> Token<'_> {
     let start = s.trim_start_matches('{').trim();
     if start.len() < 2 {
         return Token::Replacement(start);
@@ -262,10 +265,8 @@ fn template_error_to_anki_error(
     };
     let details = htmlescape::encode_minimal(&localized_template_error(tr, err));
     let more_info = tr.card_template_rendering_more_info();
-    let source = format!(
-        "{}<br>{}<br><a href='{}'>{}</a>",
-        header, details, TEMPLATE_ERROR_LINK, more_info
-    );
+    let source =
+        format!("{header}<br>{details}<br><a href='{TEMPLATE_ERROR_LINK}'>{more_info}</a>");
 
     AnkiError::TemplateError { info: source }
 }
@@ -276,32 +277,29 @@ fn localized_template_error(tr: &I18n, err: TemplateError) -> String {
             .card_template_rendering_no_closing_brackets("}}", tag)
             .into(),
         TemplateError::ConditionalNotClosed(tag) => tr
-            .card_template_rendering_conditional_not_closed(format!("{{{{/{}}}}}", tag))
+            .card_template_rendering_conditional_not_closed(format!("{{{{/{tag}}}}}"))
             .into(),
         TemplateError::ConditionalNotOpen {
             closed,
             currently_open,
         } => if let Some(open) = currently_open {
             tr.card_template_rendering_wrong_conditional_closed(
-                format!("{{{{/{}}}}}", closed),
-                format!("{{{{/{}}}}}", open),
+                format!("{{{{/{closed}}}}}"),
+                format!("{{{{/{open}}}}}"),
             )
         } else {
             tr.card_template_rendering_conditional_not_open(
-                format!("{{{{/{}}}}}", closed),
-                format!("{{{{#{}}}}}", closed),
-                format!("{{{{^{}}}}}", closed),
+                format!("{{{{/{closed}}}}}"),
+                format!("{{{{#{closed}}}}}"),
+                format!("{{{{^{closed}}}}}"),
             )
         }
         .into(),
         TemplateError::FieldNotFound { field, filters } => tr
-            .card_template_rendering_no_such_field(format!("{{{{{}{}}}}}", filters, field), field)
+            .card_template_rendering_no_such_field(format!("{{{{{filters}{field}}}}}"), field)
             .into(),
         TemplateError::NoSuchConditional(condition) => tr
-            .card_template_rendering_no_such_field(
-                format!("{{{{{}}}}}", condition),
-                &condition[1..],
-            )
+            .card_template_rendering_no_such_field(format!("{{{{{condition}}}}}"), &condition[1..])
             .into(),
     }
 }
@@ -520,10 +518,7 @@ impl RenderContext<'_> {
             Ok(false ^ negated)
         } else {
             let prefix = if negated { "^" } else { "#" };
-            Err(TemplateError::NoSuchConditional(format!(
-                "{}{}",
-                prefix, key
-            )))
+            Err(TemplateError::NoSuchConditional(format!("{prefix}{key}")))
         }
     }
 }
@@ -673,11 +668,7 @@ pub fn render_card(
 }
 
 fn cloze_is_empty(field_map: &HashMap<&str, Cow<str>>, card_ord: u16) -> bool {
-    let mut set = HashSet::with_capacity(4);
-    for field in field_map.values() {
-        add_cloze_numbers_in_string(field.as_ref(), &mut set);
-    }
-    !set.contains(&(card_ord + 1))
+    !cloze_number_in_fields(field_map.values()).contains(&(card_ord + 1))
 }
 
 // Field requirements
@@ -745,12 +736,7 @@ impl ParsedTemplate {
     }
 
     pub(crate) fn contains_cloze_replacement(&self) -> bool {
-        self.0.iter().any(|node| {
-            matches!(
-                node,
-                ParsedNode::Replacement {key:_, filters} if filters.iter().any(|f| f=="cloze")
-            )
-        })
+        !self.all_referenced_cloze_field_names().is_empty()
     }
 
     pub(crate) fn contains_field_replacement(&self) -> bool {
@@ -859,14 +845,14 @@ fn nodes_to_string(buf: &mut String, nodes: &[ParsedNode]) {
                 .unwrap();
             }
             ParsedNode::Conditional { key, children } => {
-                write!(buf, "{{{{#{}}}}}", key).unwrap();
+                write!(buf, "{{{{#{key}}}}}").unwrap();
                 nodes_to_string(buf, children);
-                write!(buf, "{{{{/{}}}}}", key).unwrap();
+                write!(buf, "{{{{/{key}}}}}").unwrap();
             }
             ParsedNode::NegatedConditional { key, children } => {
-                write!(buf, "{{{{^{}}}}}", key).unwrap();
+                write!(buf, "{{{{^{key}}}}}").unwrap();
                 nodes_to_string(buf, children);
-                write!(buf, "{{{{/{}}}}}", key).unwrap();
+                write!(buf, "{{{{/{key}}}}}").unwrap();
             }
         }
     }

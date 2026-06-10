@@ -3,10 +3,11 @@
 
 import { fabric } from "fabric";
 
+import { SHAPE_MASK_COLOR } from "../tools/lib";
 import type { ConstructorParams, Size } from "../types";
 import type { ShapeDataForCloze } from "./base";
 import { Shape } from "./base";
-import { floatToDisplay } from "./floats";
+import { floatToDisplay } from "./lib";
 import { xFromNormalized, xToNormalized, yFromNormalized, yToNormalized } from "./position";
 
 export class Polygon extends Shape {
@@ -15,12 +16,14 @@ export class Polygon extends Shape {
     constructor({ points = [], ...rest }: ConstructorParams<Polygon> = {}) {
         super(rest);
         this.points = points;
+        this.id = "polygon-" + new Date().getTime();
     }
 
     toDataForCloze(): PolygonDataForCloze {
         return {
             ...super.toDataForCloze(),
             points: this.points.map(({ x, y }) => `${floatToDisplay(x)},${floatToDisplay(y)}`).join(" "),
+            ...(this.fill === SHAPE_MASK_COLOR ? {} : { fill: this.fill }),
         };
     }
 

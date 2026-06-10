@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import sys
 import threading
 import traceback
@@ -139,14 +140,17 @@ class MediaServer(threading.Thread):
     ) -> None:
         self._legacy_pages[id] = LegacyPage(html, context)
 
+    def get_page(self, id: int) -> LegacyPage | None:
+        return self._legacy_pages.get(id)
+
     def get_page_html(self, id: int) -> str | None:
-        if page := self._legacy_pages.get(id):
+        if page := self.get_page(id):
             return page.html
         else:
             return None
 
     def get_page_context(self, id: int) -> PageContext | None:
-        if page := self._legacy_pages.get(id):
+        if page := self.get_page(id):
             return page.context
         else:
             return None
@@ -166,13 +170,42 @@ def favicon() -> Response:
 
 def _mime_for_path(path: str) -> str:
     "Mime type for provided path/filename."
-    if path.endswith(".css"):
-        # some users may have invalid mime type in the Windows registry
-        return "text/css"
-    elif path.endswith(".js") or path.endswith(".mjs"):
-        return "application/javascript"
+
+    _, ext = os.path.splitext(path)
+    ext = ext.lower()
+
+    # Badly-behaved apps on Windows can alter the standard mime types in the registry, which can completely
+    # break Anki's UI. So we hard-code the most common extensions.
+    mime_types = {
+        ".css": "text/css",
+        ".js": "application/javascript",
+        ".mjs": "application/javascript",
+        ".html": "text/html",
+        ".htm": "text/html",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
+        ".json": "application/json",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
+        ".mp3": "audio/mpeg",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".ogg": "audio/ogg",
+        ".pdf": "application/pdf",
+        ".txt": "text/plain",
+    }
+
+    if mime := mime_types.get(ext):
+        return mime
     else:
-        # autodetect
+        # fallback to mimetypes, which may consult the registry
         mime, _encoding = mimetypes.guess_type(path)
         return mime or "application/octet-stream"
 
@@ -202,7 +235,7 @@ def _handle_local_file_request(request: LocalFileRequest) -> Response:
     fullpath = os.path.abspath(os.path.join(directory, path))
 
     # protect against directory transversal: https://security.openstack.org/guidelines/dg_using-file-paths.html
-    if not fullpath.startswith(directory):
+    if not fullpath.startswith(directory + os.sep):
         return _text_response(
             HTTPStatus.FORBIDDEN, f"Path for '{directory} - {path}' is a security leak!"
         )
@@ -226,7 +259,11 @@ def _handle_local_file_request(request: LocalFileRequest) -> Response:
             else:
                 max_age = 60 * 60
             return flask.send_file(
-                fullpath, mimetype=mimetype, conditional=True, max_age=max_age, download_name="foo"  # type: ignore[call-arg]
+                fullpath,
+                mimetype=mimetype,
+                conditional=True,
+                max_age=max_age,
+                download_name="foo",  # type: ignore[call-arg]
             )
         else:
             print(f"Not found: {path}")
@@ -248,14 +285,8 @@ def _handle_local_file_request(request: LocalFileRequest) -> Response:
 def _builtin_data(path: str) -> bytes:
     """Return data from file in aqt/data folder.
     Path must use forward slash separators."""
-    # packaged build?
-    if getattr(sys, "frozen", False):
-        reader = aqt.__loader__.get_resource_reader("_aqt")  # type: ignore
-        with reader.open_resource(path) as f:
-            return f.read()
-    else:
-        full_path = aqt_data_path() / ".." / path
-        return full_path.read_bytes()
+    full_path = aqt_data_path() / ".." / path
+    return full_path.read_bytes()
 
 
 def _handle_builtin_file_request(request: BundledFileRequest) -> Response:
@@ -481,7 +512,7 @@ def update_deck_configs() -> bytes:
             update.abort = True
 
     def on_success(changes: OpChanges) -> None:
-        if isinstance(window := aqt.mw.app.activeWindow(), DeckOptionsDialog):
+        if isinstance(window := aqt.mw.app.activeModalWidget(), DeckOptionsDialog):
             window.reject()
 
     def handle_on_main() -> None:
@@ -509,7 +540,7 @@ def set_scheduling_states() -> bytes:
 
 def import_done() -> bytes:
     def update_window_modality() -> None:
-        if window := aqt.mw.app.activeWindow():
+        if window := aqt.mw.app.activeModalWidget():
             from aqt.import_export.import_dialog import ImportDialog
 
             if isinstance(window, ImportDialog):
@@ -527,7 +558,7 @@ def import_request(endpoint: str) -> bytes:
     response.ParseFromString(output)
 
     def handle_on_main() -> None:
-        window = aqt.mw.app.activeWindow()
+        window = aqt.mw.app.activeModalWidget()
         on_op_finished(aqt.mw, response, window)
 
     aqt.mw.taskman.run_on_main(handle_on_main)
@@ -567,7 +598,7 @@ def change_notetype() -> bytes:
     data = request.data
 
     def handle_on_main() -> None:
-        window = aqt.mw.app.activeWindow()
+        window = aqt.mw.app.activeModalWidget()
         if isinstance(window, ChangeNotetypeDialog):
             window.save(data)
 
@@ -577,7 +608,7 @@ def change_notetype() -> bytes:
 
 def deck_options_require_close() -> bytes:
     def handle_on_main() -> None:
-        window = aqt.mw.app.activeWindow()
+        window = aqt.mw.app.activeModalWidget()
         if isinstance(window, DeckOptionsDialog):
             window.require_close()
 
@@ -589,11 +620,20 @@ def deck_options_require_close() -> bytes:
 
 def deck_options_ready() -> bytes:
     def handle_on_main() -> None:
-        window = aqt.mw.app.activeWindow()
+        window = aqt.mw.app.activeModalWidget()
         if isinstance(window, DeckOptionsDialog):
             window.set_ready()
 
     aqt.mw.taskman.run_on_main(handle_on_main)
+    return b""
+
+
+def save_custom_colours() -> bytes:
+    colors = [
+        QColorDialog.customColor(i).name(QColor.NameFormat.HexRgb)
+        for i in range(QColorDialog.customCount())
+    ]
+    aqt.mw.col.set_config("customColorPickerPalette", colors)
     return b""
 
 
@@ -612,12 +652,14 @@ post_handler_list = [
     search_in_browser,
     deck_options_require_close,
     deck_options_ready,
+    save_custom_colours,
 ]
 
 
 exposed_backend_list = [
     # CollectionService
     "latest_progress",
+    "get_custom_colours",
     # DeckService
     "get_deck_names",
     # I18nService
@@ -649,9 +691,13 @@ exposed_backend_list = [
     "compute_fsrs_params",
     "compute_optimal_retention",
     "set_wants_abort",
-    "evaluate_params",
+    "evaluate_params_legacy",
     "get_optimal_retention_parameters",
     "simulate_fsrs_review",
+    "simulate_fsrs_workload",
+    # DeckConfigService
+    "get_ignored_before_count",
+    "get_retention_workload",
 ]
 
 
@@ -698,7 +744,6 @@ def _extract_collection_post_request(path: str) -> DynamicRequest | NotFound:
 def _check_dynamic_request_permissions():
     if request.method == "GET":
         return
-    context = _extract_page_context()
 
     def warn() -> None:
         show_warning(
@@ -710,24 +755,17 @@ def _check_dynamic_request_permissions():
         aqt.mw.taskman.run_on_main(warn)
         abort(403)
 
-    if context in [
-        PageContext.NON_LEGACY_PAGE,
-        PageContext.EDITOR,
-        PageContext.ADDON_PAGE,
-        PageContext.DECK_OPTIONS,
-    ]:
-        pass
-    elif context == PageContext.REVIEWER and request.path in (
+    # does page have access to entire API?
+    if _have_api_access():
+        return
+
+    # whitelisted API endpoints for reviewer/previewer
+    if request.path in (
         "/_anki/getSchedulingStatesWithContext",
         "/_anki/setSchedulingStates",
         "/_anki/i18nResources",
+        "/_anki/congratsInfo",
     ):
-        # reviewer is only allowed to access custom study methods
-        pass
-    elif (
-        context == PageContext.PREVIEWER or context == PageContext.CARD_LAYOUT
-    ) and request.path == "/_anki/i18nResources":
-        # previewers are only allowed to access i18n resources
         pass
     else:
         # other legacy pages may contain third-party JS, so we do not
@@ -746,29 +784,33 @@ def _handle_dynamic_request(req: DynamicRequest) -> Response:
 
 def legacy_page_data() -> Response:
     id = int(request.args["id"])
-    if html := aqt.mw.mediaServer.get_page_html(id):
-        return Response(html, mimetype="text/html")
+    page = aqt.mw.mediaServer.get_page(id)
+    if page:
+        response = Response(page.html, mimetype="text/html")
+        # Prevent JS in field content from being executed in the editor, as it would
+        # have access to our internal API, and is a security risk.
+        if page.context == PageContext.EDITOR:
+            port = aqt.mw.mediaServer.getPort()
+            csp_paths = (
+                f"http://127.0.0.1:{port}/_anki/",
+                f"http://127.0.0.1:{port}/_addons/",
+            )
+            response.headers["Content-Security-Policy"] = (
+                f"script-src {' '.join(csp_paths)}"
+            )
+        return response
     else:
         return _text_response(HTTPStatus.NOT_FOUND, "page not found")
 
 
-def _extract_page_context() -> PageContext:
-    "Get context based on referer header."
-    from urllib.parse import parse_qs, urlparse
+_APIKEY = secrets.token_urlsafe(32)
 
-    referer = urlparse(request.headers.get("Referer", ""))
-    if referer.path.startswith("/_anki/pages/") or is_sveltekit_page(referer.path[1:]):
-        return PageContext.NON_LEGACY_PAGE
-    elif referer.path == "/_anki/legacyPageData":
-        query_params = parse_qs(referer.query)
-        query_id = query_params.get("id")
-        if not query_id:
-            return PageContext.UNKNOWN
-        id = int(query_id[0])
-        page_context = aqt.mw.mediaServer.get_page_context(id)
-        return page_context if page_context else PageContext.UNKNOWN
-    else:
-        return PageContext.UNKNOWN
+
+def _have_api_access() -> bool:
+    return (
+        request.headers.get("Authorization") == f"Bearer {_APIKEY}"
+        or os.environ.get("ANKI_API_HOST") == "0.0.0.0"
+    )
 
 
 # this currently only handles a single method; in the future, idempotent

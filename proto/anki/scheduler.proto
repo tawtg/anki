@@ -51,11 +51,15 @@ service SchedulerService {
       returns (ComputeFsrsParamsResponse);
   rpc GetOptimalRetentionParameters(GetOptimalRetentionParametersRequest)
       returns (GetOptimalRetentionParametersResponse);
-  rpc ComputeOptimalRetention(ComputeOptimalRetentionRequest)
+  rpc ComputeOptimalRetention(SimulateFsrsReviewRequest)
       returns (ComputeOptimalRetentionResponse);
   rpc SimulateFsrsReview(SimulateFsrsReviewRequest)
       returns (SimulateFsrsReviewResponse);
+  rpc SimulateFsrsWorkload(SimulateFsrsReviewRequest)
+      returns (SimulateFsrsWorkloadResponse);
   rpc EvaluateParams(EvaluateParamsRequest) returns (EvaluateParamsResponse);
+  rpc EvaluateParamsLegacy(EvaluateParamsLegacyRequest)
+      returns (EvaluateParamsResponse);
   rpc ComputeMemoryState(cards.CardId) returns (ComputeMemoryStateResponse);
   // The number of days the calculated interval was fuzzed by on the previous
   // review (if any). Utilized by the FSRS add-on.
@@ -320,6 +324,8 @@ message CustomStudyRequest {
 message SchedulingContext {
   string deck_name = 1;
   uint64 seed = 2;
+  optional float decay = 3;
+  optional float desired_retention = 4;
 }
 
 message CustomStudyDefaultsRequest {
@@ -354,11 +360,13 @@ message ComputeFsrsParamsRequest {
   repeated float current_params = 2;
   int64 ignore_revlogs_before_ms = 3;
   uint32 num_of_relearning_steps = 4;
+  bool health_check = 5;
 }
 
 message ComputeFsrsParamsResponse {
   repeated float params = 1;
   uint32 fsrs_items = 2;
+  optional bool health_check_passed = 3;
 }
 
 message ComputeFsrsParamsFromItemsRequest {
@@ -400,6 +408,9 @@ message SimulateFsrsReviewRequest {
   repeated float easy_days_percentages = 10;
   deck_config.DeckConfig.Config.ReviewCardOrder review_order = 11;
   optional uint32 suspend_after_lapse_count = 12;
+  float historical_retention = 13;
+  uint32 learning_step_count = 14;
+  uint32 relearning_step_count = 15;
 }
 
 message SimulateFsrsReviewResponse {
@@ -409,14 +420,11 @@ message SimulateFsrsReviewResponse {
   repeated float daily_time_cost = 4;
 }
 
-message ComputeOptimalRetentionRequest {
-  repeated float params = 1;
-  uint32 days_to_simulate = 2;
-  uint32 max_interval = 3;
-  string search = 4;
-  double loss_aversion = 5;
-  repeated float easy_days_percentages = 6;
-  optional uint32 suspend_after_lapse_count = 7;
+message SimulateFsrsWorkloadResponse {
+  map<uint32, float> cost = 1;
+  float reviewless_end_memorized = 2;
+  map<uint32, float> memorized = 3;
+  map<uint32, uint32> review_count = 4;
 }
 
 message ComputeOptimalRetentionResponse {
@@ -432,20 +440,25 @@ message GetOptimalRetentionParametersResponse {
   uint32 learn_span = 2;
   float max_cost_perday = 3;
   float max_ivl = 4;
-  repeated float learn_costs = 5;
-  repeated float review_costs = 6;
-  repeated float first_rating_prob = 7;
-  repeated float review_rating_prob = 8;
-  repeated float first_rating_offsets = 9;
-  repeated float first_session_lens = 10;
-  float forget_rating_offset = 11;
-  float forget_session_len = 12;
-  float loss_aversion = 13;
-  uint32 learn_limit = 14;
-  uint32 review_limit = 15;
+  repeated float first_rating_prob = 5;
+  repeated float review_rating_prob = 6;
+  float loss_aversion = 7;
+  uint32 learn_limit = 8;
+  uint32 review_limit = 9;
+  repeated float learning_step_transitions = 10;
+  repeated float relearning_step_transitions = 11;
+  repeated float state_rating_costs = 12;
+  uint32 learning_step_count = 13;
+  uint32 relearning_step_count = 14;
 }
 
 message EvaluateParamsRequest {
+  string search = 1;
+  int64 ignore_revlogs_before_ms = 2;
+  uint32 num_of_relearning_steps = 3;
+}
+
+message EvaluateParamsLegacyRequest {
   repeated float params = 1;
   string search = 2;
   int64 ignore_revlogs_before_ms = 3;
@@ -459,6 +472,7 @@ message EvaluateParamsResponse {
 message ComputeMemoryStateResponse {
   optional cards.FsrsMemoryState state = 1;
   float desired_retention = 2;
+  float decay = 3;
 }
 
 message FuzzDeltaRequest {

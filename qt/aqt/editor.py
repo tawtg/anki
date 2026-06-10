@@ -20,9 +20,7 @@ from enum import Enum
 from random import randrange
 from typing import Any, Iterable, Match, cast
 
-import bs4
 import requests
-from bs4 import BeautifulSoup
 
 import aqt
 import aqt.forms
@@ -36,7 +34,7 @@ from anki.hooks import runFilter
 from anki.httpclient import HttpClient
 from anki.models import NotetypeDict, NotetypeId, StockNotetype
 from anki.notes import Note, NoteFieldsCheckResult, NoteId
-from anki.utils import checksum, is_lin, is_mac, is_win, namedtmp
+from anki.utils import checksum, is_lin, is_win, namedtmp
 from aqt import AnkiQt, colors, gui_hooks
 from aqt.operations import QueryOp
 from aqt.operations.note import update_note
@@ -63,29 +61,67 @@ from aqt.utils import (
 )
 from aqt.webview import AnkiWebView, AnkiWebViewKind
 
-pics = ("jpg", "jpeg", "png", "gif", "svg", "webp", "ico", "avif")
+pics = (
+    "jpg",
+    "JPG",
+    "jpeg",
+    "JPEG",
+    "png",
+    "PNG",
+    "gif",
+    "GIF",
+    "svg",
+    "SVG",
+    "webp",
+    "WEBP",
+    "ico",
+    "ICO",
+    "avif",
+    "AVIF",
+)
 audio = (
     "3gp",
+    "3GP",
     "aac",
+    "AAC",
     "avi",
+    "AVI",
     "flac",
+    "FLAC",
     "flv",
+    "FLV",
     "m4a",
+    "M4A",
     "mkv",
+    "MKV",
     "mov",
+    "MOV",
     "mp3",
+    "MP3",
     "mp4",
+    "MP4",
     "mpeg",
+    "MPEG",
     "mpg",
+    "MPG",
     "oga",
+    "OGA",
     "ogg",
+    "OGG",
     "ogv",
+    "OGV",
     "ogx",
+    "OGX",
     "opus",
+    "OPUS",
     "spx",
+    "SPX",
     "swf",
+    "SWF",
     "wav",
+    "WAV",
     "webm",
+    "WEBM",
 )
 
 
@@ -151,6 +187,7 @@ class Editor:
         self.add_webview()
         self.setupWeb()
         self.setupShortcuts()
+        self.setupColourPalette()
         gui_hooks.editor_did_init(self)
 
     # Initial setup
@@ -320,7 +357,6 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
             label_element = cmd
 
         title_attribute = shortcut(title_attribute)
-        cmd_to_toggle_button = "toggleEditorButton(this);" if toggleable else ""
         id_attribute_assignment = f"id={id}" if id else ""
         class_attribute = "linkb" if rightside else "rounded"
         if not disables:
@@ -328,11 +364,11 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
 
         return f"""<button tabindex=-1
                         {id_attribute_assignment}
-                        class="{class_attribute}"
+                        class="anki-addon-button {class_attribute}"
                         type="button"
                         title="{title_attribute}"
-                        onclick="pycmd('{cmd}');{cmd_to_toggle_button}return false;"
-                        onmousedown="window.event.preventDefault();"
+                        data-cantoggle="{int(toggleable)}"
+                        data-command="{cmd}"
                 >
                     {image_element}
                     {label_element}
@@ -344,11 +380,19 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         gui_hooks.editor_did_init_shortcuts(cuts, self)
         for row in cuts:
             if len(row) == 2:
-                keys, fn = row  # pylint: disable=unbalanced-tuple-unpacking
+                keys, fn = row
                 fn = self._addFocusCheck(fn)
             else:
                 keys, fn, _ = row
             QShortcut(QKeySequence(keys), self.widget, activated=fn)  # type: ignore
+
+    def setupColourPalette(self) -> None:
+        if not (colors := self.mw.col.get_config("customColorPickerPalette")):
+            return
+        for i, colour in enumerate(colors[: QColorDialog.customCount()]):
+            if not QColor.isValidColorName(colour):
+                continue
+            QColorDialog.setCustomColor(i, QColor.fromString(colour))
 
     def _addFocusCheck(self, fn: Callable) -> Callable:
         def checkFocus() -> None:
@@ -556,6 +600,8 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         note_type = self.note_type()
         flds = note_type["flds"]
         collapsed = [fld["collapsed"] for fld in flds]
+        cloze_fields_ords = self.mw.col.models.cloze_fields(self.note.mid)
+        cloze_fields = [ord in cloze_fields_ords for ord in range(len(flds))]
         plain_texts = [fld.get("plainText", False) for fld in flds]
         descriptions = [fld.get("description", "") for fld in flds]
         notetype_meta = {"id": self.note.mid, "modTime": note_type["mod"]}
@@ -585,6 +631,7 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
             setIsImageOcclusion({json.dumps(self.current_notetype_is_image_occlusion())});
             setNotetypeMeta({json.dumps(notetype_meta)});
             setCollapsed({json.dumps(collapsed)});
+            setClozeFields({json.dumps(cloze_fields)});
             setPlainTexts({json.dumps(plain_texts)});
             setDescriptions({json.dumps(descriptions)});
             setFonts({json.dumps(self.fonts())});
@@ -794,7 +841,7 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         def accept(file: str) -> None:
             self.resolve_media(file)
 
-        file = getFile(
+        getFile(
             parent=self.widget,
             title=tr.editing_add_media(),
             cb=cast(Callable[[Any], None], accept),
@@ -993,25 +1040,31 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
     removeTags = ["script", "iframe", "object", "style"]
 
     def _pastePreFilter(self, html: str, internal: bool) -> str:
+        import bs4
+        from bs4 import BeautifulSoup
+
         # https://anki.tenderapp.com/discussions/ankidesktop/39543-anki-is-replacing-the-character-by-when-i-exit-the-html-edit-mode-ctrlshiftx
         if html.find(">") < 0:
             return html
 
-        with warnings.catch_warnings() as w:
+        with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             doc = BeautifulSoup(html, "html.parser")
 
-        tag: bs4.element.Tag
         if not internal:
-            for tag in self.removeTags:
-                for node in doc(tag):
+            for tag_name in self.removeTags:
+                for node in doc(tag_name):
                     node.decompose()
 
             # convert p tags to divs
             for node in doc("p"):
-                node.name = "div"
+                if hasattr(node, "name"):
+                    node.name = "div"
 
-        for tag in doc("img"):
+        for element in doc("img"):
+            if not isinstance(element, bs4.Tag):
+                continue
+            tag = element
             try:
                 src = tag["src"]
             except KeyError:
@@ -1021,18 +1074,17 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
 
             # in internal pastes, rewrite mediasrv references to relative
             if internal:
-                m = re.match(r"http://127.0.0.1:\d+/(.*)$", src)
+                m = re.match(r"http://127.0.0.1:\d+/(.*)$", str(src))
                 if m:
                     tag["src"] = m.group(1)
-            else:
-                # in external pastes, download remote media
-                if self.isURL(src):
-                    fname = self._retrieveURL(src)
-                    if fname:
-                        tag["src"] = fname
-                elif src.startswith("data:image/"):
-                    # and convert inlined data
-                    tag["src"] = self.inlinedImageToFilename(src)
+            # in external pastes, download remote media
+            elif isinstance(src, str) and self.isURL(src):
+                fname = self._retrieveURL(src)
+                if fname:
+                    tag["src"] = fname
+            elif isinstance(src, str) and src.startswith("data:image/"):
+                # and convert inlined data
+                tag["src"] = self.inlinedImageToFilename(str(src))
 
         html = str(doc)
         return html
@@ -1097,7 +1149,7 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         )
         filter = f"{tr.editing_media()} ({extension_filter})"
 
-        file = getFile(
+        getFile(
             parent=self.widget,
             title=tr.editing_add_media(),
             cb=cast(Callable[[Any], None], self.setup_mask_editor),
@@ -1235,6 +1287,8 @@ require("anki/ui").loaded.then(() => require("anki/NoteEditor").instances[0].too
         d.exec()
         html = form.textEdit.toPlainText()
         if html.find(">") > -1:
+            from bs4 import BeautifulSoup
+
             # filter html through beautifulsoup so we can strip out things like a
             # leading </div>
             html_escaped = self.mw.col.media.escape_media_filenames(html)
@@ -1497,8 +1551,8 @@ class EditorWebView(AnkiWebView):
 
     def _get_clipboard_html_for_field(self, mode: QClipboard.Mode) -> str | None:
         clip = self._clipboard()
-        mime = clip.mimeData(mode)
-        assert mime is not None
+        if not (mime := clip.mimeData(mode)):
+            return None
         if not mime.hasHtml():
             return None
         return mime.html()
@@ -1540,9 +1594,9 @@ class EditorWebView(AnkiWebView):
             print("reuse internal")
             self.editor.doPaste(html, True, extended)
         else:
+            if not (mime := clipboard.mimeData(mode=mode)):
+                return
             print("use clipboard")
-            mime = clipboard.mimeData(mode=mode)
-            assert mime is not None
             html, internal = self._processMime(mime, extended)
             if html:
                 self.editor.doPaste(html, internal, extended)
@@ -1730,10 +1784,9 @@ class EditorWebView(AnkiWebView):
         assert a is not None
         qconnect(a.triggered, lambda: openFolder(path))
 
-        if is_win or is_mac:
-            a = menu.addAction(tr.editing_show_in_folder())
-            assert a is not None
-            qconnect(a.triggered, lambda: show_in_folder(path))
+        a = menu.addAction(tr.editing_show_in_folder())
+        assert a is not None
+        qconnect(a.triggered, lambda: show_in_folder(path))
 
     def _clipboard(self) -> QClipboard:
         clipboard = self.editor.mw.app.clipboard()

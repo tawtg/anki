@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use chrono::Datelike;
-use rand::distributions::Distribution;
-use rand::distributions::WeightedIndex;
+use rand::distr::weighted::WeightedIndex;
+use rand::distr::Distribution;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -24,7 +24,14 @@ const MAX_LOAD_BALANCE_INTERVAL: usize = 90;
 // cache. a flat 10% increase over the max interval should be enough to not have
 // problems
 const LOAD_BALANCE_DAYS: usize = (MAX_LOAD_BALANCE_INTERVAL as f32 * 1.1) as usize;
-const SIBLING_PENALTY: f32 = 0.001;
+// when bury siblings is enabled, we try and make it so siblings are not
+// scheduled on the same days. a day with a sibling is set to a very low
+// (non-zero to make algorithms simpler) weight. to further disperse siblings,
+// closer days are given lower weights. days right before/after have a 0.2
+// weight modifier, 2 days before/after have a 0.4 weight modifier, etc
+const SIBLING_MODIFIER_STEPS: [i32; 11] = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5];
+const SIBLING_MODIFIER_RANGE: [f32; 11] =
+    [1.0, 0.8, 0.6, 0.4, 0.2, 0.000001, 0.2, 0.4, 0.6, 0.8, 1.0];
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EasyDay {
@@ -137,7 +144,6 @@ impl LoadBalancer {
                         HashMap::<_, Vec<_>>::new(),
                         |mut day_group_by_dcid, (cid, nid, dcid)| {
                             day_group_by_dcid.entry(dcid).or_default().push((cid, nid));
-
                             day_group_by_dcid
                         },
                     )
@@ -174,7 +180,7 @@ impl LoadBalancer {
         &self,
         note_id: Option<NoteId>,
         deckconfig_id: DeckConfigId,
-    ) -> LoadBalancerContext {
+    ) -> LoadBalancerContext<'_> {
         LoadBalancerContext {
             load_balancer: self,
             note_id,
@@ -237,25 +243,23 @@ impl LoadBalancer {
         let easy_days_load = self.easy_days_percentages_by_preset.get(&deckconfig_id)?;
         let easy_days_modifier =
             calculate_easy_days_modifiers(easy_days_load, &weekdays, &review_counts);
-
-        let intervals = interval_days
-            .iter()
+        let sibling_modifier =
+            calculate_sibling_modifiers(&self.days_by_preset, before_days, after_days, note_id);
+        let intervals = review_counts
+            .into_iter()
+            .zip(easy_days_modifier)
+            .zip(sibling_modifier)
             .enumerate()
-            .map(|(interval_index, interval_day)| {
-                LoadBalancerInterval {
-                    target_interval: interval_index as u32 + before_days,
-                    review_count: review_counts[interval_index],
-                    // if there is a sibling on this day, give it a very low weight
-                    sibling_modifier: note_id
-                        .and_then(|note_id| {
-                            interval_day
-                                .has_sibling(&note_id)
-                                .then_some(SIBLING_PENALTY)
-                        })
-                        .unwrap_or(1.0),
-                    easy_days_modifier: easy_days_modifier[interval_index],
-                }
-            });
+            .map(
+                |(interval_index, ((review_count, easy_days_modifier), sibling_modifier))| {
+                    LoadBalancerInterval {
+                        target_interval: interval_index as u32 + before_days,
+                        review_count,
+                        sibling_modifier,
+                        easy_days_modifier,
+                    }
+                },
+            );
 
         select_weighted_interval(intervals, fuzz_seed)
     }
@@ -277,7 +281,7 @@ impl LoadBalancer {
     }
 }
 
-pub(crate) fn parse_easy_days_percentages(percentages: Vec<f32>) -> Result<[EasyDay; 7]> {
+pub(crate) fn parse_easy_days_percentages(percentages: &[f32]) -> Result<[EasyDay; 7]> {
     if percentages.is_empty() {
         return Ok([EasyDay::Normal; 7]);
     }
@@ -300,7 +304,7 @@ pub(crate) fn build_easy_days_percentages(
         .into_iter()
         .map(|(dcid, conf)| {
             let easy_days_percentages =
-                parse_easy_days_percentages(conf.inner.easy_days_percentages)?;
+                parse_easy_days_percentages(&conf.inner.easy_days_percentages)?;
             Ok((dcid, easy_days_percentages))
         })
         .collect()
@@ -350,6 +354,59 @@ pub(crate) fn calculate_easy_days_modifiers(
             day.load_modifier()
         })
         .collect()
+}
+
+// gently nudge siblings so they don't clump together
+// all deckconfigs need to be searched, rather than just the day, because
+// siblings might have different deckconfigs.
+// for example, a card is being scheduled and days 2 and 8 have siblings:
+//                  X                             X
+//  days: 0    1    2    3    4    5    6    7    8    9    10
+// 2 mod: 0.40 0.20 0.00 0.20 0.40 0.60 0.80
+// 8 mod:                     0.80 0.60 0.40 0.20 0.00 0.20 0.40
+// total: 0.40 0.20 0.00 0.20 0.32 0.36 0.32 0.20 0.00 0.20 0.40
+// 0.00 is actually a not-actually-zero-but-really small number for ease of
+// implementation
+fn calculate_sibling_modifiers(
+    days_by_preset: &HashMap<DeckConfigId, [LoadBalancerDay; LOAD_BALANCE_DAYS]>,
+    before_days: u32,
+    after_days: u32,
+    nid: Option<NoteId>,
+) -> Vec<f32> {
+    let mut modifiers = vec![1.0; after_days as usize - before_days as usize + 1];
+
+    if let Some(nid) = nid {
+        let sibling_days = days_by_preset
+            .iter()
+            .flat_map(|(_did, days)| {
+                days.iter()
+                    .enumerate()
+                    .fold(HashSet::new(), |mut sibling_days, (i, day)| {
+                        if day.has_sibling(&nid) {
+                            sibling_days.insert(i);
+                        }
+                        sibling_days
+                    })
+            })
+            .collect::<HashSet<_>>();
+
+        for sibling_day in sibling_days {
+            let sibling_iter = SIBLING_MODIFIER_STEPS
+                .iter()
+                .zip(SIBLING_MODIFIER_RANGE.iter());
+            for (step, sibling_modifier_value) in sibling_iter {
+                // converts true interval to modifier-space
+                let target_day = sibling_day as i32 + step - before_days as i32;
+                if let Ok(target_day) = TryInto::<usize>::try_into(target_day) {
+                    if let Some(day_modifier) = modifiers.get_mut(target_day) {
+                        *day_modifier *= sibling_modifier_value;
+                    }
+                }
+            }
+        }
+    }
+
+    modifiers
 }
 
 pub struct LoadBalancerInterval {

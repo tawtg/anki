@@ -2,7 +2,9 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 mod aqt;
-mod bundle;
+mod audio;
+mod installer;
+mod launcher;
 mod platform;
 mod pylib;
 mod python;
@@ -13,12 +15,14 @@ use std::env;
 
 use anyhow::Result;
 use aqt::build_and_check_aqt;
-use bundle::build_bundle;
+use audio::build_audio;
+use installer::build_installer;
+use launcher::build_launcher;
 use ninja_gen::glob;
 use ninja_gen::inputs;
 use ninja_gen::protobuf::check_proto;
 use ninja_gen::protobuf::setup_protoc;
-use ninja_gen::python::setup_python;
+use ninja_gen::python::setup_uv;
 use ninja_gen::Build;
 use pylib::build_pylib;
 use pylib::check_pylib;
@@ -29,8 +33,6 @@ use rust::check_minilints;
 use rust::check_rust;
 use web::build_and_check_web;
 use web::check_sql;
-
-use crate::python::setup_sphinx;
 
 fn anki_version() -> String {
     std::fs::read_to_string(".version")
@@ -47,7 +49,7 @@ fn main() -> Result<()> {
     check_proto(build, inputs![glob!["proto/**/*.proto"]])?;
 
     if env::var("OFFLINE_BUILD").is_err() {
-        setup_python(build)?;
+        setup_uv(build, build.host_platform)?;
     }
     setup_venv(build)?;
 
@@ -57,10 +59,10 @@ fn main() -> Result<()> {
     build_and_check_aqt(build)?;
 
     if env::var("OFFLINE_BUILD").is_err() {
-        build_bundle(build)?;
+        build_launcher(build)?;
+        build_installer(build)?;
+        build_audio(build)?;
     }
-
-    setup_sphinx(build)?;
 
     check_rust(build)?;
     check_pylib(build)?;

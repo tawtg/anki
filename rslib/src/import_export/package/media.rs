@@ -96,7 +96,10 @@ impl SafeMediaEntry {
         media_folder.join(&self.name)
     }
 
-    pub(super) fn fetch_file<'a>(&self, archive: &'a mut ZipArchive<File>) -> Result<ZipFile<'a>> {
+    pub(super) fn fetch_file<'a>(
+        &self,
+        archive: &'a mut ZipArchive<File>,
+    ) -> Result<ZipFile<'a, File>> {
         match archive.by_name(&self.index.to_string()) {
             Ok(file) => Ok(file),
             Err(err) => invalid_input!(err, "{} missing from archive", self.index),
@@ -151,7 +154,7 @@ pub(super) fn extract_media_entries(
     }
 }
 
-pub(super) fn safe_normalized_file_name(name: &str) -> Result<Cow<str>> {
+pub(super) fn safe_normalized_file_name(name: &str) -> Result<Cow<'_, str>> {
     if !filename_is_safe(name) {
         Err(AnkiError::ImportError {
             source: ImportError::Corrupt,

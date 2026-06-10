@@ -3,10 +3,11 @@
 
 import { fabric } from "fabric";
 
+import { SHAPE_MASK_COLOR } from "../tools/lib";
 import type { ConstructorParams, Size } from "../types";
 import type { ShapeDataForCloze } from "./base";
 import { Shape } from "./base";
-import { floatToDisplay } from "./floats";
+import { floatToDisplay } from "./lib";
 import { xFromNormalized, xToNormalized, yFromNormalized, yToNormalized } from "./position";
 
 export class Rectangle extends Shape {
@@ -17,6 +18,7 @@ export class Rectangle extends Shape {
         super(rest);
         this.width = width;
         this.height = height;
+        this.id = "rect-" + new Date().getTime();
     }
 
     toDataForCloze(): RectangleDataForCloze {
@@ -24,6 +26,7 @@ export class Rectangle extends Shape {
             ...super.toDataForCloze(),
             width: floatToDisplay(this.width),
             height: floatToDisplay(this.height),
+            ...(this.fill === SHAPE_MASK_COLOR ? {} : { fill: this.fill }),
         };
     }
 

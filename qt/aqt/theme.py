@@ -14,8 +14,9 @@ import anki.lang
 import aqt
 from anki.lang import is_rtl
 from anki.utils import is_lin, is_mac, is_win
-from aqt import QApplication, colors, gui_hooks
+from aqt import colors, gui_hooks
 from aqt.qt import (
+    QApplication,
     QColor,
     QIcon,
     QPainter,
@@ -115,7 +116,7 @@ class ThemeManager:
         # Workaround for Qt bug. First attempt was percent-escaping the chars,
         # but Qt can't handle that.
         # https://forum.qt.io/topic/55274/solved-qss-with-special-characters/11
-        path = re.sub(r"([\u00A1-\u00FF])", r"\\\1", path)
+        path = re.sub(r"(['\u00A1-\u00FF])", r"\\\1", path)
         return path
 
     def icon_from_resources(self, path: str | ColoredIcon) -> QIcon:
@@ -187,7 +188,7 @@ class ThemeManager:
         self, card_ord: int, night_mode: bool | None = None
     ) -> str:
         "Returns body classes used when showing a card."
-        return f"card card{card_ord+1} {self.body_class(night_mode, reviewer=True)}"
+        return f"card card{card_ord + 1} {self.body_class(night_mode, reviewer=True)}"
 
     def var(self, vars: dict[str, str]) -> str:
         """Given day/night colors/props, return the correct one for the current theme."""
@@ -213,13 +214,12 @@ class ThemeManager:
             return False
         elif theme == Theme.DARK:
             return True
+        elif is_win:
+            return get_windows_dark_mode()
+        elif is_mac:
+            return get_macos_dark_mode()
         else:
-            if is_win:
-                return get_windows_dark_mode()
-            elif is_mac:
-                return get_macos_dark_mode()
-            else:
-                return get_linux_dark_mode()
+            return get_linux_dark_mode()
 
     def apply_style(self) -> None:
         "Apply currently configured style."
@@ -269,6 +269,8 @@ class ThemeManager:
 
         else:
             app.setStyle(QStyleFactory.create(self._default_style))  # type: ignore
+            # Qt 6.10+ reads this from the system's theme
+            buf += f"QTableView {{ gridline-color: {self.var(colors.BORDER_SUBTLE)}; }}"
 
         # allow addons to modify the styling
         buf = gui_hooks.style_did_init(buf)
@@ -340,7 +342,7 @@ def get_windows_dark_mode() -> bool:
     if not is_win:
         return False
 
-    from winreg import (  # type: ignore[attr-defined] # pylint: disable=import-error
+    from winreg import (  # type: ignore[attr-defined]
         HKEY_CURRENT_USER,
         OpenKey,
         QueryValueEx,
@@ -352,7 +354,7 @@ def get_windows_dark_mode() -> bool:
             r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
         )
         return not QueryValueEx(key, "AppsUseLightTheme")[0]
-    except Exception as err:
+    except Exception:
         # key reportedly missing or set to wrong type on some systems
         return False
 
@@ -416,12 +418,12 @@ def get_linux_dark_mode() -> bool:
                 capture_output=True,
                 encoding="utf8",
             )
-        except FileNotFoundError as e:
+        except FileNotFoundError:
             # detection strategy failed, missing program
             # print(e)
             continue
 
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError:
             # detection strategy failed, command returned error
             # print(e)
             continue

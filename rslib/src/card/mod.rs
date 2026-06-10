@@ -95,6 +95,8 @@ pub struct Card {
     pub(crate) original_position: Option<u32>,
     pub(crate) memory_state: Option<FsrsMemoryState>,
     pub(crate) desired_retention: Option<f32>,
+    pub(crate) decay: Option<f32>,
+    pub(crate) last_review_time: Option<TimestampSecs>,
     /// JSON object or empty; exposed through the reviewer for persisting custom
     /// state
     pub(crate) custom_data: String,
@@ -145,6 +147,8 @@ impl Default for Card {
             original_position: None,
             memory_state: None,
             desired_retention: None,
+            decay: None,
+            last_review_time: None,
             custom_data: String::new(),
         }
     }
@@ -183,10 +187,16 @@ impl Card {
         self.usn = usn;
     }
 
+    pub fn clear_fsrs_data(&mut self) {
+        self.memory_state = None;
+        self.desired_retention = None;
+        self.decay = None;
+    }
+
     /// Caller must ensure provided deck exists and is not filtered.
     fn set_deck(&mut self, deck: DeckId) {
         self.remove_from_filtered_deck_restoring_queue();
-        self.memory_state = None;
+        self.clear_fsrs_data();
         self.deck_id = deck;
     }
 

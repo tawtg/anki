@@ -10,6 +10,8 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any, cast
 
+from markdown import markdown
+
 import aqt
 import aqt.browser
 import aqt.editor
@@ -20,7 +22,7 @@ from anki.cards import Card, CardId
 from anki.collection import Collection, Config, OpChanges, SearchNode
 from anki.consts import *
 from anki.decks import DeckId
-from anki.errors import NotFoundError
+from anki.errors import NotFoundError, SearchError
 from anki.lang import without_unicode_isolation
 from anki.models import NotetypeId
 from anki.notes import NoteId
@@ -53,6 +55,7 @@ from aqt.operations.tag import (
 from aqt.qt import *
 from aqt.sound import av_player
 from aqt.switch import Switch
+from aqt.theme import WidgetStyle
 from aqt.undo import UndoActionsInfo
 from aqt.utils import (
     HelpPage,
@@ -169,6 +172,7 @@ class Browser(QMainWindow):
         if self.height() != 0:
             self.aspect_ratio = self.width() / self.height()
         self.set_layout(self.mw.pm.browser_layout(), True)
+        self.onSidebarVisibilityChange(not self.sidebarDockWidget.isHidden())
         # disable undo/redo
         self.on_undo_state_change(mw.undo_actions_info())
         # legacy alias
@@ -279,6 +283,19 @@ class Browser(QMainWindow):
         if note_type_id := self.get_active_note_type_id():
             add_cards.set_note_type(note_type_id)
 
+    # If in the Browser we open Preview and press Ctrl+W there,
+    # both Preview and Browser windows get closed by Qt out of the box.
+    # We circumvent that behavior by only closing the currently active window
+    def _handle_close(self):
+        active_window = QApplication.activeWindow()
+        if active_window and active_window != self:
+            if isinstance(active_window, QDialog):
+                active_window.reject()
+            else:
+                active_window.close()
+        else:
+            self.close()
+
     def setupMenus(self) -> None:
         # actions
         f = self.form
@@ -365,6 +382,7 @@ class Browser(QMainWindow):
         qconnect(f.actionFind.triggered, self.onFind)
         qconnect(f.actionNote.triggered, self.onNote)
         qconnect(f.actionSidebar.triggered, self.focusSidebar)
+        qconnect(f.actionToggleSidebar.triggered, self.toggle_sidebar)
         qconnect(f.actionCardList.triggered, self.onCardList)
 
         # help
@@ -382,6 +400,7 @@ class Browser(QMainWindow):
 
         add_ellipsis_to_action_label(f.actionCopy)
         add_ellipsis_to_action_label(f.action_forget)
+        add_ellipsis_to_action_label(f.action_grade_now)
 
     def _editor_web_view(self) -> EditorWebView:
         assert self.editor is not None
@@ -480,6 +499,8 @@ class Browser(QMainWindow):
         text = self.current_search()
         try:
             normed = self.col.build_search_string(text)
+        except SearchError as err:
+            showWarning(markdown(str(err)))
         except Exception as err:
             showWarning(str(err))
         else:
@@ -499,7 +520,7 @@ class Browser(QMainWindow):
         self.search()
 
     def current_search(self) -> str:
-        return self._line_edit().text()
+        return self._line_edit().text().replace("\n", " ")
 
     def search(self) -> None:
         """Search triggered programmatically. Caller must have saved note first."""
@@ -694,7 +715,7 @@ class Browser(QMainWindow):
 
     def setupSidebar(self) -> None:
         dw = self.sidebarDockWidget = QDockWidget(tr.browsing_sidebar(), self)
-        dw.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        dw.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         dw.setObjectName("Sidebar")
         dock_area = (
             Qt.DockWidgetArea.RightDockWidgetArea
@@ -710,6 +731,7 @@ class Browser(QMainWindow):
             self.form.actionSidebarFilter.triggered,
             self.focusSidebarSearchBar,
         )
+        qconnect(dw.visibilityChanged, self.onSidebarVisibilityChange)
         grid = QGridLayout()
         grid.addWidget(self.sidebar.searchBar, 0, 0)
         grid.addWidget(self.sidebar.toolbar, 0, 1)
@@ -728,8 +750,19 @@ class Browser(QMainWindow):
         # UI is more responsive
         self.mw.progress.timer(10, self.sidebar.refresh, False, parent=self.sidebar)
 
-    def showSidebar(self) -> None:
-        self.sidebarDockWidget.setVisible(True)
+    def showSidebar(self, show: bool = True) -> None:
+        self.sidebarDockWidget.setVisible(show)
+
+    def onSidebarVisibilityChange(self, visible):
+        margins = self.form.verticalLayout_3.contentsMargins()
+        skip_left_margin = visible and not (
+            is_mac and aqt.mw.pm.get_widget_style() == WidgetStyle.NATIVE
+        )
+        margins.setLeft(0 if skip_left_margin else margins.right())
+        self.form.verticalLayout_3.setContentsMargins(margins)
+
+        if visible:
+            self.sidebar.refresh()
 
     def focusSidebar(self) -> None:
         self.showSidebar()
@@ -740,10 +773,7 @@ class Browser(QMainWindow):
         self.sidebar.searchBar.setFocus()
 
     def toggle_sidebar(self) -> None:
-        want_visible = not self.sidebarDockWidget.isVisible()
-        self.sidebarDockWidget.setVisible(want_visible)
-        if want_visible:
-            self.sidebar.refresh()
+        self.showSidebar(not self.sidebarDockWidget.isVisible())
 
     # legacy
 
@@ -1092,7 +1122,6 @@ class Browser(QMainWindow):
         dialog.setWindowTitle(tr.actions_grade_now())
         layout = QHBoxLayout()
         dialog.setLayout(layout)
-
         # Add grade buttons
         for ease, label in [
             (1, tr.studying_again()),
@@ -1101,16 +1130,20 @@ class Browser(QMainWindow):
             (4, tr.studying_easy()),
         ]:
             btn = QPushButton(label)
+
+            def cb(ease: int) -> None:
+                grade_now(
+                    parent=self, card_ids=self.selected_cards(), ease=ease
+                ).run_in_background()
+                dialog.accept()
+
             qconnect(
                 btn.clicked,
-                functools.partial(
-                    grade_now,
-                    parent=self,
-                    card_ids=self.selected_cards(),
-                    ease=ease,
-                    dialog=dialog,
-                ),
+                functools.partial(cb, ease=ease),
             )
+            if key := aqt.mw.pm.get_answer_key(ease):
+                QShortcut(key, dialog, activated=btn.click)  # type: ignore
+                btn.setToolTip(tr.actions_shortcut_key(key))
             layout.addWidget(btn)
 
         # Add cancel button
@@ -1227,11 +1260,13 @@ class Browser(QMainWindow):
         self._line_edit().selectAll()
 
     def onNote(self) -> None:
-        assert self.editor is not None
-        assert self.editor.web is not None
+        def cb():
+            assert self.editor is not None and self.editor.web is not None
+            self.editor.web.setFocus()
+            self.editor.loadNote(focusTo=0)
 
-        self.editor.web.setFocus()
-        self.editor.loadNote(focusTo=0)
+        assert self.editor is not None
+        self.editor.call_after_note_saved(cb)
 
     def onCardList(self) -> None:
         self.form.tableView.setFocus()

@@ -13,6 +13,7 @@ pub use builder::JoinSearches;
 pub use builder::Negated;
 pub use builder::SearchBuilder;
 pub use parser::parse as parse_search;
+pub use parser::FieldSearchMode;
 pub use parser::Node;
 pub use parser::PropertyKind;
 pub use parser::RatingKind;
@@ -226,7 +227,7 @@ impl Collection {
         &mut self,
         search: impl TryIntoSearch,
         mode: SortMode,
-    ) -> Result<CardTableGuard> {
+    ) -> Result<CardTableGuard<'_>> {
         let top_node = search.try_into_search()?;
         let writer = SqlWriter::new(self, ReturnItemType::Cards);
         let want_order = mode != SortMode::NoOrder;
@@ -240,7 +241,7 @@ impl Collection {
         } else {
             self.storage.setup_searched_cards_table()?;
         }
-        let sql = format!("insert into search_cids {}", sql);
+        let sql = format!("insert into search_cids {sql}");
 
         let cards = self
             .storage
@@ -299,7 +300,7 @@ impl Collection {
     pub(crate) fn search_notes_into_table(
         &mut self,
         search: impl TryIntoSearch,
-    ) -> Result<NoteTableGuard> {
+    ) -> Result<NoteTableGuard<'_>> {
         let top_node = search.try_into_search()?;
         let writer = SqlWriter::new(self, ReturnItemType::Notes);
         let mode = SortMode::NoOrder;
@@ -307,7 +308,7 @@ impl Collection {
         let (sql, args) = writer.build_query(&top_node, mode.required_table())?;
 
         self.storage.setup_searched_notes_table()?;
-        let sql = format!("insert into search_nids {}", sql);
+        let sql = format!("insert into search_nids {sql}");
 
         let notes = self
             .storage
@@ -320,7 +321,7 @@ impl Collection {
 
     /// Place the ids of cards with notes in 'search_nids' into 'search_cids'.
     /// Returns number of added cards.
-    pub(crate) fn search_cards_of_notes_into_table(&mut self) -> Result<CardTableGuard> {
+    pub(crate) fn search_cards_of_notes_into_table(&mut self) -> Result<CardTableGuard<'_>> {
         self.storage.setup_searched_cards_table()?;
         let cards = self.storage.search_cards_of_notes_into_table()?;
         Ok(CardTableGuard { cards, col: self })
@@ -378,9 +379,10 @@ fn card_order_from_sort_column(column: Column, timing: SchedTimingToday) -> Cow<
         Column::Stability => "extract_fsrs_variable(c.data, 's') asc".into(),
         Column::Difficulty => "extract_fsrs_variable(c.data, 'd') asc".into(),
         Column::Retrievability => format!(
-            "extract_fsrs_retrievability(c.data, case when c.odue !=0 then c.odue else c.due end, c.ivl, {}, {}) asc",
+            "extract_fsrs_retrievability(c.data, case when c.odue !=0 then c.odue else c.due end, c.ivl, {}, {}, {}) asc",
             timing.days_elapsed,
-            timing.next_day_at.0
+            timing.next_day_at.0,
+            timing.now.0,
         )
         .into(),
     }

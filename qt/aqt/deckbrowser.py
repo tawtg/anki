@@ -234,7 +234,7 @@ class DeckBrowser:
         if node.collapsed:
             prefix = "+"
         else:
-            prefix = "-"
+            prefix = "−"
 
         def indent() -> str:
             return "&nbsp;" * 6 * (node.level - 1)
@@ -386,9 +386,7 @@ class DeckBrowser:
             if b[0]:
                 b[0] = tr.actions_shortcut_key(val=shortcut(b[0]))
             buf += """
-<button title='%s' onclick='pycmd(\"%s\");'>%s</button>""" % tuple(
-                b
-            )
+<button title='%s' onclick='pycmd(\"%s\");'>%s</button>""" % tuple(b)
         self.bottom.draw(
             buf=buf,
             link_handler=self._linkHandler,

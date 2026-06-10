@@ -19,7 +19,7 @@ from send2trash import send2trash
 import aqt
 from anki._legacy import DeprecatedNamesMixinForModule
 from anki.collection import Collection, HelpPage
-from anki.lang import TR, tr_legacyglobal  # pylint: disable=unused-import
+from anki.lang import TR, tr_legacyglobal  # noqa: F401
 from anki.utils import (
     call,
     invalid_filename,
@@ -31,7 +31,7 @@ from anki.utils import (
 from aqt.qt import *
 from aqt.qt import (
     PYQT_VERSION_STR,
-    QT_VERSION_STR,
+    QT_VERSION_STR,  # noqa: F401
     QAction,
     QApplication,
     QCheckBox,
@@ -45,7 +45,6 @@ from aqt.qt import (
     QFrame,
     QHeaderView,
     QIcon,
-    QKeySequence,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -61,7 +60,6 @@ from aqt.qt import (
     QPlainTextEdit,
     QPoint,
     QPushButton,
-    QShortcut,
     QSize,
     QSplitter,
     QStandardPaths,
@@ -87,24 +85,15 @@ if TYPE_CHECKING:
 
 
 def aqt_data_path() -> Path:
-    # packaged?
-    if getattr(sys, "frozen", False):
-        prefix = Path(sys.prefix)
-        path = prefix / "lib/_aqt/data"
-        if path.exists():
-            return path
-        else:
-            return prefix / "../Resources/_aqt/data"
-    else:
-        import _aqt.colors
+    import _aqt.colors
 
-        data_folder = Path(inspect.getfile(_aqt.colors)).with_name("data")
-        if data_folder.exists():
-            return data_folder.absolute()
-        else:
-            # should only happen when running unit tests
-            print("warning, data folder not found")
-            return Path(".")
+    data_folder = Path(inspect.getfile(_aqt.colors)).with_name("data")
+    if data_folder.exists():
+        return data_folder.absolute()
+    else:
+        # should only happen when running unit tests
+        print("warning, data folder not found")
+        return Path(".")
 
 
 def aqt_data_folder() -> str:
@@ -235,29 +224,45 @@ def ask_user_dialog(
     )
 
 
-def show_info(text: str, callback: Callable | None = None, **kwargs: Any) -> MessageBox:
+def show_info(
+    text: str,
+    callback: Callable | None = None,
+    parent: QWidget | None = None,
+    **kwargs: Any,
+) -> MessageBox:
     "Show a small info window with an OK button."
     if "icon" not in kwargs:
         kwargs["icon"] = QMessageBox.Icon.Information
     return MessageBox(
         text,
         callback=(lambda _: callback()) if callback is not None else None,
+        parent=parent,
         **kwargs,
     )
 
 
 def show_warning(
-    text: str, callback: Callable | None = None, **kwargs: Any
+    text: str,
+    callback: Callable | None = None,
+    parent: QWidget | None = None,
+    **kwargs: Any,
 ) -> MessageBox:
     "Show a small warning window with an OK button."
-    return show_info(text, icon=QMessageBox.Icon.Warning, callback=callback, **kwargs)
+    return show_info(
+        text, icon=QMessageBox.Icon.Warning, callback=callback, parent=parent, **kwargs
+    )
 
 
 def show_critical(
-    text: str, callback: Callable | None = None, **kwargs: Any
+    text: str,
+    callback: Callable | None = None,
+    parent: QWidget | None = None,
+    **kwargs: Any,
 ) -> MessageBox:
     "Show a small critical error window with an OK button."
-    return show_info(text, icon=QMessageBox.Icon.Critical, callback=callback, **kwargs)
+    return show_info(
+        text, icon=QMessageBox.Icon.Critical, callback=callback, parent=parent, **kwargs
+    )
 
 
 def showWarning(
@@ -303,7 +308,7 @@ def showInfo(
         icon = QMessageBox.Icon.Critical
     else:
         icon = QMessageBox.Icon.Information
-    mb = QMessageBox(parent_widget)  #
+    mb = QMessageBox(parent_widget)
     if textFormat == "plain":
         mb.setTextFormat(Qt.TextFormat.PlainText)
     elif textFormat == "rich":
@@ -801,7 +806,7 @@ def ensureWidgetInScreenBoundaries(widget: QWidget) -> None:
     wsize = widget.size()
     cappedWidth = min(geom.width(), wsize.width())
     cappedHeight = min(geom.height(), wsize.height())
-    if cappedWidth > wsize.width() or cappedHeight > wsize.height():
+    if cappedWidth < wsize.width() or cappedHeight < wsize.height():
         widget.resize(QSize(cappedWidth, cappedHeight))
 
     # ensure widget is inside top left
@@ -929,7 +934,7 @@ def openFolder(path: str) -> None:
         subprocess.run(["explorer", f"file://{path}"], check=False)
     else:
         with no_bundled_libs():
-            QDesktopServices.openUrl(QUrl(f"file://{path}"))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
 def show_in_folder(path: str) -> None:
@@ -944,14 +949,39 @@ def show_in_folder(path: str) -> None:
         """
         call(osascript_to_args(script))
     else:
-        # Just open the file in any other platform
-        with no_bundled_libs():
-            QDesktopServices.openUrl(QUrl(f"file://{path}"))
+        # For linux, there are multiple file managers. Let's test if one of the
+        # most common file managers is found and use it in case it is installed.
+        # If none of this list are installed, use a fallback. The fallback
+        # might open the image in a web browser, image viewer or others,
+        # depending on the users defaults.
+        file_managers = [
+            "nautilus",  # GNOME
+            "dolphin",  # KDE
+            "pcmanfm",  # LXDE
+            "thunar",  # XFCE
+            "nemo",  # Cinnamon
+            "caja",  # MATE
+        ]
+
+        available_file_manager = None
+
+        # Test if a file manager is installed and use it, fallback otherwise
+        for file_manager in file_managers:
+            if shutil.which(file_manager):
+                available_file_manager = file_manager
+                break
+
+        if available_file_manager:
+            subprocess.run([available_file_manager, path], check=False)
+        else:
+            # Just open the file in any other platform
+            with no_bundled_libs():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
 def _show_in_folder_win32(path: str) -> None:
-    import win32con  # pylint: disable=import-error
-    import win32gui  # pylint: disable=import-error
+    import win32con
+    import win32gui
 
     from aqt import mw
 
@@ -986,21 +1016,6 @@ def maybeHideClose(bbox: QDialogButtonBox) -> None:
         b = bbox.button(QDialogButtonBox.StandardButton.Close)
         if b:
             bbox.removeButton(b)
-
-
-def addCloseShortcut(widg: QDialog) -> None:
-    if not is_mac:
-        return
-    shortcut = QShortcut(QKeySequence("Ctrl+W"), widg)
-    qconnect(shortcut.activated, widg.reject)
-    setattr(widg, "_closeShortcut", shortcut)
-
-
-def add_close_shortcut(widg: QWidget) -> None:
-    if not is_mac:
-        return
-    shortcut = QShortcut(QKeySequence("Ctrl+W"), widg)
-    qconnect(shortcut.activated, widg.close)
 
 
 def downArrow() -> str:
@@ -1195,7 +1210,7 @@ def disallow_full_screen() -> bool:
     )
 
 
-def add_ellipsis_to_action_label(*actions: QAction) -> None:
+def add_ellipsis_to_action_label(*actions: QAction | QPushButton) -> None:
     """Pass actions to add '...' to their labels, indicating that more input is
     required before they can be performed.
 
@@ -1214,12 +1229,11 @@ def supportText() -> str:
     platname = platform.platform()
 
     return """\
-Anki {} {} {}
+Anki {} {}
 Python {} Qt {} PyQt {}
 Platform: {}
 """.format(
         version_with_build(),
-        "(src)" if not getattr(sys, "frozen", False) else "",
         "(ao)" if mw.addonManager.dirty else "",
         platform.python_version(),
         qVersion(),
@@ -1255,12 +1269,12 @@ def opengl_vendor() -> str | None:
             # Can't use versionFunctions there
             return None
 
-        vp = QOpenGLVersionProfile()  # type: ignore  # pylint: disable=undefined-variable
+        vp = QOpenGLVersionProfile()  # type: ignore
         vp.setVersion(2, 0)
 
         try:
             vf = ctx.versionFunctions(vp)  # type: ignore
-        except ImportError as e:
+        except ImportError:
             return None
 
         if vf is None:

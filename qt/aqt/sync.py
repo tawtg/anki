@@ -43,7 +43,7 @@ def get_sync_status(
 ) -> None:
     auth = mw.pm.sync_auth()
     if not auth:
-        callback(SyncStatus(required=SyncStatus.NO_CHANGES))  # pylint:disable=no-member
+        callback(SyncStatus(required=SyncStatus.NO_CHANGES))
         return
 
     def on_future_done(fut: Future[SyncStatus]) -> None:
@@ -72,7 +72,7 @@ def handle_sync_error(mw: aqt.main.AnkiQt, err: Exception) -> None:
     elif isinstance(err, Interrupted):
         # no message to show
         return
-    show_warning(str(err))
+    show_warning(str(err), parent=mw)
 
 
 def on_normal_sync_timer(mw: aqt.main.AnkiQt) -> None:
@@ -117,7 +117,7 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
         if out.new_endpoint:
             mw.pm.set_current_sync_url(out.new_endpoint)
         if out.server_message:
-            showText(out.server_message)
+            showText(out.server_message, parent=mw, type="rich")
         if out.required == out.NO_CHANGES:
             tooltip(parent=mw, msg=tr.sync_collection_complete())
             # all done; track media progress
@@ -208,11 +208,20 @@ def on_full_sync_timer(mw: aqt.main.AnkiQt, label: str) -> None:
         return
     sync_progress = progress.full_sync
 
+    # If we've reached total, show the "checking" label
     if sync_progress.transferred == sync_progress.total:
         label = tr.sync_checking()
+
+    total = sync_progress.total
+    transferred = sync_progress.transferred
+
+    # Scale both to kilobytes with floor division
+    max_for_bar = total // 1024
+    value_for_bar = transferred // 1024
+
     mw.progress.update(
-        value=sync_progress.transferred,
-        max=sync_progress.total,
+        value=value_for_bar,
+        max=max_for_bar,
         process=False,
         label=label,
     )
@@ -301,7 +310,6 @@ def sync_login(
     username: str = "",
     password: str = "",
 ) -> None:
-
     def on_future_done(fut: Future[SyncAuth], username: str, password: str) -> None:
         try:
             auth = fut.result()
@@ -373,7 +381,9 @@ def get_id_and_pass_from_user(
     g.addWidget(passwd, 1, 1)
     l2.setBuddy(passwd)
     vbox.addLayout(g)
-    bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)  # type: ignore
+    bb = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    )  # type: ignore
     ok_button = bb.button(QDialogButtonBox.StandardButton.Ok)
     assert ok_button is not None
     ok_button.setAutoDefault(True)

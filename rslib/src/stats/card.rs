@@ -2,6 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 use fsrs::FSRS;
+use fsrs::FSRS5_DEFAULT_DECAY;
 
 use crate::card::CardType;
 use crate::card::FsrsMemoryState;
@@ -29,18 +30,34 @@ impl Collection {
 
         let (average_secs, total_secs) = average_and_total_secs_strings(&revlog);
         let timing = self.timing_today()?;
-        let days_elapsed = self
-            .storage
-            .time_of_last_review(card.id)?
-            .map(|ts| timing.next_day_at.elapsed_days_since(ts))
-            .unwrap_or_default() as u32;
+
+        let last_review_time = if let Some(last_review_time) = card.last_review_time {
+            last_review_time
+        } else {
+            let mut new_card = card.clone();
+            let last_review_time = self
+                .storage
+                .time_of_last_review(card.id)?
+                .unwrap_or_default();
+
+            new_card.last_review_time = Some(last_review_time);
+
+            self.storage.update_card(&new_card)?;
+            last_review_time
+        };
+
+        let seconds_elapsed = timing.now.elapsed_secs_since(last_review_time) as u32;
+
         let fsrs_retrievability = card
             .memory_state
-            .zip(Some(days_elapsed))
-            .map(|(state, days)| {
-                FSRS::new(None)
-                    .unwrap()
-                    .current_retrievability(state.into(), days)
+            .zip(Some(seconds_elapsed))
+            .zip(Some(card.decay.unwrap_or(FSRS5_DEFAULT_DECAY)))
+            .map(|((state, seconds), decay)| {
+                FSRS::new(None).unwrap().current_retrievability_seconds(
+                    state.into(),
+                    seconds,
+                    decay,
+                )
             });
 
         let original_deck = if card.original_deck_id == DeckId(0) {
@@ -59,8 +76,15 @@ impl Collection {
             note_id: card.note_id.into(),
             deck: deck.human_name(),
             added: card.id.as_secs().0,
-            first_review: revlog.first().map(|entry| entry.id.as_secs().0),
-            latest_review: revlog.last().map(|entry| entry.id.as_secs().0),
+            first_review: revlog
+                .iter()
+                .find(|entry| entry.has_rating())
+                .map(|entry| entry.id.as_secs().0),
+            // last_review_time is not used to ensure cram revlogs are included.
+            latest_review: revlog
+                .iter()
+                .rfind(|entry| entry.has_rating())
+                .map(|entry| entry.id.as_secs().0),
             due_date: self.due_date(&card)?,
             due_position: self.position(&card),
             interval: card.interval,
@@ -75,6 +99,7 @@ impl Collection {
             memory_state: card.memory_state.map(Into::into),
             fsrs_retrievability,
             custom_data: card.custom_data,
+            fsrs_params: preset.fsrs_params().to_vec(),
             preset: preset.name,
             original_deck: if original_deck != deck {
                 Some(original_deck.human_name())
@@ -173,13 +198,13 @@ impl Collection {
             }
             Ok(result.into_iter().rev().collect())
         } else {
-            Ok(revlog.iter().map(stats_revlog_entry).collect())
+            Ok(revlog.iter().rev().map(stats_revlog_entry).collect())
         }
     }
 }
 
 fn average_and_total_secs_strings(revlog: &[RevlogEntry]) -> (f32, f32) {
-    let normal_answer_count = revlog.iter().filter(|r| r.button_chosen > 0).count();
+    let normal_answer_count = revlog.iter().filter(|r| r.has_rating()).count();
     let total_secs: f32 = revlog
         .iter()
         .map(|entry| (entry.taken_millis as f32) / 1000.0)
@@ -202,6 +227,7 @@ fn stats_revlog_entry(
         ease: entry.ease_factor,
         taken_secs: entry.taken_millis as f32 / 1000.,
         memory_state: None,
+        last_interval: entry.last_interval_secs(),
     }
 }
 

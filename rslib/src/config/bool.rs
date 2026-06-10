@@ -1,8 +1,6 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use serde::Deserialize;
-use serde_aux::field_attributes::deserialize_bool_from_anything;
 use strum::IntoStaticStr;
 
 use crate::prelude::*;
@@ -40,6 +38,8 @@ pub enum BoolKey {
     WithScheduling,
     WithDeckConfigs,
     Fsrs,
+    FsrsHealthCheck,
+    FsrsLegacyEvaluate,
     LoadBalancerEnabled,
     FsrsShortTermWithStepsEnabled,
     #[strum(to_string = "normalize_note_text")]
@@ -54,15 +54,6 @@ pub enum BoolKey {
     AddingDefaultsToCurrentDeck,
 }
 
-/// This is a workaround for old clients that used ints to represent boolean
-/// values. For new config items, prefer using a bool directly.
-#[derive(Deserialize, Default)]
-struct BoolLike(
-    #[serde(deserialize_with = "deserialize_bool_from_anything")]
-    #[allow(dead_code)]
-    bool,
-);
-
 impl Collection {
     pub fn get_config_bool(&self, key: BoolKey) -> bool {
         match key {
@@ -76,6 +67,7 @@ impl Collection {
             | BoolKey::RestorePositionBrowser
             | BoolKey::RestorePositionReviewer
             | BoolKey::LoadBalancerEnabled
+            | BoolKey::FsrsHealthCheck
             | BoolKey::NormalizeNoteText => self.get_config_optional(key).unwrap_or(true),
 
             // other options default to false

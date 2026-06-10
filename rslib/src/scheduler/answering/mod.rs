@@ -33,6 +33,7 @@ use crate::deckconfig::LeechAction;
 use crate::decks::Deck;
 use crate::prelude::*;
 use crate::scheduler::fsrs::memory_state::fsrs_item_for_memory_state;
+use crate::scheduler::fsrs::memory_state::get_decay_from_params;
 use crate::scheduler::states::PreviewState;
 use crate::search::SearchNode;
 
@@ -66,6 +67,7 @@ impl CardAnswer {
 struct CardStateUpdater {
     card: Card,
     deck: Deck,
+    original_deck: Deck,
     config: DeckConfig,
     timing: SchedTimingToday,
     now: TimestampSecs,
@@ -227,28 +229,31 @@ impl Collection {
     /// Return the next states that will be applied for each answer button.
     pub fn get_scheduling_states(&mut self, cid: CardId) -> Result<SchedulingStates> {
         let card = self.storage.get_card(cid)?.or_not_found(cid)?;
-        let deck = self.get_deck(card.deck_id)?.or_not_found(card.deck_id)?;
-
-        let note_id = deck
-            .config_id()
-            .map(|deck_config_id| self.get_deck_config(deck_config_id, false))
-            .transpose()?
-            .flatten()
-            .map(|deck_config| deck_config.inner.bury_reviews)
-            .unwrap_or(false)
-            .then_some(card.note_id);
+        let note_id = card.note_id;
 
         let ctx = self.card_state_updater(card)?;
         let current = ctx.current_card_state();
 
-        let load_balancer_ctx = self.state.card_queues.as_ref().and_then(|card_queues| {
-            match card_queues.load_balancer.as_ref() {
-                None => None,
-                Some(load_balancer) => {
-                    Some(load_balancer.review_context(note_id, deck.config_id()?))
-                }
+        let load_balancer_ctx = if let Some(load_balancer) = self
+            .state
+            .card_queues
+            .as_ref()
+            .and_then(|card_queues| card_queues.load_balancer.as_ref())
+        {
+            // Only get_deck_config when load balancer is enabled
+            if let Some(deck_config_id) = ctx.original_deck.config_id() {
+                let note_id = self
+                    .get_deck_config(deck_config_id, false)?
+                    .map(|deck_config| deck_config.inner.bury_reviews)
+                    .unwrap_or(false)
+                    .then_some(note_id);
+                Some(load_balancer.review_context(note_id, deck_config_id))
+            } else {
+                None
             }
-        });
+        } else {
+            None
+        };
 
         let state_ctx = ctx.state_context(load_balancer_ctx);
         Ok(current.next_states(&state_ctx))
@@ -333,7 +338,14 @@ impl Collection {
         self.update_deck_stats_from_answer(usn, answer, &updater, original.queue)?;
         self.maybe_bury_siblings(&original, &updater.config)?;
         let timing = updater.timing;
+        let deckconfig_id = updater.original_deck.config_id();
         let mut card = updater.into_card();
+        if !matches!(
+            answer.current_state,
+            CardState::Filtered(FilteredState::Preview(_))
+        ) {
+            card.last_review_time = Some(answer.answered_at.as_secs());
+        }
         if let Some(data) = answer.custom_data.take() {
             card.custom_data = data;
             card.validate_custom_data()?;
@@ -345,12 +357,14 @@ impl Collection {
         }
 
         if card.queue == CardQueue::Review {
-            let deck = self.get_deck(card.deck_id)?;
-            if let Some(card_queues) = self.state.card_queues.as_mut() {
-                if let Some(deckconfig_id) = deck.and_then(|deck| deck.config_id()) {
-                    if let Some(load_balancer) = card_queues.load_balancer.as_mut() {
-                        load_balancer.add_card(card.id, card.note_id, deckconfig_id, card.interval)
-                    }
+            if let Some(load_balancer) = self
+                .state
+                .card_queues
+                .as_mut()
+                .and_then(|card_queues| card_queues.load_balancer.as_mut())
+            {
+                if let Some(deckconfig_id) = deckconfig_id {
+                    load_balancer.add_card(card.id, card.note_id, deckconfig_id, card.interval)
                 }
             }
         }
@@ -368,8 +382,6 @@ impl Collection {
                     }))
                 ),
             )?;
-        } else if card.queue == CardQueue::Suspended {
-            invalid_input!("Can't answer suspended cards");
         }
 
         Ok(())
@@ -432,10 +444,25 @@ impl Collection {
             .storage
             .get_deck(card.deck_id)?
             .or_not_found(card.deck_id)?;
-        let config = self.home_deck_config(deck.config_id(), card.original_deck_id)?;
+        let home_deck = if card.original_deck_id.0 == 0 {
+            &deck
+        } else {
+            &self
+                .storage
+                .get_deck(card.original_deck_id)?
+                .or_not_found(card.original_deck_id)?
+        };
+        let config = self
+            .storage
+            .get_deck_config(home_deck.config_id().or_invalid("home deck is filtered")?)?
+            .unwrap_or_default();
+
+        let desired_retention = home_deck.effective_desired_retention(&config);
         let fsrs_enabled = self.get_config_bool(BoolKey::Fsrs);
         let fsrs_next_states = if fsrs_enabled {
-            let fsrs = FSRS::new(Some(config.fsrs_params()))?;
+            let params = config.fsrs_params();
+            let fsrs = FSRS::new(Some(params))?;
+            card.decay = Some(get_decay_from_params(params));
             if card.memory_state.is_none() && card.ctype != CardType::New {
                 // Card has been moved or imported into an FSRS deck after params were set,
                 // and will need its initial memory state to be calculated based on review
@@ -450,36 +477,47 @@ impl Collection {
                 )?;
                 card.set_memory_state(&fsrs, item, config.inner.historical_retention)?;
             }
-            let days_elapsed = self
-                .storage
-                .time_of_last_review(card.id)?
-                .map(|ts| timing.next_day_at.elapsed_days_since(ts))
-                .unwrap_or_default() as u32;
+            let days_elapsed = if let Some(last_review_time) = card.last_review_time {
+                timing.next_day_at.elapsed_days_since(last_review_time) as u32
+            } else {
+                self.storage
+                    .time_of_last_review(card.id)?
+                    .map(|ts| timing.next_day_at.elapsed_days_since(ts))
+                    .unwrap_or_default() as u32
+            };
             Some(fsrs.next_states(
                 card.memory_state.map(Into::into),
-                config.inner.desired_retention,
+                desired_retention,
                 days_elapsed,
             )?)
         } else {
             None
         };
-        let desired_retention = fsrs_enabled.then_some(config.inner.desired_retention);
+        let desired_retention = fsrs_enabled.then_some(desired_retention);
         let fsrs_short_term_with_steps =
             self.get_config_bool(BoolKey::FsrsShortTermWithStepsEnabled);
         let fsrs_allow_short_term = if fsrs_enabled {
             let params = config.fsrs_params();
-            if params.len() == 19 {
+            if params.len() >= 19 {
                 params[17] > 0.0 && params[18] > 0.0
+            } else if params.is_empty() {
+                // fallback to true when using default params
+                true
             } else {
                 false
             }
         } else {
             false
         };
+        let original_deck = self
+            .storage
+            .get_deck(home_deck.id)?
+            .or_not_found(home_deck.id)?;
         Ok(CardStateUpdater {
             fuzz_seed: get_fuzz_seed(&card, false),
             card,
             deck,
+            original_deck,
             config,
             timing,
             now: TimestampSecs::now(),
@@ -632,7 +670,7 @@ fn get_fuzz_seed_for_id_and_reps(card_id: CardId, card_reps: u32) -> Option<u64>
 /// Return a fuzz factor from the range `0.0..1.0`, using the provided seed.
 /// None if seed is None.
 fn get_fuzz_factor(seed: Option<u64>) -> Option<f32> {
-    seed.map(|s| StdRng::seed_from_u64(s).gen_range(0.0..1.0))
+    seed.map(|s| StdRng::seed_from_u64(s).random_range(0.0..1.0))
 }
 
 #[cfg(test)]
@@ -644,6 +682,43 @@ pub(crate) mod test {
 
     fn current_state(col: &mut Collection, card_id: CardId) -> CardState {
         col.get_scheduling_states(card_id).unwrap().current
+    }
+
+    // Test that deck-specific desired retention is used when available
+    #[test]
+    fn deck_specific_desired_retention() -> Result<()> {
+        let mut col = Collection::new();
+
+        // Enable FSRS
+        col.set_config_bool(BoolKey::Fsrs, true, false)?;
+
+        // Create a deck with specific desired retention
+        let deck_id = DeckId(1);
+        let deck = col.get_deck(deck_id)?.unwrap();
+        let mut deck_clone = (*deck).clone();
+        deck_clone.normal_mut().unwrap().desired_retention = Some(0.85);
+        col.update_deck(&mut deck_clone)?;
+
+        // Create a card in this deck
+        let nt = col.get_notetype_by_name("Basic")?.unwrap();
+        let mut note = nt.new_note();
+        col.add_note(&mut note, deck_id)?;
+
+        // Get the card using search_cards
+        let cards = col.search_cards(note.id, SortMode::NoOrder)?;
+        let card = col.storage.get_card(cards[0])?.unwrap();
+
+        // Test that the card state updater uses deck-specific desired retention
+        let updater = col.card_state_updater(card)?;
+
+        // Print debug information
+        println!("FSRS enabled: {}", col.get_config_bool(BoolKey::Fsrs));
+        println!("Desired retention: {:?}", updater.desired_retention);
+
+        // Verify that the desired retention is from the deck, not the config
+        assert_eq!(updater.desired_retention, Some(0.85));
+
+        Ok(())
     }
 
     // make sure the 'current' state for a card matches the
@@ -888,22 +963,20 @@ pub(crate) mod test {
     ) -> Result<()> {
         // Change due time to fake card answer_time,
         // works since answer_time is calculated as due - last_ivl
-        let update_due_string = format!("update cards set due={}", shift_due_time);
+        let update_due_string = format!("update cards set due={shift_due_time}");
         col.storage.db.execute_batch(&update_due_string)?;
         col.clear_study_queues();
         let current_card_state = current_state(col, post_answer.card_id);
         let state = match current_card_state {
             CardState::Normal(NormalState::Learning(state)) => state,
-            _ => panic!("State is not Normal: {:?}", current_card_state),
+            _ => panic!("State is not Normal: {current_card_state:?}"),
         };
         let elapsed_secs = state.elapsed_secs as i32;
         // Give a 1 second leeway when the test runs on the off chance
         // that the test runs as a second rolls over.
         assert!(
             (elapsed_secs - expected_elapsed_secs).abs() <= 1,
-            "elapsed_secs: {} != expected_elapsed_secs: {}",
-            elapsed_secs,
-            expected_elapsed_secs
+            "elapsed_secs: {elapsed_secs} != expected_elapsed_secs: {expected_elapsed_secs}"
         );
 
         Ok(())

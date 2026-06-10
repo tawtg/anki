@@ -15,6 +15,7 @@
     export let max = 9999;
     export let step = 0.01;
     export let percentage = false;
+    export let focused = false;
 </script>
 
 <Row --cols={13}>
@@ -22,9 +23,12 @@
         <slot />
     </Col>
     <Col --col-size={6} breakpoint="xs">
-        <ConfigInput>
-            <SpinBox bind:value {min} {max} {step} {percentage} />
-            <RevertButton slot="revert" bind:value {defaultValue} />
-        </ConfigInput>
+        <Row class="flex-grow-1">
+            <slot name="tabs" />
+            <ConfigInput>
+                <SpinBox bind:value {min} {max} {step} {percentage} bind:focused />
+                <RevertButton slot="revert" bind:value {defaultValue} />
+            </ConfigInput>
+        </Row>
     </Col>
 </Row>

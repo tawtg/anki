@@ -3,7 +3,7 @@ qt-misc-addons = Add-ons
 qt-misc-all-cards-notes-and-media-for = All cards, notes, and media for this profile will be deleted. Are you sure?
 qt-misc-all-cards-notes-and-media-for2 = All cards, notes, and media for the profile "{ $name }" will be deleted. Are you sure?
 qt-misc-anki-updatedanki-has-been-released = <h1>Anki Updated</h1>Anki { $val } has been released.<br><br>
-qt-misc-automatic-syncing-and-backups-have-been = Automatic syncing and backups have been disabled while restoring. To enable them again, close the profile or restart Anki.
+qt-misc-automatic-syncing-and-backups-have-been = Backup successfully restored. Automatic syncing and backups have been disabled for now. To enable them again, close the profile or restart Anki.
 qt-misc-back-side-only = Back Side Only
 qt-misc-backing-up = Backing Up...
 qt-misc-browse = Browse
@@ -56,6 +56,7 @@ qt-misc-this-file-exists-are-you-sure = This file exists. Are you sure you want 
 qt-misc-unable-to-access-anki-media-folder = Unable to access Anki media folder. The permissions on your system's temporary folder may be incorrect.
 qt-misc-unexpected-response-code = Unexpected response code: { $val }
 qt-misc-would-you-like-to-download-it = Would you like to download it now?
+qt-misc-downloading-update = Downloading update: { $count }MB/{ $total }MB
 qt-misc-your-collection-file-appears-to-be = Your collection file appears to be corrupt. This can happen when the file is copied or moved while Anki is open, or when the collection is stored on a network or cloud drive. If problems persist after restarting your computer, please open an automatic backup from the profile screen.
 qt-misc-your-computers-storage-may-be-full = Your computer's storage may be full. Please delete some unneeded files, then try again.
 qt-misc-your-firewall-or-antivirus-program-is = Your firewall or antivirus program is preventing Anki from creating a connection to itself. Please add an exception for Anki.
@@ -73,6 +74,7 @@ qt-misc-second =
 qt-misc-layout-auto-enabled = Responsive layout enabled
 qt-misc-layout-vertical-enabled = Vertical layout enabled
 qt-misc-layout-horizontal-enabled = Horizontal layout enabled
+qt-misc-open-anki-launcher = Change to a different Anki version?
 
 ## deprecated- these strings will be removed in the future, and do not need
 ## to be translated

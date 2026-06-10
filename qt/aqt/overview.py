@@ -2,6 +2,7 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
+import html
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -112,7 +113,7 @@ class Overview:
             self.mw.moveToState("deckBrowser")
         elif url == "review":
             openLink(f"{aqt.appShared}info/{self.sid}?v={self.sidVer}")
-        elif url == "studymore" or url == "customStudy":
+        elif url in {"studymore", "customStudy"}:
             self.onStudyMore()
         elif url == "unbury":
             self.on_unbury()
@@ -179,7 +180,6 @@ class Overview:
     ############################################################
 
     def _renderPage(self) -> None:
-        but = self.mw.button
         deck = self.mw.col.decks.current()
         self.sid = deck.get("sharedFrom")
         if self.sid:
@@ -197,6 +197,7 @@ class Overview:
             table=self._table(),
         )
         gui_hooks.overview_will_render_content(self, content)
+        content.deck = html.escape(content.deck)
         self.web.stdHtml(
             self._body % content.__dict__,
             css=["css/overview.css"],
@@ -305,9 +306,7 @@ class Overview:
             if b[0]:
                 b[0] = tr.actions_shortcut_key(val=shortcut(b[0]))
             buf += """
-<button title="%s" onclick='pycmd("%s")'>%s</button>""" % tuple(
-                b
-            )
+<button title="%s" onclick='pycmd("%s")'>%s</button>""" % tuple(b)
         self.bottom.draw(
             buf=buf,
             link_handler=link_handler,

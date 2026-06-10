@@ -22,7 +22,7 @@ pub(crate) fn write_python_interface(services: &[BackendService]) -> Result<()> 
     write_header(&mut out)?;
 
     for service in services {
-        if service.name == "BackendAnkidroidService" {
+        if ["BackendAnkidroidService", "BackendFrontendService"].contains(&service.name.as_str()) {
             continue;
         }
         for method in service.all_methods() {
@@ -183,9 +183,9 @@ fn python_type(field: &FieldDescriptor, output: bool) -> String {
     };
     if field.is_list() {
         if output {
-            format!("Sequence[{}]", kind)
+            format!("Sequence[{kind}]")
         } else {
-            format!("Iterable[{}]", kind)
+            format!("Iterable[{kind}]")
         }
     } else if field.is_map() {
         let map_kind = field.kind();
@@ -213,7 +213,6 @@ fn write_header(out: &mut impl Write) -> Result<()> {
     out.write_all(
         br#"# Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; https://www.gnu.org/licenses/agpl.html
-# pylint: skip-file
 
 from __future__ import annotations
 
@@ -250,6 +249,7 @@ import anki.stats_pb2
 import anki.sync_pb2
 import anki.tags_pb2
 import anki.ankihub_pb2
+import anki.github_pb2
 
 class RustBackendGenerated:
     def _run_command(self, service: int, method: int, input: Any) -> bytes:

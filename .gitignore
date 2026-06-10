@@ -18,3 +18,9 @@ node_modules
 yarn-error.log
 ts/.svelte-kit
 .yarn
+.claude/settings.local.json
+.claude/user.md
+.venv
+docs/_build/
+docs/autoapi/
+.complexipy_cache

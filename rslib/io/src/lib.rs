@@ -152,6 +152,34 @@ pub fn copy_file(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<u64> {
     })
 }
 
+/// Copy a file from src to dst if dst doesn't exist or if src is newer than
+/// dst. Preserves the modification time from the source file.
+pub fn copy_if_newer(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<bool> {
+    let src = src.as_ref();
+    let dst = dst.as_ref();
+
+    let should_copy = if !dst.exists() {
+        true
+    } else {
+        let src_time = modified_time(src)?;
+        let dst_time = modified_time(dst)?;
+        src_time > dst_time
+    };
+
+    if should_copy {
+        copy_file(src, dst)?;
+
+        // Preserve the modification time from the source file
+        let src_mtime = modified_time(src)?;
+        let times = FileTimes::new().set_modified(src_mtime);
+        set_file_times(dst, times)?;
+
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Like [read_file], but skips the section that is potentially locked by
 /// SQLite.
 pub fn read_locked_db_file(path: impl AsRef<Path>) -> Result<Vec<u8>> {
@@ -183,6 +211,14 @@ fn read_locked_db_file_inner(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>>
 /// See [std::fs::metadata].
 pub fn metadata(path: impl AsRef<Path>) -> Result<std::fs::Metadata> {
     std::fs::metadata(&path).context(FileIoSnafu {
+        path: path.as_ref(),
+        op: FileOp::Metadata,
+    })
+}
+
+/// Get the modification time of a file.
+pub fn modified_time(path: impl AsRef<Path>) -> Result<std::time::SystemTime> {
+    metadata(&path)?.modified().context(FileIoSnafu {
         path: path.as_ref(),
         op: FileOp::Metadata,
     })
@@ -226,12 +262,25 @@ pub fn atomic_rename(file: NamedTempFile, target: &Path, fsync: bool) -> Result<
     file.persist(target)?;
     #[cfg(not(windows))]
     if fsync {
-        if let Some(parent) = target.parent() {
-            open_file(parent)?.sync_all().context(FileIoSnafu {
-                path: parent,
-                op: FileOp::Sync,
-            })?;
-        }
+        let abs_path;
+        let parent = match target.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => {
+                abs_path = std::path::absolute(target).context(FileIoSnafu {
+                    path: target,
+                    op: FileOp::Absolute,
+                })?;
+                abs_path.parent().ok_or(FileIoError {
+                    path: abs_path.to_path_buf(),
+                    op: FileOp::Parent,
+                    source: std::io::Error::other("path has no parent"),
+                })?
+            }
+        };
+        open_file(parent)?.sync_all().context(FileIoSnafu {
+            path: parent,
+            op: FileOp::Sync,
+        })?;
     }
     Ok(())
 }
@@ -299,12 +348,38 @@ pub fn write_file_if_changed(path: impl AsRef<Path>, contents: impl AsRef<[u8]>)
             .map(|existing| existing != contents)
             .unwrap_or(true)
     };
+
+    match std::env::var("CARGO_PKG_NAME") {
+        Ok(pkg) if pkg == "anki_proto" || pkg == "anki_i18n" => {
+            // at comptime for the proto/i18n crates, register implicit output as input
+            println!("cargo:rerun-if-changed={}", path.to_str().unwrap());
+        }
+        _ => {}
+    }
+
     if changed {
         write_file(path, contents)?;
         Ok(true)
     } else {
         Ok(false)
     }
+}
+
+pub fn is_case_sensitive(dir: &Path) -> bool {
+    let opt = OpenOptions::new().write(true).create_new(true).to_owned();
+    for _ in 0..100 {
+        let fname = format!("__case-test-{}", rand::random::<u128>());
+        let fname_upper = fname.to_uppercase();
+        if open_file_ext(dir.join(&fname), opt.to_owned()).is_ok() {
+            let sensitive = open_file_ext(dir.join(&fname_upper), opt.to_owned()).is_ok();
+            let _ = std::fs::remove_file(dir.join(fname));
+            if sensitive {
+                let _ = std::fs::remove_file(dir.join(fname_upper));
+            }
+            return sensitive;
+        }
+    }
+    cfg!(unix) && !cfg!(target_os = "macos")
 }
 
 pub trait ToUtf8PathBuf {
@@ -337,6 +412,11 @@ impl ToUtf8Path for Path {
 
 #[cfg(test)]
 mod test {
+    use std::env;
+
+    use tempfile::tempdir;
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -353,5 +433,41 @@ mod test {
             assert!(!filename_is_safe("c:\\foo"));
             assert!(!filename_is_safe("\\foo"));
         }
+    }
+
+    struct TempCurrentDirectory {
+        old_cwd: PathBuf,
+
+        // We must hold ontop the TempDir reference so the directory doesn't get deleted. We don't
+        // actually need to read it, though.
+        #[allow(dead_code)]
+        tmp_cwd: TempDir,
+    }
+
+    impl TempCurrentDirectory {
+        fn new() -> Self {
+            let old_cwd = env::current_dir().unwrap();
+            let tmp_cwd = tempdir().unwrap();
+            env::set_current_dir(&tmp_cwd).unwrap();
+            Self { old_cwd, tmp_cwd }
+        }
+    }
+
+    impl Drop for TempCurrentDirectory {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.old_cwd).unwrap()
+        }
+    }
+
+    #[test]
+    fn test_atomic_rename_target_relative_path_one_component() {
+        let tmp_cwd = TempCurrentDirectory::new();
+
+        let tempfile = new_tempfile().unwrap();
+        let target = Path::new("new-file.txt");
+        atomic_rename(tempfile, target, true).unwrap();
+        assert!(target.exists());
+
+        drop(tmp_cwd);
     }
 }

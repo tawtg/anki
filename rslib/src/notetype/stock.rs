@@ -122,7 +122,7 @@ pub(crate) fn basic(tr: &I18n) -> Notetype {
 
 pub(crate) fn basic_typing(tr: &I18n) -> Notetype {
     let mut nt = basic(tr);
-    nt.config.original_stock_kind = StockKind::BasicTyping as i32;
+    nt.config.original_stock_kind = OriginalStockKind::BasicTyping as i32;
     nt.name = tr.notetypes_basic_type_answer_name().into();
     let front = tr.notetypes_front_field();
     let back = tr.notetypes_back_field();
@@ -138,7 +138,7 @@ pub(crate) fn basic_typing(tr: &I18n) -> Notetype {
 
 pub(crate) fn basic_forward_reverse(tr: &I18n) -> Notetype {
     let mut nt = basic(tr);
-    nt.config.original_stock_kind = StockKind::BasicAndReversed as i32;
+    nt.config.original_stock_kind = OriginalStockKind::BasicAndReversed as i32;
     nt.name = tr.notetypes_basic_reversed_name().into();
     let front = tr.notetypes_front_field();
     let back = tr.notetypes_back_field();
@@ -156,7 +156,7 @@ pub(crate) fn basic_forward_reverse(tr: &I18n) -> Notetype {
 
 pub(crate) fn basic_optional_reverse(tr: &I18n) -> Notetype {
     let mut nt = basic_forward_reverse(tr);
-    nt.config.original_stock_kind = StockKind::BasicOptionalReversed as i32;
+    nt.config.original_stock_kind = OriginalStockKind::BasicOptionalReversed as i32;
     nt.name = tr.notetypes_basic_optional_reversed_name().into();
     let addrev = tr.notetypes_add_reverse_field();
     nt.add_field(addrev.as_ref());
@@ -179,8 +179,8 @@ pub(crate) fn cloze(tr: &I18n) -> Notetype {
     let back_extra = tr.notetypes_back_extra_field();
     config = nt.add_field(back_extra.as_ref());
     config.tag = Some(ClozeField::BackExtra as u32);
-    let qfmt = format!("{{{{cloze:{}}}}}", text);
-    let afmt = format!("{}<br>\n{{{{{}}}}}", qfmt, back_extra);
+    let qfmt = format!("{{{{cloze:{text}}}}}");
+    let afmt = format!("{qfmt}<br>\n{{{{{back_extra}}}}}");
     nt.add_template(nt.name.clone(), qfmt, afmt);
     nt
 }

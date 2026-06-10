@@ -20,8 +20,10 @@ from aqt.profiles import VideoDriver
 from aqt.qt import *
 from aqt.sync import sync_login
 from aqt.theme import Theme
+from aqt.url_schemes import show_url_schemes_dialog
 from aqt.utils import (
     HelpPage,
+    add_ellipsis_to_action_label,
     askUser,
     disable_help_button,
     is_win,
@@ -78,11 +80,14 @@ class Preferences(QDialog):
         )
         group = self.form.preferences_answer_keys
         group.setLayout(layout := QFormLayout())
+        tab_widget: QWidget = self.form.url_schemes
         for ease, label in ease_labels:
             layout.addRow(
                 label,
                 line_edit := QLineEdit(self.mw.pm.get_answer_key(ease) or ""),
             )
+            QWidget.setTabOrder(tab_widget, line_edit)
+            tab_widget = line_edit
             qconnect(
                 line_edit.textChanged,
                 functools.partial(self.mw.pm.set_answer_key, ease),
@@ -150,6 +155,9 @@ class Preferences(QDialog):
         form.monthly_backups.setValue(self.prefs.backups.monthly)
         form.minutes_between_backups.setValue(self.prefs.backups.minimum_interval_mins)
 
+        add_ellipsis_to_action_label(self.form.url_schemes)
+        qconnect(self.form.url_schemes.clicked, show_url_schemes_dialog)
+
     def update_collection(self, on_done: Callable[[], None]) -> None:
         form = self.form
 
@@ -214,6 +222,14 @@ class Preferences(QDialog):
         self.form.check_for_updates.setChecked(self.mw.pm.check_for_updates())
         qconnect(self.form.check_for_updates.stateChanged, self.mw.pm.set_update_check)
 
+        self.form.check_for_addon_updates.setChecked(
+            self.mw.pm.check_for_addon_updates()
+        )
+        qconnect(
+            self.form.check_for_addon_updates.stateChanged,
+            self.mw.pm.set_check_for_addon_updates,
+        )
+
         self.update_login_status()
         qconnect(self.form.syncLogout.clicked, self.sync_logout)
         qconnect(self.form.syncLogin.clicked, self.sync_login)
@@ -250,6 +266,7 @@ class Preferences(QDialog):
                 self.update_login_status()
                 self.confirm_sync_after_login()
 
+        self.update_network()
         sync_login(self.mw, on_success)
 
     def sync_logout(self) -> None:

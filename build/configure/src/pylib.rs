@@ -10,11 +10,12 @@ use ninja_gen::glob;
 use ninja_gen::hashmap;
 use ninja_gen::inputs;
 use ninja_gen::python::python_format;
+use ninja_gen::python::Complexipy;
 use ninja_gen::python::PythonTest;
 use ninja_gen::Build;
 
 use crate::anki_version;
-use crate::platform::overriden_python_target_platform;
+use crate::platform::overriden_python_wheel_platform;
 use crate::python::BuildWheel;
 use crate::python::GenPythonProto;
 
@@ -50,7 +51,7 @@ pub fn build_pylib(build: &mut Build) -> Result<()> {
             output: &format!(
                 "pylib/anki/_rsbridge.{}",
                 match build.host_platform {
-                    Platform::WindowsX64 => "pyd",
+                    Platform::WindowsX64 | Platform::WindowsArm => "pyd",
                     _ => "so",
                 }
             ),
@@ -64,14 +65,14 @@ pub fn build_pylib(build: &mut Build) -> Result<()> {
         BuildWheel {
             name: "anki",
             version: anki_version(),
-            src_folder: "pylib/anki",
-            gen_folder: "$builddir/pylib/anki",
-            platform: overriden_python_target_platform().or(Some(build.host_platform)),
+            platform: overriden_python_wheel_platform().or(Some(build.host_platform)),
             deps: inputs![
                 ":pylib:anki",
                 glob!("pylib/anki/**"),
-                "python/requirements.anki.in",
+                "pylib/pyproject.toml",
+                "pylib/hatch_build.py"
             ],
+            project_dir: "pylib",
         },
     )?;
     Ok(())
@@ -86,6 +87,14 @@ pub fn check_pylib(build: &mut Build) -> Result<()> {
             folder: "pylib/tests",
             python_path: &["$builddir/pylib"],
             deps: inputs![":pylib:anki", glob!["pylib/{anki,tests}/**"]],
+        },
+    )?;
+
+    build.add_action(
+        "check:complexity:pylib",
+        Complexipy {
+            folders: &["pylib"],
+            deps: inputs![":pylib"],
         },
     )
 }

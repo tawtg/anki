@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import pickle
@@ -94,6 +95,8 @@ metaConf = dict(
     defaultLang=None,
 )
 
+# Old Anki versions expected these keys to exist. Don't add new ones here - it's better practice
+# to always use profile.get(..., defaultValue) instead, as keys may be missing.
 profileConf: dict[str, Any] = dict(
     # profile
     mainWindowGeom=None,
@@ -126,7 +129,7 @@ class ProfileManager:
     default_answer_keys = {ease_num: str(ease_num) for ease_num in range(1, 5)}
     last_run_version: int = 0
 
-    def __init__(self, base: Path) -> None:  #
+    def __init__(self, base: Path) -> None:
         "base should be retrieved via ProfileMangager.get_created_base_folder"
         ## Settings which should be forgotten each Anki restart
         self.session: dict[str, Any] = {}
@@ -151,7 +154,7 @@ class ProfileManager:
         else:
             try:
                 self.load(profile)
-            except Exception as exc:
+            except Exception:
                 self.invalid_profile_provided_on_commandline = True
 
     # Profile load/save
@@ -187,11 +190,8 @@ class ProfileManager:
                                 # return the bytes directly
                                 return args[0]
                         elif name == "_unpickle_enum":
-                            if qtmajor == 5:
-                                return sip._unpickle_enum(module, klass, args)  # type: ignore
-                            else:
-                                # old style enums can't be unpickled
-                                return None
+                            # old style enums can't be unpickled
+                            return None
                         else:
                             return sip._unpickle_type(module, klass, args)  # type: ignore
 
@@ -291,6 +291,8 @@ class ProfileManager:
         except Exception as e:
             self.db.rollback()
             if "WinError 5" in str(e):
+                showWarning(tr.profiles_anki_could_not_rename_your_profile())
+            elif isinstance(e, OSError) and e.errno == errno.ENAMETOOLONG:
                 showWarning(tr.profiles_anki_could_not_rename_your_profile())
             else:
                 raise
@@ -484,7 +486,11 @@ create table if not exists profiles
         code = obj[1]
         name = obj[0]
         r = QMessageBox.question(
-            None, "Anki", tr.profiles_confirm_lang_choice(lang=name), QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No  # type: ignore
+            None,
+            "Anki",
+            tr.profiles_confirm_lang_choice(lang=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,  # type: ignore
         )
         if r != QMessageBox.StandardButton.Yes:
             return self.setDefaultLang(f.lang.currentRow())
@@ -593,6 +599,12 @@ create table if not exists profiles
     def set_last_addon_update_check(self, secs: int) -> None:
         self.meta["last_addon_update_check"] = secs
 
+    def check_for_addon_updates(self) -> bool:
+        return self.meta.get("check_for_addon_updates", True)
+
+    def set_check_for_addon_updates(self, on: bool) -> None:
+        self.meta["check_for_addon_updates"] = on
+
     @deprecated(info="use theme_manager.night_mode")
     def night_mode(self) -> bool:
         return theme_manager.night_mode
@@ -698,6 +710,12 @@ create table if not exists profiles
     def set_current_sync_url(self, url: str | None) -> None:
         self.profile["currentSyncUrl"] = url
 
+    def middle_click_paste_enabled(self) -> bool:
+        return self.profile.get("middleClickPasteEnabled", True)
+
+    def set_middle_click_paste_enabled(self, val: bool) -> None:
+        self.profile["middleClickPasteEnabled"] = val
+
     def custom_sync_url(self) -> str | None:
         """A custom server provided by the user."""
         return self.profile.get("customSyncUrl")
@@ -736,3 +754,17 @@ create table if not exists profiles
 
     def ankihub_username(self) -> str | None:
         return self.profile.get("thirdPartyAnkiHubUsername")
+
+    def allowed_url_schemes(self) -> list[str]:
+        return self.profile.get("allowedUrlSchemes", [])
+
+    def set_allowed_url_schemes(self, schemes: list[str]) -> None:
+        self.profile["allowedUrlSchemes"] = schemes
+
+    def always_allow_scheme(self, scheme: str) -> None:
+        schemes = self.allowed_url_schemes()
+
+        if scheme not in schemes:
+            schemes.append(scheme)
+
+        self.set_allowed_url_schemes(schemes)

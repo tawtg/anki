@@ -16,7 +16,6 @@ from aqt.operations.deck import set_current_deck
 from aqt.qt import *
 from aqt.theme import theme_manager
 from aqt.utils import (
-    addCloseShortcut,
     disable_help_button,
     getSaveFile,
     maybeHideClose,
@@ -25,7 +24,7 @@ from aqt.utils import (
     tooltip,
     tr,
 )
-from aqt.webview import AnkiWebViewKind
+from aqt.webview import LegacyStatsWebView
 
 
 class NewDeckStats(QDialog):
@@ -69,9 +68,7 @@ class NewDeckStats(QDialog):
         assert b is not None
         b.setAutoDefault(False)
         maybeHideClose(self.form.buttonBox)
-        addCloseShortcut(self)
         gui_hooks.stats_dialog_will_show(self)
-        self.form.web.set_kind(AnkiWebViewKind.DECK_STATS)
         self.form.web.hide_while_preserving_layout()
         self.show()
         self.refresh()
@@ -154,6 +151,9 @@ class DeckStats(QDialog):
         self.name = "deckStats"
         self.period = 0
         self.form = aqt.forms.stats.Ui_Dialog()
+        # Hack: Switch out web views dynamically to avoid maintaining multiple
+        # Qt forms for different versions of the stats dialog.
+        self.form.web = LegacyStatsWebView(self.mw)
         self.oldPos = None
         self.wholeCollection = False
         self.setMinimumWidth(700)
@@ -180,7 +180,6 @@ class DeckStats(QDialog):
         qconnect(f.year.clicked, lambda: self.changePeriod(1))
         qconnect(f.life.clicked, lambda: self.changePeriod(2))
         maybeHideClose(self.form.buttonBox)
-        addCloseShortcut(self)
         gui_hooks.stats_dialog_old_will_show(self)
         self.show()
         self.refresh()
@@ -232,7 +231,6 @@ class DeckStats(QDialog):
         stats = self.mw.col.stats()
         stats.wholeCollection = self.wholeCollection
         self.report = stats.report(type=self.period)
-        self.form.web.set_kind(AnkiWebViewKind.LEGACY_DECK_STATS)
         self.form.web.stdHtml(
             f"<html><body>{self.report}</body></html>",
             js=["js/vendor/jquery.min.js", "js/vendor/plot.js"],

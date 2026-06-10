@@ -18,7 +18,7 @@ from anki._legacy import DeprecatedNamesMixinForModule
 TR = anki._fluent.LegacyTranslationEnum
 FormatTimeSpan = _pb.FormatTimespanRequest
 
-
+# When adding new languages here, check lang_to_disk_lang() below
 langs = sorted(
     [
         ("Afrikaans", "af_ZA"),
@@ -38,6 +38,7 @@ langs = sorted(
         ("Italiano", "it_IT"),
         ("lo jbobau", "jbo_EN"),
         ("Lenga d'òc", "oc_FR"),
+        ("Қазақша", "kk_KZ"),
         ("Magyar", "hu_HU"),
         ("Nederlands", "nl_NL"),
         ("Norsk", "nb_NO"),
@@ -64,6 +65,7 @@ langs = sorted(
         ("Українська мова", "uk_UA"),
         ("Հայերեն", "hy_AM"),
         ("עִבְרִית", "he_IL"),
+        ("ייִדיש", "yi"),
         ("العربية", "ar_SA"),
         ("فارسی", "fa_IR"),
         ("ภาษาไทย", "th_TH"),
@@ -73,6 +75,7 @@ langs = sorted(
         ("ଓଡ଼ିଆ", "or_OR"),
         ("Filipino", "tl"),
         ("ئۇيغۇر", "ug"),
+        ("Oʻzbekcha", "uz_UZ"),
     ]
 )
 
@@ -103,6 +106,7 @@ compatMap = {
     "it": "it_IT",
     "ja": "ja_JP",
     "jbo": "jbo_EN",
+    "kk": "kk_KZ",
     "ko": "ko_KR",
     "la": "la_LA",
     "mn": "mn_MN",
@@ -123,7 +127,9 @@ compatMap = {
     "th": "th_TH",
     "tr": "tr_TR",
     "uk": "uk_UA",
+    "uz": "uz_UZ",
     "vi": "vi_VN",
+    "yi": "yi",
 }
 
 
@@ -157,13 +163,13 @@ def lang_to_disk_lang(lang: str) -> str:
 
 
 # the currently set interface language
-current_lang = "en"  # pylint: disable=invalid-name
+current_lang = "en"
 
 # the current Fluent translation instance. Code in pylib/ should
 # not reference this, and should use col.tr instead. The global
 # instance exists for legacy reasons, and as a convenience for the
 # Qt code.
-current_i18n: anki._backend.RustBackend | None = None  # pylint: disable=invalid-name
+current_i18n: anki._backend.RustBackend | None = None
 tr_legacyglobal = anki._backend.Translations(None)
 
 
@@ -178,7 +184,7 @@ def ngettext(single: str, plural: str, num: int) -> str:
 
 
 def set_lang(lang: str) -> None:
-    global current_lang, current_i18n  # pylint: disable=invalid-name
+    global current_lang, current_i18n
     current_lang = lang
     current_i18n = anki._backend.RustBackend(langs=[lang])
     tr_legacyglobal.backend = weakref.ref(current_i18n)
@@ -231,7 +237,7 @@ def get_def_lang(user_lang: str | None = None) -> tuple[int, str]:
 
 
 def is_rtl(lang: str) -> bool:
-    return lang in ("he", "ar", "fa", "ug")
+    return lang in ("he", "ar", "fa", "ug", "yi")
 
 
 # strip off unicode isolation markers from a translated string

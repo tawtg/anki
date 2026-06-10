@@ -7,7 +7,7 @@ import { TEXT_BACKGROUND_COLOR, TEXT_COLOR, TEXT_FONT_FAMILY, TEXT_FONT_SIZE, TE
 import type { ConstructorParams, Size } from "../types";
 import type { ShapeDataForCloze } from "./base";
 import { Shape } from "./base";
-import { floatToDisplay } from "./floats";
+import { floatToDisplay } from "./lib";
 
 export class Text extends Shape {
     text: string;
@@ -19,15 +19,17 @@ export class Text extends Shape {
         text = "",
         scaleX = 1,
         scaleY = 1,
+        fill = TEXT_COLOR,
         fontSize,
         ...rest
     }: ConstructorParams<Text> = {}) {
         super(rest);
-        this.fill = TEXT_COLOR;
+        this.fill = fill;
         this.text = text;
         this.scaleX = scaleX;
         this.scaleY = scaleY;
         this.fontSize = fontSize;
+        this.id = "text-" + new Date().getTime();
     }
 
     toDataForCloze(): TextDataForCloze {
@@ -37,6 +39,7 @@ export class Text extends Shape {
             // scaleX and scaleY are guaranteed to be equal since we lock the aspect ratio
             scale: floatToDisplay(this.scaleX),
             fs: this.fontSize ? floatToDisplay(this.fontSize) : undefined,
+            ...(this.fill === TEXT_COLOR ? {} : { fill: this.fill }),
         };
     }
 

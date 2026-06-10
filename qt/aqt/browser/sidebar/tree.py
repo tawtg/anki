@@ -28,6 +28,7 @@ from aqt.browser.sidebar.model import SidebarModel
 from aqt.browser.sidebar.searchbar import SidebarSearchBar
 from aqt.browser.sidebar.toolbar import SidebarTool, SidebarToolbar
 from aqt.clayout import CardLayout
+from aqt.errors import show_exception
 from aqt.fields import FieldDialog
 from aqt.models import Models
 from aqt.operations import CollectionOp, QueryOp
@@ -106,7 +107,7 @@ class SidebarTreeView(QTreeView):
     def _setup_style(self) -> None:
         # match window background color and tweak style
         bgcolor = QPalette().window().color().name()
-        border = theme_manager.var(colors.BORDER)
+        theme_manager.var(colors.BORDER)
         styles = [
             "padding: 3px",
             "padding-right: 0px",
@@ -711,7 +712,6 @@ class SidebarTreeView(QTreeView):
 
     def _flags_tree(self, root: SidebarItem) -> None:
         icon_off = "icons:flag-variant-off-outline.svg"
-        icon = "icons:flag-variant.svg"
         icon_outline = "icons:flag-variant-outline.svg"
 
         root = self._section_root(
@@ -1147,11 +1147,16 @@ class SidebarTreeView(QTreeView):
                 item.name = old_name
                 showInfo(tr.browsing_tag_rename_warning_empty(), parent=self)
 
+        def failure(exc: Exception) -> None:
+            item.full_name = old_full_name
+            item.name = old_name
+            show_exception(parent=self.browser, exception=exc)
+
         rename_tag(
             parent=self.browser,
             current_name=old_full_name,
             new_name=new_full_name,
-        ).success(success).run_in_background()
+        ).success(success).failure(failure).run_in_background()
 
     def add_tags_to_selected_notes(self) -> None:
         tags = " ".join(item.full_name for item in self._selected_items())

@@ -32,6 +32,7 @@ def test_find_cards():
     note = col.newNote()
     note["Front"] = "cat"
     note["Back"] = "sheep"
+    note.tags.append("conjunção größte")
     col.addNote(note)
     catCard = note.cards()[0]
     m = col.models.current()
@@ -68,6 +69,8 @@ def test_find_cards():
     col.tags.bulk_remove(col.db.list("select id from notes"), "foo")
     assert len(col.find_cards("tag:foo")) == 0
     assert len(col.find_cards("tag:bar")) == 5
+    assert len(col.find_cards("tag:conjuncao tag:groste")) == 0
+    assert len(col.find_cards("tag:nc:conjuncao tag:nc:groste")) == 1
     # text searches
     assert len(col.find_cards("cat")) == 2
     assert len(col.find_cards("cat -dog")) == 1
@@ -169,8 +172,7 @@ def test_find_cards():
     # properties
     id = col.db.scalar("select id from cards limit 1")
     col.db.execute(
-        "update cards set queue=2, ivl=10, reps=20, due=30, factor=2200 "
-        "where id = ?",
+        "update cards set queue=2, ivl=10, reps=20, due=30, factor=2200 where id = ?",
         id,
     )
     assert len(col.find_cards("prop:ivl>5")) == 1

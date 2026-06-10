@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Generator, Sequence
 from typing import Any, Literal, Union, cast
 
 from anki import (
@@ -12,6 +12,7 @@ from anki import (
     collection_pb2,
     config_pb2,
     generic_pb2,
+    github_pb2,
     image_occlusion_pb2,
     import_export_pb2,
     links_pb2,
@@ -58,11 +59,11 @@ CheckForUpdateResponse = ankiweb_pb2.CheckForUpdateResponse
 MediaSyncStatus = sync_pb2.MediaSyncStatusResponse
 FsrsItem = scheduler_pb2.FsrsItem
 FsrsReview = scheduler_pb2.FsrsReview
+GithubRelease = github_pb2.GithubRelease
 
+import logging
 import os
-import sys
 import time
-import traceback
 import weakref
 from dataclasses import dataclass
 
@@ -95,6 +96,7 @@ from anki.utils import (
 
 anki.latex.setup_hook()
 
+logger = logging.getLogger(__name__)
 
 SearchJoiner = Literal["AND", "OR"]
 
@@ -122,6 +124,7 @@ class ComputedMemoryState:
     desired_retention: float
     stability: float | None = None
     difficulty: float | None = None
+    decay: float | None = None
 
 
 @dataclass
@@ -157,7 +160,7 @@ class Collection(DeprecatedNamesMixin):
         self.tags = TagManager(self)
         self.conf = ConfigManager(self)
         self._load_scheduler()
-        self._startReps = 0  # pylint: disable=invalid-name
+        self._startReps = 0
 
     def name(self) -> Any:
         return os.path.splitext(os.path.basename(self.path))[0]
@@ -168,10 +171,9 @@ class Collection(DeprecatedNamesMixin):
 
     @property
     def backend(self) -> RustBackend:
-        traceback.print_stack(file=sys.stdout)
-        print()
-        print(
-            "Accessing the backend directly will break in the future. Please use the public methods on Collection instead."
+        logger.warning(
+            "Accessing the backend directly will break in the future. Please use the public methods on Collection instead.",
+            stack_info=True,
         )
         return self._backend
 
@@ -510,9 +512,7 @@ class Collection(DeprecatedNamesMixin):
     # Utils
     ##########################################################################
 
-    def nextID(  # pylint: disable=invalid-name
-        self, type: str, inc: bool = True
-    ) -> Any:
+    def nextID(self, type: str, inc: bool = True) -> Any:
         type = f"next{type.capitalize()}"
         id = self.conf.get(type, 1)
         if inc:
@@ -529,13 +529,13 @@ class Collection(DeprecatedNamesMixin):
     def new_note(self, notetype: NotetypeDict) -> Note:
         return Note(self, notetype)
 
-    def add_note(self, note: Note, deck_id: DeckId) -> OpChanges:
+    def add_note(self, note: Note, deck_id: DeckId) -> OpChangesWithCount:
         hooks.note_will_be_added(self, note, deck_id)
         out = self._backend.add_note(note=note._to_backend_note(), deck_id=deck_id)
         note.id = NoteId(out.note_id)
         return out.changes
 
-    def add_notes(self, requests: Iterable[AddNoteRequest]) -> OpChanges:
+    def add_notes(self, requests: Sequence[AddNoteRequest]) -> OpChanges:
         for request in requests:
             hooks.note_will_be_added(self, request.note, request.deck_id)
         out = self._backend.add_notes(
@@ -848,7 +848,6 @@ class Collection(DeprecatedNamesMixin):
         )
 
     def _pb_search_separator(self, operator: SearchJoiner) -> SearchNode.Group.Joiner.V:
-        # pylint: disable=no-member
         if operator == "AND":
             return SearchNode.Group.Joiner.AND
         else:
@@ -866,7 +865,9 @@ class Collection(DeprecatedNamesMixin):
                 return column
         return None
 
-    def browser_row_for_id(self, id_: int) -> tuple[
+    def browser_row_for_id(
+        self, id_: int
+    ) -> tuple[
         Generator[tuple[str, bool, BrowserRow.Cell.TextElideMode.V], None, None],
         BrowserRow.Color.V,
         str,
@@ -1189,9 +1190,13 @@ class Collection(DeprecatedNamesMixin):
                 desired_retention=resp.desired_retention,
                 stability=resp.state.stability,
                 difficulty=resp.state.difficulty,
+                decay=resp.decay,
             )
         else:
-            return ComputedMemoryState(desired_retention=resp.desired_retention)
+            return ComputedMemoryState(
+                desired_retention=resp.desired_retention,
+                decay=resp.decay,
+            )
 
     def fuzz_delta(self, card_id: CardId, interval: int) -> int:
         "The delta days of fuzz applied if reviewing the card in v3."
@@ -1206,8 +1211,6 @@ class Collection(DeprecatedNamesMixin):
     # other locations like overview.py. We just need to make sure not to reset
     # the count on things like edits, which we probably could do by checking
     # the previous state in moveToState.
-
-    # pylint: disable=invalid-name
 
     def startTimebox(self) -> None:
         self._startTime = time.time()

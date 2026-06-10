@@ -117,7 +117,7 @@ fn captured_sound(caps: &Captures) -> bool {
     caps.get(2).unwrap().as_str().starts_with("sound:")
 }
 
-fn kana_filter(text: &str) -> Cow<str> {
+fn kana_filter(text: &str) -> Cow<'_, str> {
     FURIGANA
         .replace_all(&text.replace("&nbsp;", " "), |caps: &Captures| {
             if captured_sound(caps) {
@@ -130,7 +130,7 @@ fn kana_filter(text: &str) -> Cow<str> {
         .into()
 }
 
-fn kanji_filter(text: &str) -> Cow<str> {
+fn kanji_filter(text: &str) -> Cow<'_, str> {
     FURIGANA
         .replace_all(&text.replace("&nbsp;", " "), |caps: &Captures| {
             if captured_sound(caps) {
@@ -143,7 +143,7 @@ fn kanji_filter(text: &str) -> Cow<str> {
         .into()
 }
 
-fn furigana_filter(text: &str) -> Cow<str> {
+fn furigana_filter(text: &str) -> Cow<'_, str> {
     FURIGANA
         .replace_all(&text.replace("&nbsp;", " "), |caps: &Captures| {
             if captured_sound(caps) {
@@ -165,15 +165,15 @@ fn furigana_filter(text: &str) -> Cow<str> {
 
 /// convert to [[type:...]] for the gui code to process
 fn type_filter<'a>(field_name: &str) -> Cow<'a, str> {
-    format!("[[type:{}]]", field_name).into()
+    format!("[[type:{field_name}]]").into()
 }
 
 fn type_cloze_filter<'a>(field_name: &str) -> Cow<'a, str> {
-    format!("[[type:cloze:{}]]", field_name).into()
+    format!("[[type:cloze:{field_name}]]").into()
 }
 
 fn type_nc_filter<'a>(field_name: &str) -> Cow<'a, str> {
-    format!("[[type:nc:{}]]", field_name).into()
+    format!("[[type:nc:{field_name}]]").into()
 }
 
 fn hint_filter<'a>(text: &'a str, field_name: &str) -> Cow<'a, str> {
@@ -191,18 +191,17 @@ fn hint_filter<'a>(text: &'a str, field_name: &str) -> Cow<'a, str> {
         r##"
 <a class=hint href="#"
 onclick="this.style.display='none';
-document.getElementById('hint{}').style.display='block';
+document.getElementById('hint{id}').style.display='block';
 return false;" draggable=false>
-{}</a>
-<div id="hint{}" class=hint style="display: none">{}</div>
-"##,
-        id, field_name, id, text
+{field_name}</a>
+<div id="hint{id}" class=hint style="display: none">{text}</div>
+"##
     )
     .into()
 }
 
 fn tts_filter(options: &str, text: &str) -> String {
-    format!("[anki:tts lang={}]{}[/anki:tts]", options, text)
+    format!("[anki:tts lang={options}]{text}[/anki:tts]")
 }
 
 // Tests

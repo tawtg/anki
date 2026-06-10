@@ -44,6 +44,7 @@ html {
 }
 
 body {
+    font-family: inherit;
     overflow-x: hidden;
     &:not(.isMac),
     &:not(.isMac) * {
@@ -75,6 +76,9 @@ input[type="radio"],
 input[type="checkbox"] {
     cursor: pointer;
 }
+
+textarea,
+input[type="date"],
 input[type="text"] {
     border-radius: prop(border-radius);
     outline: none;

@@ -3,6 +3,7 @@
 
 use std::sync::LazyLock;
 
+use anki_proto::search::search_node::FieldSearchMode as FieldSearchModeProto;
 use nom::branch::alt;
 use nom::bytes::complete::escaped;
 use nom::bytes::complete::is_not;
@@ -19,6 +20,7 @@ use nom::error::ErrorKind as NomErrorKind;
 use nom::multi::many0;
 use nom::sequence::preceded;
 use nom::sequence::separated_pair;
+use nom::Parser;
 use regex::Captures;
 use regex::Regex;
 
@@ -26,7 +28,6 @@ use crate::error::ParseError;
 use crate::error::Result;
 use crate::error::SearchErrorKind as FailKind;
 use crate::prelude::*;
-
 type IResult<'a, O> = std::result::Result<(&'a str, O), nom::Err<ParseError<'a>>>;
 type ParseResult<'a, O> = std::result::Result<O, nom::Err<ParseError<'a>>>;
 
@@ -47,6 +48,23 @@ pub enum Node {
     Search(SearchNode),
 }
 
+#[derive(Copy, Debug, PartialEq, Eq, Clone)]
+pub enum FieldSearchMode {
+    Normal,
+    Regex,
+    NoCombining,
+}
+
+impl From<FieldSearchModeProto> for FieldSearchMode {
+    fn from(mode: FieldSearchModeProto) -> Self {
+        match mode {
+            FieldSearchModeProto::Normal => Self::Normal,
+            FieldSearchModeProto::Regex => Self::Regex,
+            FieldSearchModeProto::Nocombining => Self::NoCombining,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum SearchNode {
     // text without a colon
@@ -55,7 +73,7 @@ pub enum SearchNode {
     SingleField {
         field: String,
         text: String,
-        is_re: bool,
+        mode: FieldSearchMode,
     },
     AddedInDays(u32),
     EditedInDays(u32),
@@ -76,7 +94,7 @@ pub enum SearchNode {
     },
     Tag {
         tag: String,
-        is_re: bool,
+        mode: FieldSearchMode,
     },
     Duplicates {
         notetype_id: NotetypeId,
@@ -93,6 +111,7 @@ pub enum SearchNode {
     WholeCollection,
     Regex(String),
     NoCombining(String),
+    StripClozes(String),
     WordBoundary(String),
     CustomData(String),
     Preset(String),
@@ -156,7 +175,7 @@ pub fn parse(input: &str) -> Result<Vec<Node>> {
 
 /// Zero or more nodes inside brackets, eg 'one OR two -three'.
 /// Empty vec must be handled by caller.
-fn group_inner(input: &str) -> IResult<Vec<Node>> {
+fn group_inner(input: &str) -> IResult<'_, Vec<Node>> {
     let mut remaining = input;
     let mut nodes = vec![];
 
@@ -201,23 +220,24 @@ fn group_inner(input: &str) -> IResult<Vec<Node>> {
     Ok((remaining, nodes))
 }
 
-fn whitespace0(s: &str) -> IResult<Vec<char>> {
-    many0(one_of(" \u{3000}"))(s)
+fn whitespace0(s: &str) -> IResult<'_, Vec<char>> {
+    many0(one_of(" \u{3000}")).parse(s)
 }
 
 /// Optional leading space, then a (negated) group or text
-fn node(s: &str) -> IResult<Node> {
-    preceded(whitespace0, alt((negated_node, group, text)))(s)
+fn node(s: &str) -> IResult<'_, Node> {
+    preceded(whitespace0, alt((negated_node, group, text))).parse(s)
 }
 
-fn negated_node(s: &str) -> IResult<Node> {
+fn negated_node(s: &str) -> IResult<'_, Node> {
     map(preceded(char('-'), alt((group, text))), |node| {
         Node::Not(Box::new(node))
-    })(s)
+    })
+    .parse(s)
 }
 
 /// One or more nodes surrounded by brackets, eg (one OR two)
-fn group(s: &str) -> IResult<Node> {
+fn group(s: &str) -> IResult<'_, Node> {
     let (opened, _) = char('(')(s)?;
     let (tail, inner) = group_inner(opened)?;
     if let Some(remaining) = tail.strip_prefix(')') {
@@ -232,23 +252,24 @@ fn group(s: &str) -> IResult<Node> {
 }
 
 /// Either quoted or unquoted text
-fn text(s: &str) -> IResult<Node> {
-    alt((quoted_term, partially_quoted_term, unquoted_term))(s)
+fn text(s: &str) -> IResult<'_, Node> {
+    alt((quoted_term, partially_quoted_term, unquoted_term)).parse(s)
 }
 
 /// Quoted text, including the outer double quotes.
-fn quoted_term(s: &str) -> IResult<Node> {
+fn quoted_term(s: &str) -> IResult<'_, Node> {
     let (remaining, term) = quoted_term_str(s)?;
     Ok((remaining, Node::Search(search_node_for_text(term)?)))
 }
 
 /// eg deck:"foo bar" - quotes must come after the :
-fn partially_quoted_term(s: &str) -> IResult<Node> {
+fn partially_quoted_term(s: &str) -> IResult<'_, Node> {
     let (remaining, (key, val)) = separated_pair(
         escaped(is_not("\"(): \u{3000}\\"), '\\', none_of(" \u{3000}")),
         char(':'),
         quoted_term_str,
-    )(s)?;
+    )
+    .parse(s)?;
     Ok((
         remaining,
         Node::Search(search_node_for_text_with_argument(key, val)?),
@@ -256,7 +277,7 @@ fn partially_quoted_term(s: &str) -> IResult<Node> {
 }
 
 /// Unquoted text, terminated by whitespace or unescaped ", ( or )
-fn unquoted_term(s: &str) -> IResult<Node> {
+fn unquoted_term(s: &str) -> IResult<'_, Node> {
     match escaped(is_not("\"() \u{3000}\\"), '\\', none_of(" \u{3000}"))(s) {
         Ok((tail, term)) => {
             if term.is_empty() {
@@ -274,7 +295,7 @@ fn unquoted_term(s: &str) -> IResult<Node> {
                 Err(parse_failure(
                     s,
                     FailKind::UnknownEscape {
-                        provided: format!("\\{}", c),
+                        provided: format!("\\{c}"),
                     },
                 ))
             } else if "\"() \u{3000}".contains(s.chars().next().unwrap()) {
@@ -293,10 +314,10 @@ fn unquoted_term(s: &str) -> IResult<Node> {
 }
 
 /// Non-empty string delimited by unescaped double quotes.
-fn quoted_term_str(s: &str) -> IResult<&str> {
+fn quoted_term_str(s: &str) -> IResult<'_, &str> {
     let (opened, _) = char('"')(s)?;
     if let Ok((tail, inner)) =
-        escaped::<_, ParseError, _, _, _, _>(is_not(r#""\"#), '\\', anychar)(opened)
+        escaped::<_, ParseError, _, _>(is_not(r#""\"#), '\\', anychar).parse(opened)
     {
         if let Ok((remaining, _)) = char::<_, ParseError>('"')(tail) {
             Ok((remaining, inner))
@@ -317,11 +338,12 @@ fn quoted_term_str(s: &str) -> IResult<&str> {
 
 /// Determine if text is a qualified search, and handle escaped chars.
 /// Expect well-formed input: unempty and no trailing \.
-fn search_node_for_text(s: &str) -> ParseResult<SearchNode> {
+fn search_node_for_text(s: &str) -> ParseResult<'_, SearchNode> {
     // leading : is only possible error for well-formed input
     let (tail, head) = verify(escaped(is_not(r":\"), '\\', anychar), |t: &str| {
         !t.is_empty()
-    })(s)
+    })
+    .parse(s)
     .map_err(|_: nom::Err<ParseError>| parse_failure(s, FailKind::MissingKey))?;
     if tail.is_empty() {
         Ok(SearchNode::UnqualifiedText(unescape(head)?))
@@ -354,6 +376,7 @@ fn search_node_for_text_with_argument<'a>(
         "cid" => SearchNode::CardIds(check_id_list(val, key)?.into()),
         "re" => SearchNode::Regex(unescape_quotes(val)),
         "nc" => SearchNode::NoCombining(unescape(val)?),
+        "sc" => SearchNode::StripClozes(unescape(val)?),
         "w" => SearchNode::WordBoundary(unescape(val)?),
         "dupe" => parse_dupe(val)?,
         "has-cd" => SearchNode::CustomData(unescape(val)?),
@@ -363,21 +386,26 @@ fn search_node_for_text_with_argument<'a>(
     })
 }
 
-fn parse_tag(s: &str) -> ParseResult<SearchNode> {
+fn parse_tag(s: &str) -> ParseResult<'_, SearchNode> {
     Ok(if let Some(re) = s.strip_prefix("re:") {
         SearchNode::Tag {
             tag: unescape_quotes(re),
-            is_re: true,
+            mode: FieldSearchMode::Regex,
+        }
+    } else if let Some(nc) = s.strip_prefix("nc:") {
+        SearchNode::Tag {
+            tag: unescape(nc)?,
+            mode: FieldSearchMode::NoCombining,
         }
     } else {
         SearchNode::Tag {
             tag: unescape(s)?,
-            is_re: false,
+            mode: FieldSearchMode::Normal,
         }
     })
 }
 
-fn parse_template(s: &str) -> ParseResult<SearchNode> {
+fn parse_template(s: &str) -> ParseResult<'_, SearchNode> {
     Ok(SearchNode::CardTemplate(match s.parse::<u16>() {
         Ok(n) => TemplateKind::Ordinal(n.max(1) - 1),
         Err(_) => TemplateKind::Name(unescape(s)?),
@@ -385,7 +413,7 @@ fn parse_template(s: &str) -> ParseResult<SearchNode> {
 }
 
 /// flag:0-7
-fn parse_flag(s: &str) -> ParseResult<SearchNode> {
+fn parse_flag(s: &str) -> ParseResult<'_, SearchNode> {
     if let Ok(flag) = s.parse::<u8>() {
         if flag > 7 {
             Err(parse_failure(s, FailKind::InvalidFlag))
@@ -398,7 +426,7 @@ fn parse_flag(s: &str) -> ParseResult<SearchNode> {
 }
 
 /// eg resched:3
-fn parse_resched(s: &str) -> ParseResult<SearchNode> {
+fn parse_resched(s: &str) -> ParseResult<'_, SearchNode> {
     parse_u32(s, "resched:").map(|days| SearchNode::Rated {
         days,
         ease: RatingKind::ManualReschedule,
@@ -406,8 +434,8 @@ fn parse_resched(s: &str) -> ParseResult<SearchNode> {
 }
 
 /// eg prop:ivl>3, prop:ease!=2.5
-fn parse_prop(prop_clause: &str) -> ParseResult<SearchNode> {
-    let (tail, prop) = alt::<_, _, ParseError, _>((
+fn parse_prop(prop_clause: &str) -> ParseResult<'_, SearchNode> {
+    let (tail, prop) = alt((
         tag("ivl"),
         tag("due"),
         tag("reps"),
@@ -421,8 +449,9 @@ fn parse_prop(prop_clause: &str) -> ParseResult<SearchNode> {
         tag("r"),
         recognize(preceded(tag("cdn:"), alphanumeric1)),
         recognize(preceded(tag("cds:"), alphanumeric1)),
-    ))(prop_clause)
-    .map_err(|_| {
+    ))
+    .parse(prop_clause)
+    .map_err(|_: nom::Err<ParseError>| {
         parse_failure(
             prop_clause,
             FailKind::InvalidPropProperty {
@@ -431,15 +460,16 @@ fn parse_prop(prop_clause: &str) -> ParseResult<SearchNode> {
         )
     })?;
 
-    let (num, operator) = alt::<_, _, ParseError, _>((
+    let (num, operator) = alt((
         tag("<="),
         tag(">="),
         tag("!="),
         tag("="),
         tag("<"),
         tag(">"),
-    ))(tail)
-    .map_err(|_| {
+    ))
+    .parse(tail)
+    .map_err(|_: nom::Err<ParseError>| {
         parse_failure(
             prop_clause,
             FailKind::InvalidPropOperator {
@@ -572,23 +602,23 @@ fn parse_prop_rated<'a>(num: &str, context: &'a str) -> ParseResult<'a, Property
 }
 
 /// eg added:1
-fn parse_added(s: &str) -> ParseResult<SearchNode> {
+fn parse_added(s: &str) -> ParseResult<'_, SearchNode> {
     parse_u32(s, "added:").map(|n| SearchNode::AddedInDays(n.max(1)))
 }
 
 /// eg edited:1
-fn parse_edited(s: &str) -> ParseResult<SearchNode> {
+fn parse_edited(s: &str) -> ParseResult<'_, SearchNode> {
     parse_u32(s, "edited:").map(|n| SearchNode::EditedInDays(n.max(1)))
 }
 
 /// eg introduced:1
-fn parse_introduced(s: &str) -> ParseResult<SearchNode> {
+fn parse_introduced(s: &str) -> ParseResult<'_, SearchNode> {
     parse_u32(s, "introduced:").map(|n| SearchNode::IntroducedInDays(n.max(1)))
 }
 
 /// eg rated:3 or rated:10:2
 /// second arg must be between 1-4
-fn parse_rated(s: &str) -> ParseResult<SearchNode> {
+fn parse_rated(s: &str) -> ParseResult<'_, SearchNode> {
     let mut it = s.splitn(2, ':');
     let days = parse_u32(it.next().unwrap(), "rated:")?.max(1);
     let button = parse_answer_button(it.next(), s)?;
@@ -596,7 +626,7 @@ fn parse_rated(s: &str) -> ParseResult<SearchNode> {
 }
 
 /// eg is:due
-fn parse_state(s: &str) -> ParseResult<SearchNode> {
+fn parse_state(s: &str) -> ParseResult<'_, SearchNode> {
     use StateKind::*;
     Ok(SearchNode::State(match s {
         "new" => New,
@@ -616,7 +646,7 @@ fn parse_state(s: &str) -> ParseResult<SearchNode> {
     }))
 }
 
-fn parse_mid(s: &str) -> ParseResult<SearchNode> {
+fn parse_mid(s: &str) -> ParseResult<'_, SearchNode> {
     parse_i64(s, "mid:").map(|n| SearchNode::NotetypeId(n.into()))
 }
 
@@ -631,14 +661,14 @@ fn check_id_list<'a>(s: &'a str, context: &str) -> ParseResult<'a, &'a str> {
             s,
             // id lists are undocumented, so no translation
             FailKind::Other {
-                info: Some(format!("expected only digits and commas in {}:", context)),
+                info: Some(format!("expected only digits and commas in {context}:")),
             },
         ))
     }
 }
 
 /// eg dupe:1231,hello
-fn parse_dupe(s: &str) -> ParseResult<SearchNode> {
+fn parse_dupe(s: &str) -> ParseResult<'_, SearchNode> {
     let mut it = s.splitn(2, ',');
     let ntid = parse_i64(it.next().unwrap(), s)?;
     if let Some(text) = it.next() {
@@ -662,13 +692,19 @@ fn parse_single_field<'a>(key: &'a str, val: &'a str) -> ParseResult<'a, SearchN
         SearchNode::SingleField {
             field: unescape(key)?,
             text: unescape_quotes(stripped),
-            is_re: true,
+            mode: FieldSearchMode::Regex,
+        }
+    } else if let Some(stripped) = val.strip_prefix("nc:") {
+        SearchNode::SingleField {
+            field: unescape(key)?,
+            text: unescape_quotes(stripped),
+            mode: FieldSearchMode::NoCombining,
         }
     } else {
         SearchNode::SingleField {
             field: unescape(key)?,
             text: unescape(val)?,
-            is_re: false,
+            mode: FieldSearchMode::Normal,
         }
     })
 }
@@ -692,7 +728,7 @@ fn unescape_quotes_and_backslashes(s: &str) -> String {
 }
 
 /// Unescape chars with special meaning to the parser.
-fn unescape(txt: &str) -> ParseResult<String> {
+fn unescape(txt: &str) -> ParseResult<'_, String> {
     if let Some(seq) = invalid_escape_sequence(txt) {
         Err(parse_failure(
             txt,
@@ -798,7 +834,7 @@ mod test {
                     Search(SingleField {
                         field: "foo".into(),
                         text: "bar baz".into(),
-                        is_re: false,
+                        mode: FieldSearchMode::Normal,
                     })
                 ]))),
                 Or,
@@ -811,7 +847,16 @@ mod test {
             vec![Search(SingleField {
                 field: "foo".into(),
                 text: "bar".into(),
-                is_re: true
+                mode: FieldSearchMode::Regex,
+            })]
+        );
+
+        assert_eq!(
+            parse("foo:nc:bar")?,
+            vec![Search(SingleField {
+                field: "foo".into(),
+                text: "bar".into(),
+                mode: FieldSearchMode::NoCombining,
             })]
         );
 
@@ -821,7 +866,7 @@ mod test {
             vec![Search(SingleField {
                 field: "field".into(),
                 text: "va\"lue".into(),
-                is_re: false
+                mode: FieldSearchMode::Normal,
             })]
         );
         assert_eq!(parse(r#""field:va\"lue""#)?, parse(r#"field:"va\"lue""#)?,);
@@ -898,14 +943,14 @@ mod test {
             parse("tag:hard")?,
             vec![Search(Tag {
                 tag: "hard".into(),
-                is_re: false
+                mode: FieldSearchMode::Normal
             })]
         );
         assert_eq!(
             parse(r"tag:re:\\")?,
             vec![Search(Tag {
                 tag: r"\\".into(),
-                is_re: true
+                mode: FieldSearchMode::Regex
             })]
         );
         assert_eq!(
@@ -1104,19 +1149,19 @@ mod test {
 
         for term in &["added", "edited", "rated", "resched"] {
             assert!(matches!(
-                failkind(&format!("{}:1.1", term)),
+                failkind(&format!("{term}:1.1")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
             assert!(matches!(
-                failkind(&format!("{}:-1", term)),
+                failkind(&format!("{term}:-1")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
             assert!(matches!(
-                failkind(&format!("{}:", term)),
+                failkind(&format!("{term}:")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
             assert!(matches!(
-                failkind(&format!("{}:foo", term)),
+                failkind(&format!("{term}:foo")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
         }
@@ -1217,19 +1262,19 @@ mod test {
 
         for term in &["ivl", "reps", "lapses", "pos"] {
             assert!(matches!(
-                failkind(&format!("prop:{}>", term)),
+                failkind(&format!("prop:{term}>")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
             assert!(matches!(
-                failkind(&format!("prop:{}=0.5", term)),
+                failkind(&format!("prop:{term}=0.5")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
             assert!(matches!(
-                failkind(&format!("prop:{}!=-1", term)),
+                failkind(&format!("prop:{term}!=-1")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
             assert!(matches!(
-                failkind(&format!("prop:{}<foo", term)),
+                failkind(&format!("prop:{term}<foo")),
                 SearchErrorKind::InvalidPositiveWholeNumber { .. }
             ));
         }

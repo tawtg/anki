@@ -1,7 +1,6 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use std::env;
 use std::fmt::Write;
 use std::path::PathBuf;
 
@@ -22,7 +21,7 @@ pub fn write_ts_interface(modules: &[Module]) -> Result<()> {
     render_module_map(modules, &mut ts_out);
     render_methods(modules, &mut ts_out);
 
-    if let Ok(path) = env::var("STRINGS_TS") {
+    if let Some(path) = option_env!("STRINGS_TS") {
         let path = PathBuf::from(path);
         create_dir_all(path.parent().unwrap())?;
         write_file_if_changed(path, ts_out)?;
@@ -81,7 +80,7 @@ fn get_args(variables: &[Variable]) -> String {
             .iter()
             .map(|v| format!("\"{}\": args.{}", v.name, typescript_arg_name(&v.name)))
             .join(", ");
-        format!("{{{}}}", out)
+        format!("{{{out}}}")
     }
 }
 

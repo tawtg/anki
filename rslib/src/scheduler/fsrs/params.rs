@@ -33,7 +33,7 @@ use crate::search::SortMode;
 
 pub(crate) type Params = Vec<f32>;
 
-fn ignore_revlogs_before_date_to_ms(
+pub(crate) fn ignore_revlogs_before_date_to_ms(
     ignore_revlogs_before_date: &String,
 ) -> Result<TimestampMillis> {
     Ok(match ignore_revlogs_before_date {
@@ -51,19 +51,46 @@ pub(crate) fn ignore_revlogs_before_ms_from_config(config: &DeckConfig) -> Resul
     ignore_revlogs_before_date_to_ms(&config.inner.ignore_revlogs_before_date)
 }
 
+pub struct ComputeParamsRequest<'t> {
+    pub search: &'t str,
+    pub ignore_revlogs_before_ms: TimestampMillis,
+    pub current_preset: u32,
+    pub total_presets: u32,
+    pub current_params: &'t Params,
+    pub num_of_relearning_steps: usize,
+    pub health_check: bool,
+}
+
+/// r: retention
+fn log_loss_adjustment(r: f32) -> f32 {
+    0.623 * (4. * r * (1. - r)).powf(0.738)
+}
+
+/// r: retention
+///
+/// c: review count
+fn rmse_adjustment(r: f32, c: u32) -> f32 {
+    0.0135 / (r.powf(0.504) - 1.14) + 0.176 / ((c as f32 / 1000.).powf(0.825) + 2.22) + 0.101
+}
+
 impl Collection {
     /// Note this does not return an error if there are less than 400 items -
     /// the caller should instead check the fsrs_items count in the return
     /// value.
     pub fn compute_params(
         &mut self,
-        search: &str,
-        ignore_revlogs_before: TimestampMillis,
-        current_preset: u32,
-        total_presets: u32,
-        current_params: &Params,
-        num_of_relearning_steps: usize,
+        request: ComputeParamsRequest,
     ) -> Result<ComputeFsrsParamsResponse> {
+        let ComputeParamsRequest {
+            search,
+            ignore_revlogs_before_ms: ignore_revlogs_before,
+            current_preset,
+            total_presets,
+            current_params,
+            num_of_relearning_steps,
+            health_check,
+        } = request;
+
         self.clear_progress();
         let timing = self.timing_today()?;
         let revlogs = self.revlog_for_srs(search)?;
@@ -75,6 +102,7 @@ impl Collection {
             return Ok(ComputeFsrsParamsResponse {
                 params: current_params.to_vec(),
                 fsrs_items,
+                health_check_passed: None,
             });
         }
         // adapt the progress handler to our built-in progress handling
@@ -108,22 +136,22 @@ impl Collection {
 
         let (progress, progress_thread) = create_progress_thread()?;
         let fsrs = FSRS::new(None)?;
-        let mut params = fsrs.compute_parameters(ComputeParametersInput {
+        let input = ComputeParametersInput {
             train_set: items.clone(),
             progress: Some(progress.clone()),
             enable_short_term: true,
             num_relearning_steps: Some(num_of_relearning_steps),
-        })?;
+        };
+        let mut params = fsrs.compute_parameters(input.clone())?;
         progress_thread.join().ok();
-        if let Ok(fsrs) = FSRS::new(Some(current_params)) {
-            let current_rmse = fsrs.evaluate(items.clone(), |_| true)?.rmse_bins;
+        if let Ok(current_fsrs) = FSRS::new(Some(current_params)) {
+            let current_log_loss = current_fsrs.evaluate(items.clone(), |_| true)?.log_loss;
             let optimized_fsrs = FSRS::new(Some(&params))?;
-            let optimized_rmse = optimized_fsrs.evaluate(items.clone(), |_| true)?.rmse_bins;
-            if current_rmse <= optimized_rmse {
+            let optimized_log_loss = optimized_fsrs.evaluate(items.clone(), |_| true)?.log_loss;
+            if current_log_loss <= optimized_log_loss {
                 if num_of_relearning_steps <= 1 {
                     params = current_params.to_vec();
                 } else {
-                    let current_fsrs = FSRS::new(Some(current_params))?;
                     let memory_state = MemoryState {
                         stability: 1.0,
                         difficulty: 1.0,
@@ -146,7 +174,34 @@ impl Collection {
             }
         }
 
-        Ok(ComputeFsrsParamsResponse { params, fsrs_items })
+        let health_check_passed = if health_check && input.train_set.len() > 300 {
+            let fsrs = FSRS::new(None)?;
+            fsrs.evaluate_with_time_series_splits(input, |_| true)
+                .ok()
+                .map(|eval| {
+                    let r = items.iter().fold(0, |p, item| {
+                        p + (item
+                            .reviews
+                            .last()
+                            .map(|reviews| reviews.rating)
+                            .unwrap_or(0)
+                            > 1) as u32
+                    }) as f32
+                        / fsrs_items as f32;
+                    let adjusted_log_loss = eval.log_loss / log_loss_adjustment(r);
+                    let adjusted_rmse = eval.rmse_bins / rmse_adjustment(r, fsrs_items);
+
+                    adjusted_log_loss <= 1.11 || adjusted_rmse <= 1.53
+                })
+        } else {
+            None
+        };
+
+        Ok(ComputeFsrsParamsResponse {
+            params,
+            fsrs_items,
+            health_check_passed,
+        })
     }
 
     pub(crate) fn revlog_for_srs(
@@ -217,6 +272,35 @@ impl Collection {
     }
 
     pub fn evaluate_params(
+        &mut self,
+        search: &str,
+        ignore_revlogs_before: TimestampMillis,
+        num_of_relearning_steps: usize,
+    ) -> Result<ModelEvaluation> {
+        let timing = self.timing_today()?;
+        let revlogs = self.revlog_for_srs(search)?;
+        let (items, review_count) =
+            fsrs_items_for_training(revlogs, timing.next_day_at, ignore_revlogs_before);
+        let mut anki_progress = self.new_progress_handler::<ComputeParamsProgress>();
+        anki_progress.state.reviews = review_count as u32;
+        let fsrs = FSRS::new(None)?;
+        let input = ComputeParametersInput {
+            train_set: items.clone(),
+            progress: None,
+            enable_short_term: true,
+            num_relearning_steps: Some(num_of_relearning_steps),
+        };
+        Ok(fsrs.evaluate_with_time_series_splits(input, |ip| {
+            anki_progress
+                .update(false, |p| {
+                    p.total_iterations = ip.total as u32;
+                    p.current_iteration = ip.current as u32;
+                })
+                .is_ok()
+        })?)
+    }
+
+    pub fn evaluate_params_legacy(
         &mut self,
         params: &Params,
         search: &str,
@@ -310,24 +394,22 @@ pub(crate) fn reviews_for_fsrs(
     let mut revlogs_complete = false;
     // Working backwards from the latest review...
     for (index, entry) in entries.iter().enumerate().rev() {
-        if entry.review_kind == RevlogReviewKind::Filtered && entry.ease_factor == 0 {
+        if entry.is_cramming() {
             continue;
         }
+        // For incomplete review histories, initial memory state is based on the first
+        // user-graded review after the cutoff date with interval >= 1d.
         let within_cutoff = entry.id.0 > ignore_revlogs_before.0;
-        let user_graded = matches!(entry.button_chosen, 1..=4);
-        if user_graded && within_cutoff {
+        let user_graded = entry.has_rating();
+        let interday = entry.interval >= 1 || entry.interval <= -86400;
+        if user_graded && within_cutoff && interday {
             first_user_grade_idx = Some(index);
         }
 
         if user_graded && entry.review_kind == RevlogReviewKind::Learning {
             first_of_last_learn_entries = Some(index);
             revlogs_complete = true;
-        } else if first_of_last_learn_entries.is_some() {
-            break;
-        } else if matches!(
-            (entry.review_kind, entry.ease_factor),
-            (RevlogReviewKind::Manual, 0)
-        ) {
+        } else if entry.is_reset() {
             // Ignore entries prior to a `Reset` if a learning step has come after,
             // but consider revlogs complete.
             if first_of_last_learn_entries.is_some() {
@@ -343,6 +425,10 @@ pub(crate) fn reviews_for_fsrs(
             } else {
                 return None;
             }
+        // Previous versions of Anki didn't add a revlog entry when the card was
+        // reset.
+        } else if first_of_last_learn_entries.is_some() {
+            break;
         }
     }
     if training {
@@ -383,16 +469,7 @@ pub(crate) fn reviews_for_fsrs(
     }
 
     // Filter out unwanted entries
-    entries.retain(|entry| {
-        !(
-            // set due date, reset or rescheduled
-            (entry.review_kind == RevlogReviewKind::Manual || entry.button_chosen == 0)
-            || // cram
-            (entry.review_kind == RevlogReviewKind::Filtered && entry.ease_factor == 0)
-            || // rescheduled
-            (entry.review_kind == RevlogReviewKind::Rescheduled)
-        )
-    });
+    entries.retain(|entry| entry.has_rating_and_affects_scheduling());
 
     // Compute delta_t for each entry
     let delta_ts = iter::once(0)
@@ -401,27 +478,42 @@ pub(crate) fn reviews_for_fsrs(
         }))
         .collect_vec();
 
-    let skip = if training { 1 } else { 0 };
-    // Convert the remaining entries into separate FSRSItems, where each item
-    // contains all reviews done until then.
-    let items: Vec<(RevlogId, FSRSItem)> = entries
-        .iter()
-        .enumerate()
-        .skip(skip)
-        .map(|(outer_idx, entry)| {
-            let reviews = entries
-                .iter()
-                .take(outer_idx + 1)
-                .enumerate()
-                .map(|(inner_idx, r)| FSRSReview {
-                    rating: r.button_chosen as u32,
-                    delta_t: delta_ts[inner_idx],
-                })
-                .collect();
-            (entry.id, FSRSItem { reviews })
-        })
-        .filter(|(_, item)| !training || item.reviews.last().unwrap().delta_t > 0)
-        .collect_vec();
+    let items = if training {
+        // Convert the remaining entries into separate FSRSItems, where each item
+        // contains all reviews done until then.
+        let mut items = Vec::with_capacity(entries.len());
+        let mut current_reviews = Vec::with_capacity(entries.len());
+        for (idx, (entry, &delta_t)) in entries.iter().zip(delta_ts.iter()).enumerate() {
+            current_reviews.push(FSRSReview {
+                rating: entry.button_chosen as u32,
+                delta_t,
+            });
+            if idx >= 1 && delta_t > 0 {
+                items.push((
+                    entry.id,
+                    FSRSItem {
+                        reviews: current_reviews.clone(),
+                    },
+                ));
+            }
+        }
+        items
+    } else {
+        // When not training, we only need the final FSRS item, which represents
+        // the complete history of the card. This avoids expensive clones in a loop.
+        let reviews = entries
+            .iter()
+            .zip(delta_ts.iter())
+            .map(|(entry, &delta_t)| FSRSReview {
+                rating: entry.button_chosen as u32,
+                delta_t,
+            })
+            .collect();
+        let last_entry = entries.last().unwrap();
+
+        vec![(last_entry.id, FSRSItem { reviews })]
+    };
+
     if items.is_empty() {
         None
     } else {
@@ -471,10 +563,15 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn revlog(review_kind: RevlogReviewKind, days_ago: i64) -> RevlogEntry {
+        let button_chosen = match review_kind {
+            RevlogReviewKind::Manual | RevlogReviewKind::Rescheduled => 0,
+            _ => 3,
+        };
         RevlogEntry {
             review_kind,
             id: days_ago_ms(days_ago).into(),
-            button_chosen: 3,
+            button_chosen,
+            interval: 1,
             ..Default::default()
         }
     }
@@ -508,8 +605,6 @@ pub(crate) mod tests {
             ])
         };
     }
-
-    pub(crate) use fsrs_items;
 
     #[test]
     fn delta_t_is_correct() -> Result<()> {
@@ -656,7 +751,7 @@ pub(crate) mod tests {
                 ],
                 false,
             ),
-            fsrs_items!([review(0)], [review(0), review(1)])
+            fsrs_items!([review(0), review(1)])
         );
     }
 
@@ -710,6 +805,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn skip_initial_relearning_steps() {
+        let revlogs = &[
+            revlog(RevlogReviewKind::Review, 10),
+            RevlogEntry {
+                button_chosen: 1, // Again
+                interval: -600,
+                ..revlog(RevlogReviewKind::Review, 8)
+            },
+            revlog(RevlogReviewKind::Relearning, 8),
+            revlog(RevlogReviewKind::Review, 6),
+        ];
+        // | = Ignore before
+        // A = Again
+        // X = Relearning
+        // R | A X R
+        assert_eq!(
+            convert_ignore_before(revlogs, false, days_ago_ms(9)),
+            fsrs_items!([review(0), review(2)])
+        );
+    }
+
+    #[test]
     fn ignore_before_date_between_learning_steps_when_reviewing() {
         let revlogs = &[
             revlog(RevlogReviewKind::Learning, 10),
@@ -724,6 +841,9 @@ pub(crate) mod tests {
         assert_eq!(
             convert_ignore_before(revlogs, false, days_ago_ms(9))
                 .unwrap()
+                .last()
+                .unwrap()
+                .reviews
                 .len(),
             2
         );
@@ -745,6 +865,9 @@ pub(crate) mod tests {
         assert_eq!(
             convert_ignore_before(revlogs, false, days_ago_ms(9))
                 .unwrap()
+                .last()
+                .unwrap()
+                .reviews
                 .len(),
             2
         );

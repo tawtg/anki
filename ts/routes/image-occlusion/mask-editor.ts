@@ -8,10 +8,22 @@ import { fabric } from "fabric";
 import { get } from "svelte/store";
 
 import { optimumCssSizeForCanvas } from "./canvas-scale";
-import { hideAllGuessOne, notesDataStore, saveNeededStore, tagsWritable, textEditingState } from "./store";
+import {
+    hideAllGuessOne,
+    notesDataStore,
+    opacityStateStore,
+    saveNeededStore,
+    tagsWritable,
+    textEditingState,
+} from "./store";
 import Toast from "./Toast.svelte";
 import { addShapesToCanvasFromCloze } from "./tools/add-from-cloze";
-import { enableSelectable, makeShapesRemainInCanvas, moveShapeToCanvasBoundaries } from "./tools/lib";
+import {
+    enableSelectable,
+    makeMaskTransparent,
+    makeShapesRemainInCanvas,
+    moveShapeToCanvasBoundaries,
+} from "./tools/lib";
 import { modifiedPolygon } from "./tools/tool-polygon";
 import { undoStack } from "./tools/tool-undo-redo";
 import { enablePinchZoom, onResize, setCanvasSize } from "./tools/tool-zoom";
@@ -83,6 +95,7 @@ export const setupMaskEditorForEdit = async (
         window.requestAnimationFrame(() => {
             onImageLoaded({ noteId: BigInt(noteId) });
         });
+        if (get(opacityStateStore)) { makeMaskTransparent(canvas, true); }
     };
 
     return canvas;
@@ -95,12 +108,10 @@ function initCanvas(): fabric.Canvas {
     undoStack.setCanvas(canvas);
     // find object per-pixel basis rather than according to bounding box,
     // allow click through transparent area
-    canvas.perPixelTargetFind = true;
+    fabric.Object.prototype.perPixelTargetFind = true;
     // Disable uniform scaling
     canvas.uniformScaling = false;
     canvas.uniScaleKey = "none";
-    // disable rotation globally
-    delete fabric.Object.prototype.controls.mtr;
     // disable object caching
     fabric.Object.prototype.objectCaching = false;
     // add a border to corner to handle blend of control
@@ -108,12 +119,21 @@ function initCanvas(): fabric.Canvas {
     fabric.Object.prototype.cornerStyle = "circle";
     fabric.Object.prototype.cornerStrokeColor = "#000000";
     fabric.Object.prototype.padding = 8;
+    // snap rotation around 0 by +-3deg
+    fabric.Object.prototype.snapAngle = 360;
+    fabric.Object.prototype.snapThreshold = 3;
+    // populate canvas.targets with subtargets during mouse events
+    fabric.Group.prototype.subTargetCheck = true;
+    // disable rotation when selecting
+    canvas.on("selection:created", () => {
+        const g = canvas.getActiveObject();
+        if (g && g instanceof fabric.Group) { g.setControlsVisibility({ mtr: false }); }
+    });
     canvas.on("object:modified", (evt) => {
         if (evt.target instanceof fabric.Polygon) {
             modifiedPolygon(canvas, evt.target);
             undoStack.onObjectModified();
         }
-        saveNeededStore.set(true);
     });
     canvas.on("text:editing:entered", function() {
         textEditingState.set(true);

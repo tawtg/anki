@@ -91,7 +91,7 @@ fn nonbreaking_space(char: char) -> bool {
 /// - Any problem characters are removed.
 /// - Windows device names like CON and PRN have '_' appended
 /// - The filename is limited to 120 bytes.
-pub(crate) fn normalize_filename(fname: &str) -> Cow<str> {
+pub(crate) fn normalize_filename(fname: &str) -> Cow<'_, str> {
     let mut output = Cow::Borrowed(fname);
 
     if !is_nfc(output.as_ref()) {
@@ -102,7 +102,7 @@ pub(crate) fn normalize_filename(fname: &str) -> Cow<str> {
 }
 
 /// See normalize_filename(). This function expects NFC-normalized input.
-pub(crate) fn normalize_nfc_filename(mut fname: Cow<str>) -> Cow<str> {
+pub(crate) fn normalize_nfc_filename(mut fname: Cow<'_, str>) -> Cow<'_, str> {
     if fname.contains(disallowed_char) {
         fname = fname.replace(disallowed_char, "").into()
     }
@@ -137,7 +137,7 @@ pub(crate) fn normalize_nfc_filename(mut fname: Cow<str>) -> Cow<str> {
 /// but can be accessed as NFC. On these devices, if the filename
 /// is otherwise valid, the filename is returned as NFC.
 #[allow(clippy::collapsible_else_if)]
-pub(crate) fn filename_if_normalized(fname: &str) -> Option<Cow<str>> {
+pub(crate) fn filename_if_normalized(fname: &str) -> Option<Cow<'_, str>> {
     if cfg!(target_vendor = "apple") {
         if !is_nfc(fname) {
             let as_nfc = fname.chars().nfc().collect::<String>();
@@ -178,14 +178,25 @@ where
     let mut target_path = folder.as_ref().join(normalized_name.as_ref());
 
     let existing_file_hash = existing_file_sha1(&target_path)?;
-    if existing_file_hash.is_none() {
-        // no file with that name exists yet
-        write_file(&target_path, data)?;
+
+    if matches!(existing_file_hash, Some(hash) if hash == sha1) {
+        // existing file has same checksum, nothing to do
         return Ok(normalized_name);
     }
 
-    if existing_file_hash.unwrap() == sha1 {
-        // existing file has same checksum, nothing to do
+    let lowercased_name = normalized_name.to_lowercase();
+    if lowercased_name != normalized_name {
+        // try again with the lowercased name (to_lowercase is idempotent)
+        return Ok(
+            add_data_to_folder_uniquely(folder, &lowercased_name, data, sha1)?
+                .to_string()
+                .into(),
+        );
+    }
+
+    if existing_file_hash.is_none() {
+        // no file with that name that's also in lowercase exists yet
+        write_file(&target_path, data)?;
         return Ok(normalized_name);
     }
 
@@ -208,7 +219,7 @@ pub(crate) fn add_hash_suffix_to_file_stem(fname: &str, hash: &Sha1Hash) -> Stri
 }
 
 /// If filename is longer than max_bytes, truncate it.
-fn truncate_filename(fname: &str, max_bytes: usize) -> Cow<str> {
+fn truncate_filename(fname: &str, max_bytes: usize) -> Cow<'_, str> {
     if fname.len() <= max_bytes {
         return Cow::Borrowed(fname);
     }
@@ -218,7 +229,7 @@ fn truncate_filename(fname: &str, max_bytes: usize) -> Cow<str> {
     let mut new_name = if ext.is_empty() {
         stem.to_string()
     } else {
-        format!("{}.{}", stem, ext)
+        format!("{stem}.{ext}")
     };
 
     // make sure we don't break Windows by ending with a space or dot
@@ -496,8 +507,14 @@ mod test {
             "test.mp3"
         );
 
-        // different contents
+        // different contents, filenames differ only by case
         let h2 = sha1_of_data(b"hello1");
+        assert_eq!(
+            add_data_to_folder_uniquely(dpath, "Test.mp3", b"hello1", h2).unwrap(),
+            "test-88fdd585121a4ccb3d1540527aee53a77c77abb8.mp3"
+        );
+
+        // same contents, filenames differ only by case
         assert_eq!(
             add_data_to_folder_uniquely(dpath, "test.mp3", b"hello1", h2).unwrap(),
             "test-88fdd585121a4ccb3d1540527aee53a77c77abb8.mp3"

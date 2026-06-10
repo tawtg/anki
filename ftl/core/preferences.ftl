@@ -34,13 +34,15 @@ preferences-when-adding-default-to-current-deck = When adding, default to curren
 preferences-you-can-restore-backups-via-fileswitch = You can restore backups via File > Switch Profile.
 preferences-legacy-timezone-handling = Legacy timezone handling (buggy, but required for AnkiDroid <= 2.14)
 preferences-default-search-text = Default search text
-preferences-default-search-text-example = eg. 'deck:current '
+preferences-default-search-text-example = e.g. "deck:current"
 preferences-theme = Theme
 preferences-theme-follow-system = Follow System
 preferences-theme-light = Light
 preferences-theme-dark = Dark
 preferences-v3-scheduler = V3 scheduler
+preferences-updates = Updates
 preferences-check-for-updates = Check for program updates
+preferences-check-for-addon-updates = Check for add-on updates
 preferences-ignore-accents-in-search = Ignore accents in search (slower)
 preferences-backup-explanation =
     Anki periodically backs up your collection. After backups are more than 2 days old,
@@ -82,6 +84,15 @@ preferences-ankihub-not-logged-in = Not currently logged in to AnkiHub.
 preferences-ankiweb-intro = AnkiWeb is a free service that lets you keep your flashcard data in sync across your devices, and provides a way to recover the data if your device breaks or is lost.
 preferences-ankihub-intro = AnkiHub provides collaborative deck editing and additional study tools. A paid subscription is required to access certain features.
 preferences-third-party-description = Third-party services are unaffiliated with and not endorsed by Anki. Use of these services may require payment.
+
+## URL scheme related
+preferences-url-schemes = URL Schemes
+preferences-url-scheme-prompt = Allowed URL Schemes (space-separated):
+preferences-url-scheme-warning = Blocked attempt to open `{ $link }`, which may be a security issue.
+
+    If you trust the deck author and wish to proceed, you can add `{ $scheme }` to your allowed URL Schemes.
+preferences-url-scheme-allow-once = Allow Once
+preferences-url-scheme-always-allow = Always Allow
 
 ## NO NEED TO TRANSLATE. This text is no longer used by Anki, and will be removed in the future.
 

@@ -23,6 +23,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
     export let title: string;
     export let url: string;
+    export let linkLabel: string | undefined = undefined;
     export let startIndex = 0;
     export let helpSections: HelpItem[];
     export let fsrs = false;
@@ -106,11 +107,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                     <div class="chapter-redirect">
                         {@html renderMarkdown(
                             tr.helpForMoreInfo({
-                                link: `<a href="${url}" title="${tr.helpOpenManualChapter(
-                                    {
-                                        name: title,
-                                    },
-                                )}">${title}</a>`,
+                                link: `<a href="${url}" title="${tr.helpOpenManualChapter({ name: linkLabel ?? title })}">${linkLabel ?? title}</a>`,
                             }),
                         )}
                     </div>
@@ -179,6 +176,11 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 <style lang="scss">
     #nav {
         margin-bottom: 1.5rem;
+    }
+
+    .modal {
+        z-index: 1066;
+        background-color: rgba($color: black, $alpha: 0.5);
     }
 
     .modal-title {

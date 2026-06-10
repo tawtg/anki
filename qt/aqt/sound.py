@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import os.path
 import platform
 import re
 import subprocess
@@ -23,7 +24,6 @@ from markdown import markdown
 import aqt
 import aqt.mpv
 import aqt.qt
-from anki import hooks
 from anki.cards import Card
 from anki.sound import AV_REF_RE, AVTag, SoundOrVideoTag
 from anki.utils import is_lin, is_mac, is_win, namedtmp
@@ -32,6 +32,7 @@ from aqt._macos_helper import macos_helper
 from aqt.mpv import MPV, MPVBase, MPVCommandError
 from aqt.qt import *
 from aqt.taskman import TaskManager
+from aqt.theme import theme_manager
 from aqt.utils import (
     disable_help_button,
     restoreGeom,
@@ -101,7 +102,7 @@ def is_audio_file(fname: str) -> bool:
     return ext in AUDIO_EXTENSIONS
 
 
-class SoundOrVideoPlayer(Player):  # pylint: disable=abstract-method
+class SoundOrVideoPlayer(Player):
     default_rank = 0
 
     def rank_for_tag(self, tag: AVTag) -> int | None:
@@ -111,7 +112,7 @@ class SoundOrVideoPlayer(Player):  # pylint: disable=abstract-method
             return None
 
 
-class SoundPlayer(Player):  # pylint: disable=abstract-method
+class SoundPlayer(Player):
     default_rank = 0
 
     def rank_for_tag(self, tag: AVTag) -> int | None:
@@ -121,7 +122,7 @@ class SoundPlayer(Player):  # pylint: disable=abstract-method
             return None
 
 
-class VideoPlayer(Player):  # pylint: disable=abstract-method
+class VideoPlayer(Player):
     default_rank = 0
 
     def rank_for_tag(self, tag: AVTag) -> int | None:
@@ -141,7 +142,7 @@ class AVPlayer:
     # audio be stopped?
     interrupt_current_audio = True
     # caller key for the current playback (optional)
-    current_caller = None
+    current_caller: Any = None
     # whether the last call to play_file_with_caller interrupted another
     current_caller_interrupted = False
 
@@ -167,7 +168,7 @@ class AVPlayer:
         self._enqueued = []
         self._stop_if_playing()
 
-    def stop_and_clear_queue_if_caller(self, caller) -> None:
+    def stop_and_clear_queue_if_caller(self, caller: Any) -> None:
         if caller == self.current_caller:
             self.stop_and_clear_queue()
 
@@ -177,15 +178,27 @@ class AVPlayer:
             self._stop_if_playing()
 
     def play_file(self, filename: str) -> None:
+        """Play the provided path.
+
+        SECURITY: Filename may be an arbitrary path. For filenames coming from a collection,
+        you should only ever use the os.path.basename(filename) as the filename."""
         self.play_tags([SoundOrVideoTag(filename=filename)])
 
-    def play_file_with_caller(self, filename: str, caller) -> None:
+    def play_file_with_caller(self, filename: str, caller: Any) -> None:
+        """Play the provided path, noting down the caller.
+
+        SECURITY: Filename may be an arbitrary path. For filenames coming from a collection,
+        you should only ever use the os.path.basename(filename) as the filename."""
         if self.current_caller:
             self.current_caller_interrupted = True
         self.current_caller = caller
         self.play_file(filename)
 
     def insert_file(self, filename: str) -> None:
+        """Place the provided path at the top of the playlist.
+
+        SECURITY: Filename may be an arbitrary path. For filenames coming from a collection,
+        you should only ever use the os.path.basename(filename) as the filename."""
         self._enqueued.insert(0, SoundOrVideoTag(filename=filename))
         self._play_next_if_idle()
 
@@ -267,12 +280,25 @@ def _packagedCmd(cmd: list[str]) -> tuple[Any, dict[str, str]]:
     if "LD_LIBRARY_PATH" in env and "SNAP" not in env:
         del env["LD_LIBRARY_PATH"]
 
-    if is_win:
-        packaged_path = Path(sys.prefix) / (cmd[0] + ".exe")
-    elif is_mac:
-        packaged_path = Path(sys.prefix) / ".." / "Resources" / cmd[0]
-    else:
-        packaged_path = Path(sys.prefix) / cmd[0]
+    # Try to find binary in anki-audio package for Windows/Mac
+    if is_win or is_mac:
+        try:
+            import anki_audio
+
+            audio_pkg_path = Path(anki_audio.__file__).parent
+            if is_win:
+                packaged_path = audio_pkg_path / (cmd[0] + ".exe")
+            else:  # is_mac
+                packaged_path = audio_pkg_path / cmd[0]
+
+            if packaged_path.exists():
+                cmd[0] = str(packaged_path)
+                return cmd, env
+        except ImportError:
+            # anki-audio not available, fall back to old behavior
+            pass
+
+    packaged_path = Path(sys.prefix) / cmd[0]
     if packaged_path.exists():
         cmd[0] = str(packaged_path)
 
@@ -299,7 +325,7 @@ def retryWait(proc: subprocess.Popen) -> int:
 ##########################################################################
 
 
-class SimpleProcessPlayer(Player):  # pylint: disable=abstract-method
+class SimpleProcessPlayer(Player):
     "A player that invokes a new process for each tag to play."
 
     args: list[str] = []
@@ -327,7 +353,7 @@ class SimpleProcessPlayer(Player):  # pylint: disable=abstract-method
     def _play(self, tag: AVTag) -> None:
         assert isinstance(tag, SoundOrVideoTag)
         self._process = subprocess.Popen(
-            self.args + ["--", tag.filename],
+            self.args + ["--", tag.path(self._media_folder)],
             env=self.env,
             cwd=self._media_folder,
             stdout=subprocess.DEVNULL,
@@ -394,6 +420,7 @@ class SimpleMpvPlayer(SimpleProcessPlayer, VideoPlayer):
             "--keep-open=no",
             "--input-media-keys=no",
             "--autoload-files=no",
+            "--no-ytdl",
         ]
     )
 
@@ -452,8 +479,7 @@ class MpvManager(MPV, SoundOrVideoPlayer):
     def play(self, tag: AVTag, on_done: OnDoneCallback) -> None:
         assert isinstance(tag, SoundOrVideoTag)
         self._on_done = on_done
-        filename = hooks.media_file_filter(tag.filename)
-        path = os.path.join(self.media_folder, filename)
+        path = tag.path(self.media_folder)
 
         if self.mpv_version is None or self.mpv_version >= (0, 38, 0):
             self.command("loadfile", path, "replace", -1, "pause=no")
@@ -505,10 +531,8 @@ class SimpleMplayerSlaveModePlayer(SimpleMplayerPlayer):
     def _play(self, tag: AVTag) -> None:
         assert isinstance(tag, SoundOrVideoTag)
 
-        filename = hooks.media_file_filter(tag.filename)
-
         self._process = subprocess.Popen(
-            self.args + ["--", filename],
+            self.args + ["--", tag.path(self.media_folder)],
             env=self.env,
             cwd=self.media_folder,
             stdin=subprocess.PIPE,
@@ -607,17 +631,43 @@ class QtAudioInputRecorder(Recorder):
         self.mw = mw
         self._parent = parent
 
-        from PyQt6.QtMultimedia import QAudioFormat, QAudioSource  # type: ignore
+        from PyQt6.QtMultimedia import QAudioSource, QMediaDevices  # type: ignore
 
-        format = QAudioFormat()
-        format.setChannelCount(1)
-        format.setSampleRate(44100)
-        format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        # Get the default audio input device
+        device = QMediaDevices.defaultAudioInput()
 
-        source = QAudioSource(format, parent)
+        # Try to use Int16 format first (avoids conversion)
+        preferred_format = device.preferredFormat()
+        int16_format = preferred_format
+        int16_format.setSampleFormat(preferred_format.SampleFormat.Int16)
 
+        if device.isFormatSupported(int16_format):
+            # Use Int16 if supported
+            format = int16_format
+        else:
+            # Fall back to device's preferred format
+            format = preferred_format
+
+        # Create the audio source with the chosen format
+        source = QAudioSource(device, format, parent)
+
+        # Store the actual format being used
         self._format = source.format()
         self._audio_input = source
+
+    def _convert_float_to_int16(self, float_buffer: bytearray) -> bytes:
+        """Convert float32 audio samples to int16 format for WAV output."""
+        import struct
+
+        float_count = len(float_buffer) // 4  # 4 bytes per float32
+        floats = struct.unpack(f"{float_count}f", float_buffer)
+
+        # Convert to int16 range, clipping and scaling in one step
+        int16_samples = [
+            max(-32768, min(32767, int(max(-1.0, min(1.0, f)) * 32767))) for f in floats
+        ]
+
+        return struct.pack(f"{len(int16_samples)}h", *int16_samples)
 
     def start(self, on_done: Callable[[], None]) -> None:
         self._iodevice = self._audio_input.start()
@@ -641,18 +691,32 @@ class QtAudioInputRecorder(Recorder):
                 return
 
             def write_file() -> None:
-                # swallow the first 300ms to allow audio device to quiesce
-                wait = int(44100 * self.STARTUP_DELAY)
-                if len(self._buffer) <= wait:
-                    return
-                self._buffer = self._buffer[wait:]
+                from PyQt6.QtMultimedia import QAudioFormat
 
-                # write out the wave file
+                # swallow the first 300ms to allow audio device to quiesce
+                bytes_per_frame = self._format.bytesPerFrame()
+                frames_to_skip = int(self._format.sampleRate() * self.STARTUP_DELAY)
+                bytes_to_skip = frames_to_skip * bytes_per_frame
+
+                if len(self._buffer) <= bytes_to_skip:
+                    return
+                self._buffer = self._buffer[bytes_to_skip:]
+
+                # Check if we need to convert float samples to int16
+                if self._format.sampleFormat() == QAudioFormat.SampleFormat.Float:
+                    audio_data = self._convert_float_to_int16(self._buffer)
+                    sample_width = 2  # int16 is 2 bytes
+                else:
+                    # For integer formats, use the data as-is
+                    audio_data = bytes(self._buffer)
+                    sample_width = self._format.bytesPerSample()
+
+                # write out the wave file with the correct format parameters
                 wf = wave.open(self.output_path, "wb")
                 wf.setnchannels(self._format.channelCount())
-                wf.setsampwidth(2)
+                wf.setsampwidth(sample_width)
                 wf.setframerate(self._format.sampleRate())
-                wf.writeframes(self._buffer)
+                wf.writeframes(audio_data)
                 wf.close()
 
             def and_then(fut: Future) -> None:
@@ -720,7 +784,8 @@ class RecordDialog(QDialog):
     def _setup_dialog(self) -> None:
         self.setWindowTitle("Anki")
         icon = QLabel()
-        icon.setPixmap(QPixmap("icons:media-record.png"))
+        qicon = theme_manager.icon_from_resources("icons:media-record.svg")
+        icon.setPixmap(qicon.pixmap(60, 60))
         self.label = QLabel("...")
         hbox = QHBoxLayout()
         hbox.addWidget(icon)
@@ -749,19 +814,14 @@ class RecordDialog(QDialog):
         saveGeom(self, "audioRecorder2")
 
     def _start_recording(self) -> None:
-        if qtmajor > 5:
-            if macos_helper and platform.machine() == "arm64":
-                self._recorder = NativeMacRecorder(
-                    namedtmp("rec.wav"),
-                )
-            else:
-                self._recorder = QtAudioInputRecorder(
-                    namedtmp("rec.wav"), self.mw, self._parent
-                )
+        if macos_helper and platform.machine() == "arm64":
+            self._recorder = NativeMacRecorder(
+                namedtmp("rec.wav"),
+            )
         else:
-            from aqt.qt.qt5_audio import QtAudioInputRecorder as Qt5Recorder
-
-            self._recorder = Qt5Recorder(namedtmp("rec.wav"), self.mw, self._parent)
+            self._recorder = QtAudioInputRecorder(
+                namedtmp("rec.wav"), self.mw, self._parent
+            )
         self._recorder.start(self._start_timer)
 
     def _start_timer(self) -> None:
@@ -908,12 +968,14 @@ def setup_audio(taskman: TaskManager, base_folder: str, media_folder: str) -> No
 
         av_player.players.append(WindowsTTSPlayer(taskman))
 
-        if platform.release() == "10":
+        if (
+            # If Windows 10, ensure it's October 2018 update or later
+            platform.release() == "10"
+            and int(platform.version().split(".")[-1]) >= 17763
+        ) or platform.release() == "11":
             from aqt.tts import WindowsRTTTSFilePlayer
 
-            # If Windows 10, ensure it's October 2018 update or later
-            if int(platform.version().split(".")[-1]) >= 17763:
-                av_player.players.append(WindowsRTTTSFilePlayer(taskman))
+            av_player.players.append(WindowsRTTTSFilePlayer(taskman))
 
 
 def cleanup_audio() -> None:

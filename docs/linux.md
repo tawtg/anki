@@ -7,14 +7,12 @@ Some extra notes have been provided by a forum member, though some of the things
 mentioned there no longer apply:
 https://forums.ankiweb.net/t/guide-how-to-build-and-run-anki-from-source-with-xubuntu-20-04/12865
 
-You can see a full list of buildtime and runtime requirements by looking at the
-[Dockerfiles](../.buildkite/linux/docker/Dockerfile.amd64) used to build the
-official releases.
+You can see a full list of buildtime and runtime requirements by looking at the `apt-get install` step in the [`setup-anki` composite action](../.github/actions/setup-anki/action.yml), used by the workflows under [`.github/workflows/`](../.github/workflows/).
 
 **Ensure some basic tools are installed**:
 
 ```
-$ sudo apt install bash grep findutils curl gcc g++ make git rsync
+$ sudo apt install bash grep findutils curl gcc gcc-12 g++ make git rsync
 ```
 
 - The 'find' utility is 'findutils' on Debian.
@@ -31,14 +29,28 @@ for example:
 
 ```
 sudo apt install libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-  libxcb-randr0 libxcb-render-util0
+  libxcb-randr0 libxcb-render-util0 libxkbfile1
 ```
 
-On some distros such as Arch Linux and Fedora, you may need to install the
+The libraries that might be required on Arch Linux:
+
+```
+sudo pacman -S nss libxkbfile
+```
+
+On some distros such as Fedora, you may need to install the
 `libxcrypt-compat` package if you get an error like this:
 
 ```
 error while loading shared libraries: libcrypt.so.1: cannot open shared object file: No such file or directory
+```
+
+## Dependencies for Building the Launcher
+
+If you want to build the launcher, you will need to install the following dependency:
+
+```
+sudo apt install gcc-aarch64-linux-gnu
 ```
 
 ## Audio
@@ -51,13 +63,8 @@ Anki requires a recent glibc.
 
 If you are using a distro that uses musl, Anki will not work.
 
-If your glibc version is 2.35+ on AMD64 or 2.39+ on ARM64, you can skip the rest of this section.
-
-If your system has an older glibc, you won't be able to use the PyQt wheels that are
-available in pip/PyPy, and will need to use your system-installed PyQt instead.
-Your distro will also need to have Python 3.9 or later.
-
-After installing the system libraries (eg:
+You can use your system's Qt libraries if they are Qt 6.2 or later, if
+you wish. After installing the system libraries (eg:
 'sudo apt install python3-pyqt6.qt{quick,webengine} python3-venv pyqt6-dev-tools'),
 find the place they are installed (eg '/usr/lib/python3/dist-packages'). On modern Ubuntu, you'll
 also need 'sudo apt remove python3-protobuf'. Then before running any commands like './run', tell Anki where
@@ -67,12 +74,6 @@ the packages can be found:
 export PYTHONPATH=/usr/lib/python3/dist-packages
 export PYTHON_BINARY=/usr/bin/python3
 ```
-
-There are a few things to be aware of:
-
-- You should use ./run and not tools/run-qt5\*, even if your system libraries are Qt5.
-- If your system libraries are Qt5, when creating an aqt wheel, the wheel will not work
-  on Qt6 environments.
 
 ## Packaging considerations
 

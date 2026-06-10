@@ -22,6 +22,7 @@ use crate::prelude::*;
 use crate::scheduler::fsrs::memory_state::UpdateMemoryStateEntry;
 use crate::scheduler::fsrs::memory_state::UpdateMemoryStateRequest;
 use crate::scheduler::fsrs::params::ignore_revlogs_before_ms_from_config;
+use crate::scheduler::fsrs::params::ComputeParamsRequest;
 use crate::search::JoinSearches;
 use crate::search::Negated;
 use crate::search::SearchNode;
@@ -41,6 +42,7 @@ pub struct UpdateDeckConfigsRequest {
     pub apply_all_parent_limits: bool,
     pub fsrs: bool,
     pub fsrs_reschedule: bool,
+    pub fsrs_health_check: bool,
 }
 
 impl Collection {
@@ -50,7 +52,7 @@ impl Collection {
         deck: DeckId,
     ) -> Result<anki_proto::deck_config::DeckConfigsForUpdate> {
         let mut defaults = DeckConfig::default();
-        defaults.inner.fsrs_params_5 = DEFAULT_PARAMETERS.into();
+        defaults.inner.fsrs_params_6 = DEFAULT_PARAMETERS.into();
         let last_optimize = self.get_config_i32(I32ConfigKey::LastFsrsOptimize) as u32;
         let days_since_last_fsrs_optimize = if last_optimize > 0 {
             self.timing_today()?
@@ -71,6 +73,8 @@ impl Collection {
             new_cards_ignore_review_limit: self.get_config_bool(BoolKey::NewCardsIgnoreReviewLimit),
             apply_all_parent_limits: self.get_config_bool(BoolKey::ApplyAllParentLimits),
             fsrs: self.get_config_bool(BoolKey::Fsrs),
+            fsrs_health_check: self.get_config_bool(BoolKey::FsrsHealthCheck),
+            fsrs_legacy_evaluate: self.get_config_bool(BoolKey::FsrsLegacyEvaluate),
             days_since_last_fsrs_optimize,
         })
     }
@@ -88,10 +92,14 @@ impl Collection {
         // grab the config and sort it
         let mut config = self.storage.all_deck_config()?;
         config.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-        // pre-fill empty fsrs 5 params with 4 params
+        // pre-fill empty fsrs params with older params
         config.iter_mut().for_each(|c| {
-            if c.inner.fsrs_params_5.is_empty() {
-                c.inner.fsrs_params_5 = c.inner.fsrs_params_4.clone();
+            if c.inner.fsrs_params_6.is_empty() {
+                c.inner.fsrs_params_6 = if c.inner.fsrs_params_5.is_empty() {
+                    c.inner.fsrs_params_4.clone()
+                } else {
+                    c.inner.fsrs_params_5.clone()
+                };
             }
         });
 
@@ -165,10 +173,11 @@ impl Collection {
 
         // add/update provided configs
         for conf in &mut req.configs {
-            // If the user has provided empty FSRS5 params, zero out any
+            // If the user has provided empty FSRS6 params, zero out any
             // old params as well, so we don't fall back on them, which would
             // be surprising as they're not shown in the GUI.
-            if conf.inner.fsrs_params_5.is_empty() {
+            if conf.inner.fsrs_params_6.is_empty() {
+                conf.inner.fsrs_params_5.clear();
                 conf.inner.fsrs_params_4.clear();
             }
             // check the provided parameters are valid before we save them
@@ -203,10 +212,10 @@ impl Collection {
         if fsrs_toggled {
             self.set_config_bool_inner(BoolKey::Fsrs, req.fsrs)?;
         }
+        let mut deck_desired_retention: HashMap<DeckId, f32> = Default::default();
         for deck in self.storage.get_all_decks()? {
             if let Ok(normal) = deck.normal() {
                 let deck_id = deck.id;
-
                 // previous order & params
                 let previous_config_id = DeckConfigId(normal.config_id);
                 let previous_config = configs_before_update.get(&previous_config_id);
@@ -214,21 +223,23 @@ impl Collection {
                     .map(|c| c.inner.new_card_insert_order())
                     .unwrap_or_default();
                 let previous_params = previous_config.map(|c| c.fsrs_params());
-                let previous_retention = previous_config.map(|c| c.inner.desired_retention);
+                let previous_preset_dr = previous_config.map(|c| c.inner.desired_retention);
+                let previous_deck_dr = normal.desired_retention;
+                let previous_dr = previous_deck_dr.or(previous_preset_dr);
                 let previous_easy_days = previous_config.map(|c| &c.inner.easy_days_percentages);
 
                 // if a selected (sub)deck, or its old config was removed, update deck to point
                 // to new config
-                let current_config_id = if selected_deck_ids.contains(&deck.id)
+                let (current_config_id, current_deck_dr) = if selected_deck_ids.contains(&deck.id)
                     || !configs_after_update.contains_key(&previous_config_id)
                 {
                     let mut updated = deck.clone();
                     updated.normal_mut()?.config_id = selected_config.id.0;
                     update_deck_limits(updated.normal_mut()?, &req.limits, today);
                     self.update_deck_inner(&mut updated, deck, usn)?;
-                    selected_config.id
+                    (selected_config.id, updated.normal()?.desired_retention)
                 } else {
-                    previous_config_id
+                    (previous_config_id, previous_deck_dr)
                 };
 
                 // if new order differs, deck needs re-sorting
@@ -242,11 +253,12 @@ impl Collection {
 
                 // if params differ, memory state needs to be recomputed
                 let current_params = current_config.map(|c| c.fsrs_params());
-                let current_retention = current_config.map(|c| c.inner.desired_retention);
+                let current_preset_dr = current_config.map(|c| c.inner.desired_retention);
+                let current_dr = current_deck_dr.or(current_preset_dr);
                 let current_easy_days = current_config.map(|c| &c.inner.easy_days_percentages);
                 if fsrs_toggled
                     || previous_params != current_params
-                    || previous_retention != current_retention
+                    || previous_dr != current_dr
                     || (req.fsrs_reschedule && previous_easy_days != current_easy_days)
                 {
                     decks_needing_memory_recompute
@@ -254,7 +266,9 @@ impl Collection {
                         .or_default()
                         .push(deck_id);
                 }
-
+                if let Some(desired_retention) = current_deck_dr {
+                    deck_desired_retention.insert(deck_id, desired_retention);
+                }
                 self.adjust_remaining_steps_in_deck(deck_id, previous_config, current_config, usn)?;
             }
         }
@@ -268,10 +282,11 @@ impl Collection {
                         if req.fsrs {
                             Some(UpdateMemoryStateRequest {
                                 params: c.fsrs_params().clone(),
-                                desired_retention: c.inner.desired_retention,
+                                preset_desired_retention: c.inner.desired_retention,
                                 max_interval: c.inner.maximum_review_interval,
                                 reschedule: req.fsrs_reschedule,
                                 historical_retention: c.inner.historical_retention,
+                                deck_desired_retention: deck_desired_retention.clone(),
                             })
                         } else {
                             None
@@ -295,6 +310,7 @@ impl Collection {
             req.new_cards_ignore_review_limit,
         )?;
         self.set_config_bool_inner(BoolKey::ApplyAllParentLimits, req.apply_all_parent_limits)?;
+        self.set_config_bool_inner(BoolKey::FsrsHealthCheck, req.fsrs_health_check)?;
 
         Ok(())
     }
@@ -360,17 +376,18 @@ impl Collection {
             };
             let ignore_revlogs_before_ms = ignore_revlogs_before_ms_from_config(config)?;
             let num_of_relearning_steps = config.inner.relearn_steps.len();
-            match self.compute_params(
-                &search,
+            match self.compute_params(ComputeParamsRequest {
+                search: &search,
                 ignore_revlogs_before_ms,
-                idx as u32 + 1,
-                config_len,
-                config.fsrs_params(),
+                current_preset: idx as u32 + 1,
+                total_presets: config_len,
+                current_params: config.fsrs_params(),
                 num_of_relearning_steps,
-            ) {
+                health_check: false,
+            }) {
                 Ok(params) => {
                     println!("{}: {:?}", config.name, params.params);
-                    config.inner.fsrs_params_5 = params.params;
+                    config.inner.fsrs_params_6 = params.params;
                 }
                 Err(AnkiError::Interrupted) => return Err(AnkiError::Interrupted),
                 Err(err) => {
@@ -398,6 +415,7 @@ fn normal_deck_to_limits(deck: &NormalDeck, today: u32) -> Limits {
             .new_limit_today
             .map(|limit| limit.today == today)
             .unwrap_or_default(),
+        desired_retention: deck.desired_retention,
     }
 }
 
@@ -406,6 +424,7 @@ fn update_deck_limits(deck: &mut NormalDeck, limits: &Limits, today: u32) {
     deck.new_limit = limits.new;
     update_day_limit(&mut deck.review_limit_today, limits.review_today, today);
     update_day_limit(&mut deck.new_limit_today, limits.new_today, today);
+    deck.desired_retention = limits.desired_retention;
 }
 
 fn update_day_limit(day_limit: &mut Option<DayLimit>, new_limit: Option<u32>, today: u32) {
@@ -447,6 +466,7 @@ mod test {
         col.set_config_string_inner(StringKey::CardStateCustomizer, "")?;
         col.set_config_bool_inner(BoolKey::NewCardsIgnoreReviewLimit, false)?;
         col.set_config_bool_inner(BoolKey::ApplyAllParentLimits, false)?;
+        col.set_config_bool_inner(BoolKey::FsrsHealthCheck, true)?;
 
         // pretend we're in sync
         let stamps = col.storage.get_collection_timestamps()?;
@@ -483,6 +503,7 @@ mod test {
             apply_all_parent_limits: false,
             fsrs: false,
             fsrs_reschedule: false,
+            fsrs_health_check: true,
         };
         assert!(!col.update_deck_configs(input.clone())?.changes.had_change());
 

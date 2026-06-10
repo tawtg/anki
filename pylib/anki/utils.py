@@ -24,7 +24,6 @@ from anki.dbproxy import DBProxy
 _tmpdir: str | None
 
 try:
-    # pylint: disable=c-extension-no-member
     import orjson
 
     to_json_bytes: Callable[[Any], bytes] = orjson.dumps
@@ -156,12 +155,12 @@ def field_checksum(data: str) -> int:
 # Temp files
 ##############################################################################
 
-_tmpdir = None  # pylint: disable=invalid-name
+_tmpdir = None
 
 
 def tmpdir() -> str:
     "A reusable temp folder which we clean out on each program invocation."
-    global _tmpdir  # pylint: disable=invalid-name
+    global _tmpdir
     if not _tmpdir:
 
         def cleanup() -> None:
@@ -216,7 +215,6 @@ def call(argv: list[str], wait: bool = True, **kwargs: Any) -> int:
         try:
             info.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore
         except Exception:
-            # pylint: disable=no-member
             info.dwFlags |= subprocess._subprocess.STARTF_USESHOWWINDOW  # type: ignore
     else:
         info = None
@@ -244,8 +242,8 @@ def call(argv: list[str], wait: bool = True, **kwargs: Any) -> int:
 # OS helpers
 ##############################################################################
 
-is_mac = sys.platform.startswith("darwin")
-is_win = sys.platform.startswith("win32")
+is_mac = sys.platform == "darwin"
+is_win = sys.platform == "win32"
 # also covers *BSD
 is_lin = not is_mac and not is_win
 is_gnome = (
@@ -282,7 +280,7 @@ def plat_desc() -> str:
             elif is_win:
                 theos = f"win:{platform.win32_ver()[0]}"
             elif system == "Linux":
-                import distro  # pytype: disable=import-error # pylint: disable=import-error
+                import distro  # pytype: disable=import-error
 
                 dist_id = distro.id()
                 dist_version = distro.version()
@@ -308,18 +306,20 @@ def version_with_build() -> str:
 def int_version() -> int:
     """Anki's version as an integer in the form YYMMPP, e.g. 230900.
     (year, month, patch).
-    In 2.1.x releases, this was just the last number."""
+    In 2.1.x releases, this was just the last number.
+    Beta/rc suffixes (e.g. '26.05b1', '25.09rc1') decode to the same
+    value as the base release."""
+    import re
+
     from anki.buildinfo import version
 
-    try:
-        [year, month, patch] = version.split(".")
-    except ValueError:
-        [year, month] = version.split(".")
-        patch = "0"
+    match = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", version)
+    if not match:
+        raise ValueError(f"unrecognised version: {version!r}")
 
-    year_num = int(year)
-    month_num = int(month)
-    patch_num = int(patch)
+    year_num = int(match.group(1))
+    month_num = int(match.group(2))
+    patch_num = int(match.group(3)) if match.group(3) else 0
 
     return year_num * 10_000 + month_num * 100 + patch_num
 

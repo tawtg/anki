@@ -9,11 +9,14 @@ use std::hash::Hasher;
 use std::path::Path;
 use std::sync::Arc;
 
+use bitflags::bitflags;
 use fnv::FnvHasher;
 use fsrs::FSRS;
+use fsrs::FSRS5_DEFAULT_DECAY;
 use regex::Regex;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::params;
+use rusqlite::trace::TraceEvent;
 use rusqlite::Connection;
 use serde_json::Value;
 use unicase::UniCase;
@@ -22,6 +25,7 @@ use super::upgrades::SCHEMA_MAX_VERSION;
 use super::upgrades::SCHEMA_MIN_VERSION;
 use super::upgrades::SCHEMA_STARTING_VERSION;
 use super::SchemaVersion;
+use crate::cloze::strip_clozes;
 use crate::config::schema11::schema11_config_as_string;
 use crate::error::DbErrorKind;
 use crate::prelude::*;
@@ -29,6 +33,7 @@ use crate::scheduler::timing::local_minutes_west_for_stamp;
 use crate::scheduler::timing::v1_creation_date;
 use crate::storage::card::data::CardData;
 use crate::text::without_combining;
+use crate::text::CowMapping;
 
 fn unicase_compare(s1: &str, s2: &str) -> Ordering {
     UniCase::new(s1).cmp(&UniCase::new(s2))
@@ -46,10 +51,13 @@ pub struct SqliteStorage {
 }
 
 fn open_or_create_collection_db(path: &Path) -> Result<Connection> {
-    let mut db = Connection::open(path)?;
+    let db = Connection::open(path)?;
 
     if std::env::var("TRACESQL").is_ok() {
-        db.trace(Some(trace));
+        db.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(trace),
+        );
     }
 
     db.busy_timeout(std::time::Duration::from_secs(0))?;
@@ -69,7 +77,7 @@ fn open_or_create_collection_db(path: &Path) -> Result<Connection> {
     add_regexp_function(&db)?;
     add_regexp_fields_function(&db)?;
     add_regexp_tags_function(&db)?;
-    add_without_combining_function(&db)?;
+    add_process_text_function(&db)?;
     add_fnvhash_function(&db)?;
     add_extract_original_position_function(&db)?;
     add_extract_custom_data_function(&db)?;
@@ -106,17 +114,28 @@ fn add_field_index_function(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn add_without_combining_function(db: &Connection) -> rusqlite::Result<()> {
+bitflags! {
+    pub(crate) struct ProcessTextFlags: u8 {
+        const NoCombining = 1;
+        const StripClozes = 1 << 1;
+    }
+}
+
+fn add_process_text_function(db: &Connection) -> rusqlite::Result<()> {
     db.create_scalar_function(
-        "without_combining",
-        1,
+        "process_text",
+        2,
         FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| {
-            let text = ctx.get_raw(0).as_str()?;
-            Ok(match without_combining(text) {
-                Cow::Borrowed(_) => None,
-                Cow::Owned(o) => Some(o),
-            })
+            let mut text = Cow::from(ctx.get_raw(0).as_str()?);
+            let opt = ProcessTextFlags::from_bits_truncate(ctx.get_raw(1).as_i64()? as u8);
+            if opt.contains(ProcessTextFlags::StripClozes) {
+                text = text.map_cow(strip_clozes);
+            }
+            if opt.contains(ProcessTextFlags::NoCombining) {
+                text = text.map_cow(without_combining);
+            }
+            Ok(text.get_owned())
         },
     )
 }
@@ -291,14 +310,14 @@ fn add_extract_fsrs_variable(db: &Connection) -> rusqlite::Result<()> {
 }
 
 /// eg. extract_fsrs_retrievability(card.data, card.due, card.ivl,
-/// timing.days_elapsed, timing.next_day_at) -> float | null
+/// timing.days_elapsed, timing.next_day_at, timing.now) -> float | null
 fn add_extract_fsrs_retrievability(db: &Connection) -> rusqlite::Result<()> {
     db.create_scalar_function(
         "extract_fsrs_retrievability",
-        5,
+        6,
         FunctionFlags::SQLITE_DETERMINISTIC,
         move |ctx| {
-            assert_eq!(ctx.len(), 5, "called with unexpected number of arguments");
+            assert_eq!(ctx.len(), 6, "called with unexpected number of arguments");
             let Ok(card_data) = ctx.get_raw(0).as_str() else {
                 return Ok(None);
             };
@@ -309,62 +328,89 @@ fn add_extract_fsrs_retrievability(db: &Connection) -> rusqlite::Result<()> {
             let Ok(due) = ctx.get_raw(1).as_i64() else {
                 return Ok(None);
             };
-            let days_elapsed = if due > 365_000 {
+            let Ok(now) = ctx.get_raw(5).as_i64() else {
+                return Ok(None);
+            };
+            let seconds_elapsed = if let Some(last_review_time) = card_data.last_review_time {
+                // This and any following
+                // (x as u32).saturating_sub(y as u32)
+                // must not be changed to
+                // x.saturating_sub(y) as u32
+                // as x and y are i64's and saturating_sub will therfore allow negative numbers
+                // before converting to u32 in the latter example.
+                (now as u32).saturating_sub(last_review_time.0 as u32)
+            } else if due > 365_000 {
                 // (re)learning card in seconds
-                let Ok(next_day_at) = ctx.get_raw(4).as_i64() else {
+                let Ok(ivl) = ctx.get_raw(2).as_i64() else {
                     return Ok(None);
                 };
-                (next_day_at).saturating_sub(due) as u32 / 86_400
+                let last_review_time = (due as u32).saturating_sub(ivl as u32);
+                (now as u32).saturating_sub(last_review_time)
             } else {
                 let Ok(ivl) = ctx.get_raw(2).as_i64() else {
                     return Ok(None);
                 };
-                let Ok(days_elapsed) = ctx.get_raw(3).as_i64() else {
+                // timing.days_elapsed
+                let Ok(today) = ctx.get_raw(3).as_i64() else {
                     return Ok(None);
                 };
-                let review_day = due.saturating_sub(ivl);
-                days_elapsed.saturating_sub(review_day) as u32
+                let review_day = (due as u32).saturating_sub(ivl as u32);
+                (today as u32).saturating_sub(review_day) * 86_400
             };
-            Ok(card_data.memory_state().map(|state| {
-                FSRS::new(None)
-                    .unwrap()
-                    .current_retrievability(state.into(), days_elapsed)
-            }))
+            let decay = card_data.decay.unwrap_or(FSRS5_DEFAULT_DECAY);
+            let retrievability = card_data.memory_state().map(|state| {
+                FSRS::new(None).unwrap().current_retrievability_seconds(
+                    state.into(),
+                    seconds_elapsed,
+                    decay,
+                )
+            });
+            Ok(retrievability)
         },
     )
 }
 
 /// eg. extract_fsrs_relative_retrievability(card.data, card.due,
-/// timing.days_elapsed, card.ivl, timing.next_day_at) -> float | null. The
-/// higher the number, the higher the card's retrievability relative to the
-/// configured desired retention.
+/// card.ivl, timing.days_elapsed, timing.next_day_at, timing.now) -> float |
+/// null. The higher the number, the higher the card's retrievability relative
+/// to the configured desired retention.
 fn add_extract_fsrs_relative_retrievability(db: &Connection) -> rusqlite::Result<()> {
     db.create_scalar_function(
         "extract_fsrs_relative_retrievability",
-        5,
+        6,
         FunctionFlags::SQLITE_DETERMINISTIC,
         move |ctx| {
-            assert_eq!(ctx.len(), 5, "called with unexpected number of arguments");
+            assert_eq!(ctx.len(), 6, "called with unexpected number of arguments");
 
             let Ok(due) = ctx.get_raw(1).as_i64() else {
                 return Ok(None);
             };
-            let Ok(interval) = ctx.get_raw(3).as_i64() else {
+            let Ok(interval) = ctx.get_raw(2).as_i64() else {
                 return Ok(None);
             };
+            /*
+            // Unused
             let Ok(next_day_at) = ctx.get_raw(4).as_i64() else {
                 return Ok(None);
             };
-            let days_elapsed = if due > 365_000 {
-                // (re)learning
-                next_day_at.saturating_sub(due) as u32 / 86_400
+            */
+            let Ok(now) = ctx.get_raw(5).as_i64() else {
+                return Ok(None);
+            };
+            let secs_elapsed = if due > 365_000 {
+                // (re)learning card with due in seconds
+
+                // Don't change this to now.subtracting_sub(due) as u32
+                // for the same reasons listed in the comment
+                // in add_extract_fsrs_retrievability
+                (now as u32).saturating_sub(due as u32)
             } else {
-                let Ok(days_elapsed) = ctx.get_raw(2).as_i64() else {
+                // timing.days_elapsed
+                let Ok(today) = ctx.get_raw(3).as_i64() else {
                     return Ok(None);
                 };
                 let review_day = due.saturating_sub(interval);
-
-                days_elapsed.saturating_sub(review_day) as u32
+                (today as u32).saturating_sub(review_day as u32) * 86_400
             };
             if let Ok(card_data) = ctx.get_raw(0).as_str() {
                 if !card_data.is_empty() {
@@ -374,22 +420,31 @@ fn add_extract_fsrs_relative_retrievability(db: &Connection) -> rusqlite::Result
                     {
                         // avoid div by zero
                         desired_retrievability = desired_retrievability.max(0.0001);
+                        let decay = card_data.decay.unwrap_or(FSRS5_DEFAULT_DECAY);
+
+                        let seconds_elapsed =
+                            if let Some(last_review_time) = card_data.last_review_time {
+                                // Don't change this to now.subtracting_sub(due) as u32
+                                // for the same reasons listed in the comment
+                                // in add_extract_fsrs_retrievability
+                                (now as u32).saturating_sub(last_review_time.0 as u32)
+                            } else {
+                                secs_elapsed
+                            };
 
                         let current_retrievability = FSRS::new(None)
                             .unwrap()
-                            .current_retrievability(state.into(), days_elapsed)
+                            .current_retrievability_seconds(state.into(), seconds_elapsed, decay)
                             .max(0.0001);
 
                         return Ok(Some(
-                            // power should be the reciprocal of the value of DECAY in FSRS-rs,
-                            // which is currently -0.5
-                            -(current_retrievability.powi(-2) - 1.)
-                                / (desired_retrievability.powi(-2) - 1.),
+                            -(current_retrievability.powf(-1.0 / decay) - 1.)
+                                / (desired_retrievability.powf(-1.0 / decay) - 1.),
                         ));
                     }
                 }
             }
-
+            let days_elapsed = secs_elapsed / 86_400;
             // FSRS data missing; fall back to SM2 ordering
             Ok(Some(
                 -((days_elapsed as f32) + 0.001) / (interval as f32).max(1.0),
@@ -414,8 +469,10 @@ fn schema_version(db: &Connection) -> Result<(bool, u8)> {
     ))
 }
 
-fn trace(s: &str) {
-    println!("sql: {}", s.trim().replace('\n', " "));
+fn trace(event: TraceEvent) {
+    if let TraceEvent::Stmt(_, sql) = event {
+        println!("sql: {}", sql.trim().replace('\n', " "));
+    }
 }
 
 impl SqliteStorage {
@@ -580,7 +637,7 @@ impl SqliteStorage {
         }) {
             Ok(corrupt) => corrupt,
             Err(e) => {
-                println!("error: {:?}", e);
+                println!("error: {e:?}");
                 true
             }
         }
@@ -597,7 +654,7 @@ impl SqliteStorage {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SqlSortOrder {
     Ascending,
     Descending,
@@ -629,8 +686,7 @@ mod test {
         col.answer_easy();
 
         let timing = col.timing_today()?;
-        let order = SqlSortOrder::Ascending;
-        let sql_func = ReviewOrderSubclause::RetrievabilityFsrs { timing, order }
+        let sql_func = ReviewOrderSubclause::RelativeOverdueness { fsrs: true, timing }
             .to_string()
             .replace(" asc", "");
         let sql = format!("select {sql_func} from cards");

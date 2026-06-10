@@ -10,7 +10,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     import type { Callback } from "@tslib/typing";
     import { singleCallback } from "@tslib/typing";
     import { getContext, onDestroy, onMount } from "svelte";
-    import type { Readable } from "svelte/store";
+    import { writable, type Readable } from "svelte/store";
 
     import DropdownItem from "$lib/components/DropdownItem.svelte";
     import Icon from "$lib/components/Icon.svelte";
@@ -32,8 +32,9 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         saveNeededStore,
         opacityStateStore,
     } from "./store";
+    import { get } from "svelte/store";
     import { drawEllipse, drawPolygon, drawRectangle, drawText } from "./tools/index";
-    import { makeMaskTransparent } from "./tools/lib";
+    import { makeMaskTransparent, SHAPE_MASK_COLOR } from "./tools/lib";
     import { enableSelectable, stopDraw } from "./tools/lib";
     import {
         alignTools,
@@ -42,7 +43,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         zoomTools,
     } from "./tools/more-tools";
     import { toggleTranslucentKeyCombination } from "./tools/shortcuts";
-    import { tools } from "./tools/tool-buttons";
+    import { tools, type ActiveTool } from "./tools/tool-buttons";
     import { drawCursor } from "./tools/tool-cursor";
     import { removeUnfinishedPolygon } from "./tools/tool-polygon";
     import { undoRedoTools, undoStack } from "./tools/tool-undo-redo";
@@ -54,10 +55,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         onWheelDrag,
         onWheelDragX,
     } from "./tools/tool-zoom";
+    import { fillMask } from "./tools/tool-fill";
+    import { getCustomColours, saveCustomColours } from "@generated/backend";
 
     export let canvas;
     export let iconSize;
-    export let activeTool = "cursor";
+    export let activeTool: ActiveTool = "cursor";
     let showAlignTools = false;
     let leftPos = 82;
     let maskOpacity = false;
@@ -72,6 +75,18 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     const controlKey = "Control";
     const shiftKey = "Shift";
     let removeHandlers: Callback;
+    let colourRef: HTMLInputElement | undefined;
+    const colour = writable(SHAPE_MASK_COLOR);
+
+    const customColorPickerPalette = writable<string[]>([]);
+
+    async function loadCustomColours() {
+        customColorPickerPalette.set(
+            (await getCustomColours({})).colours.filter(
+                (hex) => !hex.startsWith("#ffffff"),
+            ),
+        );
+    }
 
     function onClick(event: MouseEvent) {
         const upperCanvas = document.querySelector(".upper-canvas");
@@ -168,7 +183,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         }
     }
 
-    const handleToolChanges = (newActiveTool: string) => {
+    const handleToolChanges = (newActiveTool: ActiveTool, clicked: boolean = false) => {
         disableFunctions();
         enableSelectable(canvas, true);
         // remove unfinished polygon when switching to other tools
@@ -193,6 +208,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                     handleToolChanges(activeTool);
                 });
                 break;
+            case "fill-mask":
+                if (clicked) {
+                    colourRef?.click();
+                }
+                fillMask(canvas, colour);
+                break;
         }
     };
 
@@ -213,7 +234,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     }
 
     onMount(() => {
-        opacityStateStore.set(maskOpacity);
+        maskOpacity = get(opacityStateStore);
         removeHandlers = singleCallback(
             on(document, "click", onClick),
             on(window, "mousemove", onMousemove),
@@ -224,6 +245,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
             on(document, "touchstart", onTouchstart),
             on(document, "mousemove", onMousemoveDocument),
         );
+        loadCustomColours();
     });
 
     onDestroy(() => {
@@ -231,16 +253,34 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
     });
 </script>
 
-<div class="tool-bar-container">
+<datalist id="colour-palette">
+    <option>{SHAPE_MASK_COLOR}</option>
+    {#each $customColorPickerPalette as colour}
+        <option>{colour}</option>
+    {/each}
+</datalist>
+
+<input
+    type="color"
+    bind:this={colourRef}
+    style:display="none"
+    list="colour-palette"
+    value={SHAPE_MASK_COLOR}
+    on:input={(e) => ($colour = e.currentTarget!.value)}
+    on:change={() => saveCustomColours({})}
+/>
+
+<div class="tool-bar-container" style:--fill-tool-colour={$colour}>
     {#each tools as tool}
+        {@const active = activeTool == tool.id}
         <IconButton
-            class="tool-icon-button {activeTool == tool.id ? 'active-tool' : ''}"
-            {iconSize}
+            class="tool-icon-button {active ? 'active-tool' : ''} {tool.id}"
+            iconSize={iconSize * (tool["iconSizeMult"] ?? 1)}
             tooltip="{tool.tooltip()} ({getPlatformString(tool.shortcut)})"
-            active={activeTool === tool.id}
+            {active}
             on:click={() => {
                 activeTool = tool.id;
-                handleToolChanges(activeTool);
+                handleToolChanges(activeTool, true);
             }}
         >
             <Icon icon={tool.icon} />
@@ -250,7 +290,7 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                 keyCombination={tool.shortcut}
                 on:action={() => {
                     activeTool = tool.id;
-                    handleToolChanges(activeTool);
+                    handleToolChanges(activeTool, true);
                 }}
             />
         {/if}
@@ -299,7 +339,10 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
                         ? 'left-border-radius'
                         : 'right-border-radius'}"
                     {iconSize}
-                    on:click={tool.action}
+                    on:click={() => {
+                        tool.action();
+                        handleToolChanges(activeTool);
+                    }}
                     tooltip="{tool.tooltip()} ({getPlatformString(tool.shortcut)})"
                     disabled={tool.name === "undo"
                         ? !$undoStack.undoable
@@ -464,13 +507,8 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         display: flex;
         overflow-y: scroll;
         z-index: 99;
-        margin-left: 106px;
+        margin-inline-start: 106px;
         margin-top: 2px;
-    }
-
-    :global([dir="rtl"] .top-tool-bar-container) {
-        margin-left: unset;
-        margin-right: 28px;
     }
 
     .undo-redo-button {
@@ -546,6 +584,12 @@ License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
         z-index: 99;
         background: var(--canvas-elevated);
         padding-bottom: 100px;
+    }
+
+    :global(.fill-mask svg) {
+        fill: var(--fill-tool-colour) !important;
+        stroke: black;
+        stroke-width: 1px;
     }
 
     :global([dir="rtl"] .tool-bar-container) {

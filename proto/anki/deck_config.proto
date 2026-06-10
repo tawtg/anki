@@ -23,6 +23,10 @@ service DeckConfigService {
   rpc GetDeckConfigsForUpdate(decks.DeckId) returns (DeckConfigsForUpdate);
   rpc UpdateDeckConfigs(UpdateDeckConfigsRequest)
       returns (collection.OpChanges);
+  rpc GetIgnoredBeforeCount(GetIgnoredBeforeCountRequest)
+      returns (GetIgnoredBeforeCountResponse);
+  rpc GetRetentionWorkload(GetRetentionWorkloadRequest)
+      returns (GetRetentionWorkloadResponse);
 }
 
 // Implicitly includes any of the above methods that are not listed in the
@@ -31,6 +35,25 @@ service BackendDeckConfigService {}
 
 message DeckConfigId {
   int64 dcid = 1;
+}
+
+message GetRetentionWorkloadRequest {
+  repeated float w = 1;
+  string search = 2;
+}
+
+message GetRetentionWorkloadResponse {
+  map<uint32, float> costs = 1;
+}
+
+message GetIgnoredBeforeCountRequest {
+  string ignore_revlogs_before_date = 1;
+  string search = 2;
+}
+
+message GetIgnoredBeforeCountResponse {
+  uint64 included = 1;
+  uint64 total = 2;
 }
 
 message DeckConfig {
@@ -81,6 +104,7 @@ message DeckConfig {
       REVIEW_CARD_ORDER_EASE_DESCENDING = 6;
       REVIEW_CARD_ORDER_RETRIEVABILITY_ASCENDING = 7;
       REVIEW_CARD_ORDER_RETRIEVABILITY_DESCENDING = 11;
+      REVIEW_CARD_ORDER_RELATIVE_OVERDUENESS = 12;
       REVIEW_CARD_ORDER_RANDOM = 8;
       REVIEW_CARD_ORDER_ADDED = 9;
       REVIEW_CARD_ORDER_REVERSE_ADDED = 10;
@@ -110,9 +134,10 @@ message DeckConfig {
 
     repeated float fsrs_params_4 = 3;
     repeated float fsrs_params_5 = 5;
+    repeated float fsrs_params_6 = 6;
 
     // consider saving remaining ones for fsrs param changes
-    reserved 6 to 8;
+    reserved 7 to 8;
 
     uint32 new_per_day = 9;
     uint32 reviews_per_day = 10;
@@ -193,6 +218,8 @@ message DeckConfigsForUpdate {
       bool review_today_active = 5;
       // Whether new_today applies to today or a past day.
       bool new_today_active = 6;
+      // Deck-specific desired retention override
+      optional float desired_retention = 7;
     }
     string name = 1;
     int64 config_id = 2;
@@ -209,6 +236,8 @@ message DeckConfigsForUpdate {
   // only applies to v3 scheduler
   bool new_cards_ignore_review_limit = 7;
   bool fsrs = 8;
+  bool fsrs_health_check = 11;
+  bool fsrs_legacy_evaluate = 12;
   bool apply_all_parent_limits = 9;
   uint32 days_since_last_fsrs_optimize = 10;
 }
@@ -232,4 +261,5 @@ message UpdateDeckConfigsRequest {
   bool fsrs = 8;
   bool apply_all_parent_limits = 9;
   bool fsrs_reschedule = 10;
+  bool fsrs_health_check = 11;
 }

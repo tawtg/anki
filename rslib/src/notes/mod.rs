@@ -87,7 +87,7 @@ impl TryFrom<anki_proto::notes::AddNoteRequest> for AddNoteRequest {
 }
 
 impl Collection {
-    pub fn add_note(&mut self, note: &mut Note, did: DeckId) -> Result<OpOutput<()>> {
+    pub fn add_note(&mut self, note: &mut Note, did: DeckId) -> Result<OpOutput<usize>> {
         self.transact(Op::AddNote, |col| col.add_note_inner(note, did))
     }
 
@@ -270,7 +270,7 @@ impl Note {
             self.fields
                 .last_mut()
                 .unwrap()
-                .push_str(&format!("; {}", last));
+                .push_str(&format!("; {last}"));
         }
     }
 }
@@ -372,7 +372,7 @@ impl Collection {
         Ok(())
     }
 
-    pub(crate) fn add_note_inner(&mut self, note: &mut Note, did: DeckId) -> Result<()> {
+    pub(crate) fn add_note_inner(&mut self, note: &mut Note, did: DeckId) -> Result<usize> {
         let nt = self
             .get_notetype(note.notetype_id)?
             .or_invalid("missing note type")?;
@@ -383,10 +383,11 @@ impl Collection {
         note.prepare_for_update(ctx.notetype, normalize_text)?;
         note.set_modified(ctx.usn);
         self.add_note_only_undoable(note)?;
-        self.generate_cards_for_new_note(&ctx, note, did)?;
+        let count = self.generate_cards_for_new_note(&ctx, note, did)?;
         self.set_last_deck_for_notetype(note.notetype_id, did)?;
         self.set_last_notetype_for_deck(did, note.notetype_id)?;
-        self.set_current_notetype_id(note.notetype_id)
+        self.set_current_notetype_id(note.notetype_id)?;
+        Ok(count)
     }
 
     pub fn update_note(&mut self, note: &mut Note) -> Result<OpOutput<()>> {
@@ -590,9 +591,9 @@ impl Collection {
         Ok(changed_notes)
     }
 
-    /// Check if the note's first field is empty or a duplicate. Then for cloze
-    /// notetypes, check if there is a cloze in a non-cloze field or if there's
-    /// no cloze at all. For other notetypes, just check if there's a cloze.
+    /// Check if there is a cloze in a non-cloze field. Then check if the
+    /// note's first field is empty. For cloze notetypes, check whether there
+    /// is a cloze at all. Finally, check if the first field is a duplicate.
     pub fn note_fields_check(&mut self, note: &Note) -> Result<NoteFieldsState> {
         Ok({
             let cloze_state = self.field_cloze_check(note)?;

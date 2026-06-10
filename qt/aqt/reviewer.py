@@ -17,14 +17,16 @@ import aqt.browser
 import aqt.operations
 from anki.cards import Card, CardId
 from anki.collection import Config, OpChanges, OpChangesWithCount
+from anki.lang import with_collapsed_whitespace
 from anki.scheduler.base import ScheduleCardsAsNew
-from anki.scheduler.v3 import CardAnswer, QueuedCards
-from anki.scheduler.v3 import Scheduler as V3Scheduler
 from anki.scheduler.v3 import (
+    CardAnswer,
+    QueuedCards,
     SchedulingContext,
     SchedulingStates,
     SetSchedulingStatesRequest,
 )
+from anki.scheduler.v3 import Scheduler as V3Scheduler
 from anki.tags import MARKED_TAG
 from anki.types import assert_exhaustive
 from anki.utils import is_mac
@@ -333,7 +335,7 @@ class Reviewer:
 <div id="_mark" hidden>&#x2605;</div>
 <div id="_flag" hidden>&#x2691;</div>
 {fade}
-<div id="qa"></div>
+<div id="qa" dir="auto"></div>
 {extra}
 """
 
@@ -551,9 +553,11 @@ class Reviewer:
         def after_answer(changes: OpChanges) -> None:
             if gui_hooks.reviewer_did_answer_card.count() > 0:
                 self.card.load()
+            # v3 scheduler doesn't report this
+            suspended = self.card is not None and self.card.queue < 0
             self._after_answering(ease)
             if sched.state_is_leech(answer.new_state):
-                self.onLeech()
+                self.onLeech(suspended)
 
         self.state = "transition"
         answer_card(parent=self.mw, answer=answer).success(
@@ -592,10 +596,9 @@ class Reviewer:
     def _shortcutKeys(
         self,
     ) -> Sequence[tuple[str, Callable] | tuple[Qt.Key, Callable]]:
-
-        def generate_default_answer_keys() -> (
-            Generator[tuple[str, partial], None, None]
-        ):
+        def generate_default_answer_keys() -> Generator[
+            tuple[str, partial], None, None
+        ]:
             for ease in aqt.mw.pm.default_answer_keys:
                 key = aqt.mw.pm.get_answer_key(ease)
                 if not key:
@@ -683,6 +686,9 @@ class Reviewer:
             play_clicked_audio(url, self.card)
         elif url.startswith("updateToolbar"):
             self.mw.toolbarWeb.update_background_image()
+        elif url == "repaintNeeded":
+            # Ensure stale frames showing previous or corrupt content are not displayed (#3668)
+            self.web.update()
         elif url == "statesMutated":
             self._states_mutated = True
         else:
@@ -949,11 +955,10 @@ timerStopped = false;
     # Leeches
     ##########################################################################
 
-    def onLeech(self, card: Card | None = None) -> None:
+    def onLeech(self, suspended: bool = False) -> None:
         # for now
         s = tr.studying_card_was_a_leech()
-        # v3 scheduler doesn't report this
-        if card and card.queue < 0:
+        if suspended:
             s += f" {tr.studying_it_has_been_suspended()}"
         tooltip(s)
 
@@ -965,11 +970,15 @@ timerStopped = false;
         elapsed = self.mw.col.timeboxReached()
         if elapsed:
             assert not isinstance(elapsed, bool)
-            part1 = tr.studying_card_studied_in(count=elapsed[1])
-            mins = int(round(elapsed[0] / 60))
-            part2 = tr.studying_minute(count=mins)
+            cards_val = elapsed[1]
+            minutes_val = int(round(elapsed[0] / 60))
+            message = with_collapsed_whitespace(
+                tr.studying_card_studied_in_minute(
+                    cards=cards_val, minutes=str(minutes_val)
+                )
+            )
             fin = tr.studying_finish()
-            diag = askUserDialog(f"{part1} {part2}", [tr.studying_continue(), fin])
+            diag = askUserDialog(message, [tr.studying_continue(), fin])
             diag.setIcon(QMessageBox.Icon.Information)
             if diag.run() == fin:
                 self.mw.moveToState("deckBrowser")

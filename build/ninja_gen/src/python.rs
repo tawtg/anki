@@ -3,12 +3,14 @@
 
 use std::env;
 
+use anki_io::read_file;
 use anyhow::Result;
 use camino::Utf8Path;
 use maplit::hashmap;
 
 use crate::action::BuildAction;
 use crate::archives::download_and_extract;
+use crate::archives::with_exe;
 use crate::archives::OnlineArchive;
 use crate::archives::Platform;
 use crate::hash::simple_hash;
@@ -16,82 +18,113 @@ use crate::input::BuildInput;
 use crate::inputs;
 use crate::Build;
 
-/// When updating this, pyoxidizer.bzl needs updating too, but it uses different
-/// files.
-pub fn python_archive(platform: Platform) -> OnlineArchive {
+// To update, run 'cargo run --bin update_uv'.
+// You'll need to do this when bumping Python versions, as uv bakes in
+// the latest known version.
+// When updating Python version, make sure to update version tag in BuildWheel
+// too.
+pub fn uv_archive(platform: Platform) -> OnlineArchive {
     match platform {
         Platform::LinuxX64 => {
             OnlineArchive {
-                url: "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.9.18+20240107-x86_64_v2-unknown-linux-gnu-install_only.tar.gz",
-                sha256: "9426bca501ae0a257392b10719e2e20ff5fa5e22a3ce4599d6ad0b3139f86417",
+                url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-x86_64-unknown-linux-gnu.tar.gz",
+                sha256: "56dd1b66701ecb62fe896abb919444e4b83c5e8645cca953e6ddd496ff8a0feb",
             }
-        }
+        },
         Platform::LinuxArm => {
             OnlineArchive {
-                url: "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.9.18+20240107-aarch64-unknown-linux-gnu-install_only.tar.gz",
-                sha256: "7d19e1ecd6e582423f7c74a0c67491eaa982ce9d5c5f35f0e4289f83127abcb8",
+                url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-aarch64-unknown-linux-gnu.tar.gz",
+                sha256: "eee8dd658d20e5ac85fec9c2326b6cbc9d83a1eef09ef07433e58698ac849591",
             }
-        }
+        },
         Platform::MacX64 => {
             OnlineArchive {
-                url: "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.9.18+20240107-x86_64-apple-darwin-install_only.tar.gz",
-                sha256: "5a0bf895a5cb08d6d008140abb41bb2c8cd638a665273f7d8eb258bc89de439b",
+                url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-x86_64-apple-darwin.tar.gz",
+                sha256: "c59d73bf34b58bc8e33a11629f7a255c11789fd00f03cd3e68ab2d1603645de9",
             }
-        }
+        },
         Platform::MacArm => {
             OnlineArchive {
-                url: "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.9.18+20240107-aarch64-apple-darwin-install_only.tar.gz",
-                sha256: "bf0cd90204a2cc6da48cae1e4b32f48c9f7031fbe1238c5972104ccb0155d368",
+                url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-aarch64-apple-darwin.tar.gz",
+                sha256: "c729adb365114e844dd7f9316313a7ed6443b89bb5681d409eebac78b0bd06c8",
             }
-        }
+        },
         Platform::WindowsX64 => {
             OnlineArchive {
-                url: "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.9.18+20240107-x86_64-pc-windows-msvc-shared-install_only.tar.gz",
-                sha256: "8f0544cd593984f7ecb90c685931249c579302124b9821064873f3a14ed07005",
+                url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-x86_64-pc-windows-msvc.zip",
+                sha256: "c84629a56e0706b69a47ea35862208af827cb6fbfa1d0ca763c52c67594637e8",
+            }
+        },
+        Platform::WindowsArm => {
+            OnlineArchive {
+                url: "https://github.com/astral-sh/uv/releases/download/0.11.8/uv-aarch64-pc-windows-msvc.zip",
+                sha256: "bb48716e74e4998993f15bc57a55e4d0d73ccbd27a66d7cbed37605f7c67d747",
             }
         }
     }
 }
 
-/// Returns the Python binary, which can be used to create venvs.
-/// Downloads if missing.
-pub fn setup_python(build: &mut Build) -> Result<()> {
-    // if changing this, make sure you remove out/pyenv
-    let python_binary = match env::var("PYTHON_BINARY") {
+pub fn setup_uv(build: &mut Build, platform: Platform) -> Result<()> {
+    let uv_binary = match env::var("UV_BINARY") {
         Ok(path) => {
             assert!(
                 Utf8Path::new(&path).is_absolute(),
-                "PYTHON_BINARY must be absolute"
+                "UV_BINARY must be absolute"
             );
             path.into()
         }
         Err(_) => {
             download_and_extract(
                 build,
-                "python",
-                python_archive(build.host_platform),
+                "uv",
+                uv_archive(platform),
                 hashmap! { "bin" => [
-                    if cfg!(windows) { "python.exe" } else { "bin/python3"}
-                ] },
+                with_exe("uv")
+                                ] },
             )?;
-            inputs![":extract:python:bin"]
+            inputs![":extract:uv:bin"]
         }
     };
-    build.add_dependency("python_binary", python_binary);
+    build.add_dependency("uv_binary", uv_binary);
+
+    // Our macOS packaging needs access to the x86 binary on ARM.
+    if cfg!(target_arch = "aarch64") {
+        download_and_extract(
+            build,
+            "uv_mac_x86",
+            uv_archive(Platform::MacX64),
+            hashmap! { "bin" => [
+                with_exe("uv")
+            ] },
+        )?;
+    }
+    // Our Linux packaging needs access to the ARM binary on x86
+    if cfg!(target_arch = "x86_64") {
+        download_and_extract(
+            build,
+            "uv_lin_arm",
+            uv_archive(Platform::LinuxArm),
+            hashmap! { "bin" => [
+                with_exe("uv")
+            ] },
+        )?;
+    }
+
     Ok(())
 }
 
 pub struct PythonEnvironment {
-    pub folder: &'static str,
-    pub base_requirements_txt: BuildInput,
-    pub requirements_txt: BuildInput,
+    pub deps: BuildInput,
+    // todo: rename
+    pub venv_folder: &'static str,
+    pub extra_args: &'static str,
     pub extra_binary_exports: &'static [&'static str],
 }
 
 impl BuildAction for PythonEnvironment {
     fn command(&self) -> &str {
         if env::var("OFFLINE_BUILD").is_err() {
-            "$runner pyenv $python_binary $builddir/$pyenv_folder $system_pkgs $base_requirements $requirements"
+            "$runner pyenv $uv_binary $builddir/$pyenv_folder $python -- $extra_args"
         } else {
             "echo 'OFFLINE_BUILD is set. Using the existing PythonEnvironment.'"
         }
@@ -99,7 +132,7 @@ impl BuildAction for PythonEnvironment {
 
     fn files(&mut self, build: &mut impl crate::build::FilesHandle) {
         let bin_path = |binary: &str| -> Vec<String> {
-            let folder = self.folder;
+            let folder = self.venv_folder;
             let path = if cfg!(windows) {
                 format!("{folder}/scripts/{binary}.exe")
             } else {
@@ -108,17 +141,36 @@ impl BuildAction for PythonEnvironment {
             vec![path]
         };
 
+        build.add_inputs("", &self.deps);
+        build.add_variable("pyenv_folder", self.venv_folder);
         if env::var("OFFLINE_BUILD").is_err() {
-            build.add_inputs("python_binary", inputs![":python_binary"]);
-            build.add_variable("pyenv_folder", self.folder);
-            build.add_inputs("base_requirements", &self.base_requirements_txt);
-            build.add_inputs("requirements", &self.requirements_txt);
-            build.add_outputs_ext("pip", bin_path("pip"), true);
+            build.add_inputs("uv_binary", inputs![":uv_binary"]);
+
+            // Set --python flag to .python-version (--no-config ignores it)
+            // override if PYTHON_BINARY is set
+            let python = env::var("PYTHON_BINARY").unwrap_or_else(|_| {
+                let python_version =
+                    read_file(".python-version").expect("No .python-version in cwd");
+                let python_version_str =
+                    String::from_utf8(python_version).expect("Invalid UTF-8 in .python-version");
+                let version = python_version_str.trim();
+                // On Windows ARM64, uv defaults to x64 interpreters
+                // (astral-sh/uv#12906), so request the native build explicitly.
+                if cfg!(all(windows, target_arch = "aarch64")) {
+                    format!("cpython-{version}-windows-aarch64-none")
+                } else {
+                    version.to_string()
+                }
+            });
+            build.add_variable("python", python);
+            build.add_variable("extra_args", self.extra_args);
         }
+
         build.add_outputs_ext("bin", bin_path("python"), true);
         for binary in self.extra_binary_exports {
             build.add_outputs_ext(*binary, bin_path(binary), true);
         }
+        build.add_output_stamp(format!("{}/.stamp", self.venv_folder));
     }
 
     fn check_output_timestamps(&self) -> bool {
@@ -154,31 +206,19 @@ impl BuildAction for PythonTypecheck {
 struct PythonFormat<'a> {
     pub inputs: &'a BuildInput,
     pub check_only: bool,
-    pub isort_ini: &'a BuildInput,
 }
 
 impl BuildAction for PythonFormat<'_> {
     fn command(&self) -> &str {
-        "$black -t py39 -q $check --color $in && $
-         $isort --color --settings-path $isort_ini $check $in"
+        "$ruff format $mode $in && $ruff check --select I --fix $in"
     }
 
     fn files(&mut self, build: &mut impl crate::build::FilesHandle) {
         build.add_inputs("in", self.inputs);
-        build.add_inputs("black", inputs![":pyenv:black"]);
-        build.add_inputs("isort", inputs![":pyenv:isort"]);
+        build.add_inputs("ruff", inputs![":pyenv:ruff"]);
 
         let hash = simple_hash(self.inputs);
-        build.add_env_var("BLACK_CACHE_DIR", "out/python/black.cache.{hash}");
-        build.add_inputs("isort_ini", self.isort_ini);
-        build.add_variable(
-            "check",
-            if self.check_only {
-                "--diff --check"
-            } else {
-                ""
-            },
-        );
+        build.add_variable("mode", if self.check_only { "--check" } else { "" });
 
         build.add_output_stamp(format!(
             "tests/python_format.{}.{hash}",
@@ -188,13 +228,11 @@ impl BuildAction for PythonFormat<'_> {
 }
 
 pub fn python_format(build: &mut Build, group: &str, inputs: BuildInput) -> Result<()> {
-    let isort_ini = &inputs![".isort.cfg"];
     build.add_action(
         format!("check:format:python:{group}"),
         PythonFormat {
             inputs: &inputs,
             check_only: true,
-            isort_ini,
         },
     )?;
 
@@ -203,34 +241,39 @@ pub fn python_format(build: &mut Build, group: &str, inputs: BuildInput) -> Resu
         PythonFormat {
             inputs: &inputs,
             check_only: false,
-            isort_ini,
         },
     )?;
     Ok(())
 }
 
-pub struct PythonLint {
+pub struct RuffCheck {
     pub folders: &'static [&'static str],
-    pub pylint_ini: BuildInput,
     pub deps: BuildInput,
+    pub check_only: bool,
 }
 
-impl BuildAction for PythonLint {
+impl BuildAction for RuffCheck {
     fn command(&self) -> &str {
-        "$pylint --rcfile $pylint_ini -sn -j $cpus $folders"
+        "$ruff check $folders $mode"
     }
 
     fn files(&mut self, build: &mut impl crate::build::FilesHandle) {
         build.add_inputs("", &self.deps);
-        build.add_inputs("pylint", inputs![":pyenv:pylint"]);
-        build.add_inputs("pylint_ini", &self.pylint_ini);
+        build.add_inputs("", inputs![".ruff.toml"]);
+        build.add_inputs("ruff", inputs![":pyenv:ruff"]);
         build.add_variable("folders", self.folders.join(" "));
-        // On a 16 core system, values above 10 do not improve wall clock time,
-        // but waste extra cores that could be working on other tests.
-        build.add_variable("cpus", num_cpus::get().min(10).to_string());
+        build.add_variable(
+            "mode",
+            if self.check_only {
+                ""
+            } else {
+                "--fix --unsafe-fixes"
+            },
+        );
 
         let hash = simple_hash(&self.deps);
-        build.add_output_stamp(format!("tests/python_lint.{hash}"));
+        let kind = if self.check_only { "check" } else { "fix" };
+        build.add_output_stamp(format!("tests/python_ruff.{kind}.{hash}"));
     }
 }
 
@@ -261,5 +304,25 @@ impl BuildAction for PythonTest {
 
     fn hide_progress(&self) -> bool {
         true
+    }
+}
+
+pub struct Complexipy {
+    pub folders: &'static [&'static str],
+    pub deps: BuildInput,
+}
+
+impl BuildAction for Complexipy {
+    fn command(&self) -> &str {
+        "$complexipy $folders --suggest-refactors"
+    }
+
+    fn files(&mut self, build: &mut impl crate::build::FilesHandle) {
+        build.add_inputs("", &self.deps);
+        build.add_inputs("", inputs![".complexipy.toml"]);
+        build.add_inputs("complexipy", inputs![":pyenv:complexipy"]);
+        build.add_variable("folders", self.folders.join(" "));
+        let hash = simple_hash(&self.deps);
+        build.add_output_stamp(format!("tests/complexipy.{hash}"));
     }
 }
